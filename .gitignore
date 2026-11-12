@@ -1,0 +1,40 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# builds
+.next/
+out/
+dist/
+build/
+.turbo/
+target/
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.local.toml
+
+# local data / exports
+data/
+backups/
+exports/
+.trial/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# tooling
+.DS_Store
+coverage/
+playwright-report/
+test-results/
+.playwright-browsers/
+
+# editors
+.vscode/
+.idea/

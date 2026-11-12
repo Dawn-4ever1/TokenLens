@@ -1,0 +1,10 @@
+# The build context is the repository root; send only what the image needs.
+*
+!Cargo.toml
+!Cargo.lock
+!schema/
+!config/pricing-overrides.json
+!crates/usage-event/
+!server/
+**/*.sqlite*
+**/.env*

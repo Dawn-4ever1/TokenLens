@@ -1,0 +1,39 @@
+# TokenLens sync server. Run from this directory:
+#   docker compose up -d --build
+# Data lives in ./data, daily copies in ./backups (see README.md).
+name: tokenlens
+
+services:
+  dashboard:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: tokenlens-server:local
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Fixed here so .env cannot open the port to the public internet.
+      LISTEN_ADDR: "0.0.0.0:8787"
+      LISTEN_ALLOW_NON_LOOPBACK: "1"
+      DATABASE_PATH: /app/data/tokenlens.sqlite
+    volumes:
+      - ./data:/app/data
+      - ./backups:/app/backups
+    ports:
+      # Only Caddy on this machine can reach it; Caddy adds TLS.
+      - "127.0.0.1:8787:8787"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

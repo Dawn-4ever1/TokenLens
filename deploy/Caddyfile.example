@@ -1,0 +1,18 @@
+# Add this block to the server's Caddyfile (replace the domain with yours),
+# then `caddy validate --config <Caddyfile>` and `caddy reload`. Caddy gets the
+# TLS certificate by itself once the domain's DNS record points at the server.
+#
+# If Caddy itself runs in Docker, 127.0.0.1 is the Caddy container, not the
+# host: put both on one Docker network and use dashboard:8787 instead.
+
+dashboard.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8787
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		-Server
+	}
+	# Caddy leaves Authorization and Cookie out of access logs by default;
+	# never turn on the global `log_credentials` option for this site.
+}

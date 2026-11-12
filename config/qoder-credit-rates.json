@@ -1,0 +1,64 @@
+{
+  "rate_version": "bridge-2026-11-10",
+  "source": "Read-only transcription of the numeric rates and mixes from the existing Qoder bridge's shared calibration table on 2026-11-10; calibrated estimates, not official token counts.",
+  "defaultTokensPerCredit": 20000,
+  "defaultMix": {
+    "input": 0.09,
+    "cacheRead": 0.90,
+    "output": 0.01
+  },
+  "models": {
+    "gmodel": {
+      "tokensPerCredit": 43700,
+      "mix": { "input": 0.0553, "cacheRead": 0.93795, "output": 0.00675 }
+    },
+    "quest-ultimate": {
+      "tokensPerCredit": 10800,
+      "mix": { "input": 0.08355, "cacheRead": 0.90713, "output": 0.00932 }
+    },
+    "smodel": {
+      "tokensPerCredit": 8500,
+      "mix": { "input": 0.10745, "cacheRead": 0.88624, "output": 0.00631 }
+    },
+    "cmodel": {
+      "tokensPerCredit": 6450,
+      "mix": { "input": 0.27841, "cacheRead": 0.69204, "output": 0.02955 }
+    },
+    "qmodel_38max": {
+      "tokensPerCredit": 28100,
+      "mix": { "input": 0.08039, "cacheRead": 0.9095, "output": 0.01012 }
+    },
+    "quest-auto": {
+      "tokensPerCredit": 43200,
+      "mix": { "input": 0.09436, "cacheRead": 0.8965, "output": 0.00914 }
+    },
+    "performance": {
+      "tokensPerCredit": 19600,
+      "mix": { "input": 0.10642, "cacheRead": 0.87859, "output": 0.01499 }
+    },
+    "fast": {
+      "tokensPerCredit": 27000,
+      "mix": { "input": 0.10642, "cacheRead": 0.87859, "output": 0.01499 }
+    },
+    "efficient": {
+      "tokensPerCredit": 72000,
+      "mix": { "input": 0.09, "cacheRead": 0.9, "output": 0.01 }
+    },
+    "gfmodel": {
+      "tokensPerCredit": 158000,
+      "mix": { "input": 0.20411, "cacheRead": 0.76415, "output": 0.03174 }
+    },
+    "dfmodel": {
+      "tokensPerCredit": 158000,
+      "mix": { "input": 0.10313, "cacheRead": 0.88232, "output": 0.01455 }
+    },
+    "qfmodel": {
+      "tokensPerCredit": 158000,
+      "mix": { "input": 0.08576, "cacheRead": 0.90122, "output": 0.01302 }
+    },
+    "kmodel_latest": {
+      "tokensPerCredit": 16400,
+      "mix": { "input": 0.95048, "cacheRead": 0, "output": 0.04952 }
+    }
+  }
+}

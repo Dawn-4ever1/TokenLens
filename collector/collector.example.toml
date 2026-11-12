@@ -1,0 +1,8 @@
+# Optional: copy this file to ~/.config/tokenlens/collector.toml.
+# If the file is absent, these defaults are used.
+
+clients = "auto"
+exclude = []
+
+# Alternatively, explicitly select supported clients (qoder is always excluded):
+# clients = ["claude", "codex", "openclaw", "zcode", "dsh"]

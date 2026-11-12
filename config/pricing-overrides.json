@@ -1,0 +1,4 @@
+{
+  "notes": "TokenLens curated prices (D042). Same format as tokscale custom-pricing.json; wins over the LiteLLM, OpenRouter and models.dev catalogs. USD per million tokens. Every entry names its source and the date it was checked.",
+  "models": {}
+}

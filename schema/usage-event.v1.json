@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tokenlens.invalid/schema/usage-event.v1.json",
+  "title": "UsageEvent v1",
+  "description": "Synthetic-testable numeric usage event; no source content or paths.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "eventKey": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "client": { "type": "string", "minLength": 1 },
+    "sessionId": { "type": "string", "minLength": 1 },
+    "parentSessionId": { "type": ["string", "null"], "minLength": 1 },
+    "modelId": { "type": "string", "minLength": 1 },
+    "providerId": { "type": ["string", "null"], "minLength": 1 },
+    "ts": { "type": "integer", "minimum": 0 },
+    "input": { "type": "integer", "minimum": 0 },
+    "output": { "type": "integer", "minimum": 0 },
+    "cacheRead": { "type": "integer", "minimum": 0 },
+    "cacheWrite": { "type": "integer", "minimum": 0 },
+    "cacheWrite1h": { "type": "integer", "minimum": 0 },
+    "reasoning": { "type": "integer", "minimum": 0 },
+    "costUsd": { "type": ["number", "null"], "minimum": 0 },
+    "costSource": { "type": "string" },
+    "precision": { "type": "string", "enum": ["measured", "estimated", "unknown"] },
+    "credits": { "type": ["number", "null"], "minimum": 0 },
+    "rateVersion": { "type": ["string", "null"], "minLength": 1 },
+    "projectHash": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "projectLabel": { "type": ["string", "null"], "minLength": 1 },
+    "messageCount": { "type": "integer" },
+    "isTurnStart": { "type": "boolean" },
+    "durationMs": { "type": ["integer", "null"] },
+    "pricingModelId": { "type": ["string", "null"], "minLength": 1 },
+    "billingProvider": { "type": ["string", "null"], "minLength": 1 },
+    "serviceTier": { "type": ["string", "null"], "minLength": 1 }
+  },
+  "required": [
+    "eventKey",
+    "client",
+    "sessionId",
+    "modelId",
+    "ts",
+    "input",
+    "output",
+    "cacheRead",
+    "cacheWrite",
+    "cacheWrite1h",
+    "reasoning",
+    "costSource",
+    "precision",
+    "messageCount",
+    "isTurnStart"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "precision": { "const": "estimated" } },
+        "required": ["precision"]
+      },
+      "then": {
+        "required": ["credits", "rateVersion"],
+        "properties": {
+          "credits": { "type": "number", "minimum": 0 },
+          "rateVersion": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "rateVersion": { "type": "string" } },
+        "required": ["rateVersion"]
+      },
+      "then": {
+        "required": ["credits"],
+        "properties": { "precision": { "const": "estimated" } }
+      }
+    }
+  ]
+}

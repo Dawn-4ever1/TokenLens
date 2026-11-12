@@ -1,0 +1,127 @@
+# Builds the desktop installers and publishes them as a GitHub Release (D043).
+#
+# Release: node scripts/release-version.mjs set X.Y.Z, commit, then
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# The tag must match the version in the files, or nothing is built.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.ref_name }}
+  GH_TOKEN: ${{ github.token }}
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Check version and open a draft release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Tag matches the version in every file
+        run: node scripts/release-version.mjs check "$TAG"
+      - name: Draft release
+        run: |
+          version="${TAG#v}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; builds will replace its installers."
+          else
+            sed "s/{{VERSION}}/$version/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
+            gh release create "$TAG" --draft --verify-tag \
+              --title "TokenLens $version" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows installer
+            os: windows-latest
+          - name: Mac dmg (Apple silicon)
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Rust stable
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-${{ runner.os }}-
+      - name: Frontend dependencies
+        working-directory: app
+        run: npm ci
+      # The cached target folder may still hold an earlier version's installer.
+      - name: Remove old installers
+        shell: bash
+        run: rm -rf target/release/bundle
+      # The bundle scripts strip the build machine's paths from the binary
+      # and fail if any remain; the Mac one also verifies the ad-hoc signature.
+      - name: Build Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/bundle-windows.ps1
+      - name: Build Mac dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/bundle-mac.sh
+      - name: Upload Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem target/release/bundle/nsis -Filter '*-setup.exe')
+          if ($files.Count -ne 1) { throw "expected one installer, found $($files.Count)" }
+          gh release upload $env:TAG $files[0].FullName --clobber
+          if ($LASTEXITCODE -ne 0) { throw "upload failed" }
+      - name: Upload Mac dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(target/release/bundle/dmg/*.dmg)
+          [ "${#files[@]}" -eq 1 ] || { echo "expected one dmg, found ${#files[@]}" >&2; exit 1; }
+          gh release upload "$TAG" "${files[0]}" --clobber
+
+  publish:
+    name: Checksums and publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checksums
+        run: |
+          mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
+          gh release download "$TAG" --pattern '*.exe' --pattern '*.dmg'
+          ls -la
+          sha256sum *.exe *.dmg > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --clobber
+      - name: Publish
+        run: gh release edit "$TAG" --draft=false
