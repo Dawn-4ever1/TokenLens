@@ -66,9 +66,17 @@ struct Running {
     handle: JoinHandle<()>,
 }
 
+#[derive(Default)]
+struct Lifecycle {
+    running: Option<Running>,
+    /// Some means an updater owns the stop/start gate; the bool remembers
+    /// whether collection was running before it acquired the gate.
+    update_resume: Option<bool>,
+}
+
 pub struct Collector {
     live: Arc<Mutex<Live>>,
-    running: Mutex<Option<Running>>,
+    lifecycle: Mutex<Lifecycle>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -83,7 +91,7 @@ impl Collector {
     pub fn new() -> Self {
         Self {
             live: Arc::new(Mutex::new(Live::default())),
-            running: Mutex::new(None),
+            lifecycle: Mutex::new(Lifecycle::default()),
         }
     }
 
@@ -100,7 +108,8 @@ impl Collector {
     }
 
     pub fn is_running(&self) -> bool {
-        lock(&self.running)
+        lock(&self.lifecycle)
+            .running
             .as_ref()
             .is_some_and(|running| !running.handle.is_finished())
     }
@@ -112,10 +121,12 @@ impl Collector {
         destination: Destination,
         notify: Notify,
     ) {
-        let mut running = lock(&self.running);
-        if running
-            .as_ref()
-            .is_some_and(|run| !run.handle.is_finished())
+        let mut lifecycle = lock(&self.lifecycle);
+        if lifecycle.update_resume.is_some()
+            || lifecycle
+                .running
+                .as_ref()
+                .is_some_and(|run| !run.handle.is_finished())
         {
             return;
         }
@@ -141,18 +152,44 @@ impl Collector {
                 syncer.stop();
             });
         match spawned {
-            Ok(handle) => *running = Some(Running { sender, handle }),
+            Ok(handle) => lifecycle.running = Some(Running { sender, handle }),
             Err(_) => lock(&self.live).last_error = Some(QUEUE_ERROR.to_owned()),
         }
     }
 
     /// Waits for an in-flight scan and the upload thread to finish.
     pub fn stop(&self) {
-        let running = lock(&self.running).take();
-        if let Some(running) = running {
+        Self::stop_locked(&mut lock(&self.lifecycle));
+    }
+
+    fn stop_locked(lifecycle: &mut Lifecycle) {
+        if let Some(running) = lifecycle.running.take() {
             let _ = running.sender.send(Msg::Stop);
+            // Hold the lifecycle gate until all worker-owned locks have been
+            // released. A concurrent stop must not return before this join.
             let _ = running.handle.join();
         }
+    }
+
+    /// Atomically prohibit future starts and join the current collector. The
+    /// installer can run only after this returns; no other IPC can revive it.
+    pub fn begin_update(&self) {
+        let mut lifecycle = lock(&self.lifecycle);
+        if lifecycle.update_resume.is_none() {
+            lifecycle.update_resume = Some(
+                lifecycle
+                    .running
+                    .as_ref()
+                    .is_some_and(|running| !running.handle.is_finished()),
+            );
+        }
+        Self::stop_locked(&mut lifecycle);
+    }
+
+    /// On install failure, release the gate and report the original running
+    /// state. The caller still honors a user's new pause/unpair selection.
+    pub fn finish_update(&self) -> bool {
+        lock(&self.lifecycle).update_resume.take().unwrap_or(false)
     }
 }
 
@@ -414,6 +451,145 @@ mod tests {
             ingest_token: "tdi_synthetic".into(),
             read_token: "tdr_synthetic".into(),
         }
+    }
+
+    /// A real thread owns the real queue lock, but reads no agent data and
+    /// performs no HTTP. Its shutdown pauses until the test releases it.
+    fn simulated_running(collector: &Collector, state_dir: &Path) -> (Receiver<()>, Sender<()>) {
+        let queue_lock = collector_core::state::lock_queue(state_dir).unwrap();
+        let (sender, receiver) = watch::channel();
+        let (stopping, stopped) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let _queue_lock = queue_lock;
+            assert!(matches!(receiver.recv().unwrap(), Msg::Stop));
+            stopping.send(()).unwrap();
+            let _ = released.recv();
+        });
+        lock(&collector.lifecycle).running = Some(Running { sender, handle });
+        (stopped, release)
+    }
+
+    fn isolated_start(collector: &Collector, root: &Path) {
+        collector.start(
+            WatchOptions {
+                home: root.join("empty-home"),
+                explicit_home: true,
+                use_env_roots: false,
+                worker_program: root.join("nonexistent-test-worker"),
+                timing: Timing::default(),
+                worker_timeout: Duration::from_millis(100),
+                exit_after: Some(Duration::from_secs(1)),
+                ignored: vec![],
+                upstream_cache_dir: Some(root.join("isolated-cache")),
+            },
+            root.join("queue"),
+            Destination {
+                credentials: synthetic_credentials(),
+                local: None,
+            },
+            Arc::new(|_| {}),
+        );
+    }
+
+    #[test]
+    fn concurrent_stops_both_wait_for_the_worker_and_queue_lock_to_be_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let collector = Arc::new(Collector::new());
+        let queue = dir.path().join("queue");
+        let (stopping, release) = simulated_running(&collector, &queue);
+        let first_collector = Arc::clone(&collector);
+        let (first_done, first_finished) = std::sync::mpsc::channel();
+        let first = std::thread::spawn(move || {
+            first_collector.stop();
+            first_done.send(()).unwrap();
+        });
+        stopping.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(collector_core::state::lock_queue(&queue).is_err());
+
+        let second_collector = Arc::clone(&collector);
+        let (attempt, attempted) = std::sync::mpsc::channel();
+        let (second_done, second_finished) = std::sync::mpsc::channel();
+        let second = std::thread::spawn(move || {
+            attempt.send(()).unwrap();
+            second_collector.stop();
+            second_done.send(()).unwrap();
+        });
+        attempted.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            second_finished
+                .recv_timeout(Duration::from_millis(150))
+                .is_err(),
+            "a second stop must not return while the first one is joining"
+        );
+        assert!(first_finished.try_recv().is_err());
+        release.send(()).unwrap();
+        first_finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        second_finished
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(!collector.is_running());
+        assert!(collector_core::state::lock_queue(&queue).is_ok());
+    }
+
+    #[test]
+    fn update_gate_joins_the_worker_and_rejects_concurrent_and_later_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let collector = Arc::new(Collector::new());
+        let queue = dir.path().join("queue");
+        let (stopping, release) = simulated_running(&collector, &queue);
+        let updating = Arc::clone(&collector);
+        let (installed, install_ready) = std::sync::mpsc::channel();
+        let update = std::thread::spawn(move || {
+            updating.begin_update();
+            installed.send(()).unwrap();
+        });
+        stopping.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(install_ready.try_recv().is_err());
+        assert!(collector_core::state::lock_queue(&queue).is_err());
+
+        let starting = Arc::clone(&collector);
+        let root = dir.path().to_owned();
+        let (attempt, attempted) = std::sync::mpsc::channel();
+        let (started, start_finished) = std::sync::mpsc::channel();
+        let start = std::thread::spawn(move || {
+            attempt.send(()).unwrap();
+            isolated_start(&starting, &root);
+            started.send(()).unwrap();
+        });
+        attempted.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(
+            start_finished
+                .recv_timeout(Duration::from_millis(150))
+                .is_err()
+        );
+        release.send(()).unwrap();
+        install_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        start_finished.recv_timeout(Duration::from_secs(5)).unwrap();
+        update.join().unwrap();
+        start.join().unwrap();
+        assert!(!collector.is_running());
+        assert!(lock(&collector.lifecycle).running.is_none());
+        assert!(collector_core::state::lock_queue(&queue).is_ok());
+        isolated_start(&collector, dir.path());
+        assert!(lock(&collector.lifecycle).running.is_none());
+
+        // A failed update restores exactly the pre-update running state.
+        assert!(collector.finish_update());
+        isolated_start(&collector, dir.path());
+        assert!(collector.is_running());
+        collector.stop();
+        assert!(!collector.finish_update(), "the gate is released only once");
+    }
+
+    #[test]
+    fn a_failed_update_does_not_request_a_restart_for_a_stopped_collector() {
+        let collector = Collector::new();
+        collector.begin_update();
+        collector.stop();
+        assert!(!collector.finish_update());
     }
 
     #[test]

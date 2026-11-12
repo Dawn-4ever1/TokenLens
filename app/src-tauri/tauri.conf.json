@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "TokenLens",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "dev.tokenlens.desktop",
   "build": {
     "devUrl": "http://127.0.0.1:1420",
@@ -50,6 +50,18 @@
     "windows": {
       "webviewInstallMode": { "type": "downloadBootstrapper" },
       "nsis": { "installMode": "currentUser", "installerIcon": "icons/icon.ico" }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "requireSignedVersion": true,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ0MEVCRjZFMzI5QTBENTQKUldSVURab3licjhPMU9FYVV1clZsdWgzWXF5cWREZzVPQmMreGNBQ2E2VWVBRVFmaG81czM1Tk0K",
+      "endpoints": [
+        "https://github.com/Dawn-4ever1/TokenLens/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

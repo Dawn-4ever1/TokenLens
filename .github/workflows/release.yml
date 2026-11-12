@@ -1,4 +1,4 @@
-# Builds the desktop installers and publishes them as a GitHub Release (D043).
+# Builds desktop installers and signed updater bundles (D043, D046).
 #
 # Release: node scripts/release-version.mjs set X.Y.Z, commit, then
 #   git tag vX.Y.Z && git push origin vX.Y.Z
@@ -29,11 +29,16 @@ jobs:
       - uses: actions/checkout@v5
       - name: Tag matches the version in every file
         run: node scripts/release-version.mjs check "$TAG"
+      - name: Validate release metadata tests
+        run: node --test scripts/release-metadata.test.mjs
       - name: Draft release
         run: |
           version="${TAG#v}"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; builds will replace its installers."
+            [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ] || {
+              echo 'Refusing to replace an already-published Release.' >&2; exit 1;
+            }
+            echo "Draft $TAG already exists; builds will replace its assets."
           else
             sed "s/{{VERSION}}/$version/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
             gh release create "$TAG" --draft --verify-tag \
@@ -45,6 +50,11 @@ jobs:
     needs: prepare
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: 4
+      TOKENLENS_UPDATER_ARTIFACTS: "1"
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     strategy:
       fail-fast: false
       matrix:
@@ -55,6 +65,12 @@ jobs:
             os: macos-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Signing secrets are present
+        shell: bash
+        run: |
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] && [ -n "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" ] || {
+            echo 'Updater signing secrets are missing; the Release will remain a draft.' >&2; exit 1;
+          }
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -81,8 +97,11 @@ jobs:
         run: npm ci
       # The cached target folder may still hold an earlier version's installer.
       - name: Remove old installers
-        shell: bash
-        run: rm -rf target/release/bundle
+        run: >-
+          node -e "const fs=require('node:fs'),p=require('node:path');
+          const root=fs.realpathSync('.'),dir=p.resolve(root,'target/release/bundle');
+          if(!dir.startsWith(root+p.sep))throw new Error('Invalid bundle directory');
+          fs.rmSync(dir,{recursive:true,force:true});"
       # The bundle scripts strip the build machine's paths from the binary
       # and fail if any remain; the Mac one also verifies the ad-hoc signature.
       - name: Build Windows installer
@@ -99,29 +118,41 @@ jobs:
         run: |
           $files = @(Get-ChildItem target/release/bundle/nsis -Filter '*-setup.exe')
           if ($files.Count -ne 1) { throw "expected one installer, found $($files.Count)" }
-          gh release upload $env:TAG $files[0].FullName --clobber
+          $signature = "$($files[0].FullName).sig"
+          if (-not (Test-Path -LiteralPath $signature -PathType Leaf) -or (Get-Item -LiteralPath $signature).Length -eq 0) { throw 'Updater signature is missing or empty' }
+          gh release upload $env:TAG $files[0].FullName $signature --clobber
           if ($LASTEXITCODE -ne 0) { throw "upload failed" }
-      - name: Upload Mac dmg
+      - name: Upload Mac dmg and signed updater archive
         if: runner.os == 'macOS'
         shell: bash
         run: |
           shopt -s nullglob
           files=(target/release/bundle/dmg/*.dmg)
           [ "${#files[@]}" -eq 1 ] || { echo "expected one dmg, found ${#files[@]}" >&2; exit 1; }
-          gh release upload "$TAG" "${files[0]}" --clobber
+          archive=target/release/bundle/macos/TokenLens.app.tar.gz
+          [ -s "$archive" ] && [ -s "$archive.sig" ] || { echo 'Mac updater archive or signature is missing.' >&2; exit 1; }
+          version="${TAG#v}"
+          staged="$RUNNER_TEMP/TokenLens_${version}_aarch64.app.tar.gz"
+          cp "$archive" "$staged"
+          cp "$archive.sig" "$staged.sig"
+          gh release upload "$TAG" "${files[0]}" "$staged" "$staged.sig" --clobber
 
   publish:
-    name: Checksums and publish
+    name: Verify signatures, generate manifest and publish
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: Checksums
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Updater manifest and checksums
         run: |
-          mkdir -p "$RUNNER_TEMP/assets" && cd "$RUNNER_TEMP/assets"
-          gh release download "$TAG" --pattern '*.exe' --pattern '*.dmg'
-          ls -la
-          sha256sum *.exe *.dmg > SHA256SUMS.txt
-          cat SHA256SUMS.txt
-          gh release upload "$TAG" SHA256SUMS.txt --clobber
+          assets="$RUNNER_TEMP/assets"
+          mkdir -p "$assets"
+          gh release download "$TAG" --pattern '*.exe' --pattern '*.dmg' --pattern '*.app.tar.gz' --pattern '*.sig' --dir "$assets"
+          gh release view "$TAG" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          node scripts/release-metadata.mjs "$TAG" "$GH_REPO" "$assets" "$RUNNER_TEMP/notes.md"
+          gh release upload "$TAG" "$assets/latest.json" "$assets/SHA256SUMS.txt" --clobber
       - name: Publish
-        run: gh release edit "$TAG" --draft=false
+        run: gh release edit "$TAG" --draft=false --latest

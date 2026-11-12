@@ -1,4 +1,4 @@
-import type { AppStatus, PairCode } from "./types";
+import type { AppStatus, PairCode, UpdateStatus } from "./types";
 import { ApiError, type ApiErrorKind } from "./types";
 import type { Query } from "./range";
 
@@ -68,6 +68,10 @@ export const app = {
     call<{ deviceId: string; displayName: string }>("rename_device", { deviceId, displayName }),
   rotateCredentials: () => call<AppStatus>("rotate_credentials"),
   revokeDevice: (deviceId: string) => call<AppStatus>("revoke_device", { deviceId }),
+  updateStatus: () => call<UpdateStatus>("update_status"),
+  checkUpdate: () => call<UpdateStatus>("check_update"),
+  installUpdate: () => call<UpdateStatus>("install_update"),
+  setAutoCheckUpdates: (enabled: boolean) => call<UpdateStatus>("set_auto_check_updates", { enabled }),
 };
 
 export function errorMessage(error: unknown): string {

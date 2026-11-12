@@ -278,6 +278,18 @@ export interface PairCode {
   expiresAt: string;
 }
 
+/** Updater state from Rust; checking/downloading never carries user credentials. */
+export interface UpdateStatus {
+  autoCheck: boolean;
+  phase: "idle" | "checking" | "available" | "latest" | "downloading" | "installing" | "error";
+  version: string | null;
+  notes: string | null;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  error: string | null;
+  checkedAt: number | null;
+}
+
 export type ApiErrorKind =
   | "not_paired"
   | "unauthorized"

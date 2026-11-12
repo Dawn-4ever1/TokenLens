@@ -3,7 +3,7 @@
 import type {
   AppStatus, Breakdown, Caveat, DeviceStatus, Devices, FilterOptions, Health, Heatmap,
   Measures, Point, Precision, SessionDetail, SessionPage, SessionSummary, SessionTurn,
-  Slice, Subagent, Timeseries,
+  Slice, Subagent, Timeseries, UpdateStatus,
 } from "./types";
 import { ApiError } from "./types";
 import { addDays, todayIn } from "./range";
@@ -598,13 +598,31 @@ function dashboard(path: string, q: Q): unknown {
 }
 
 const params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+/** ?update (or =available), =latest, =downloading, =error, =install-error / =async-install-error. */
+export function mockUpdateStatus(scenario: string | null): UpdateStatus {
+  const phase: UpdateStatus["phase"] = scenario === null ? "idle"
+    : scenario === "latest" ? "latest"
+      : scenario === "downloading" ? "downloading"
+        : scenario === "error" ? "error" : "available";
+  const available = ["available", "downloading"].includes(phase);
+  return {
+    autoCheck: true, phase,
+    version: available ? "0.4.1" : null,
+    notes: available ? "TokenLens 0.4.1\n\n改善自动更新体验。\n配对、数据和设置保持不变。" : null,
+    downloadedBytes: phase === "downloading" ? 4_200_000 : 0,
+    totalBytes: phase === "downloading" ? 10_000_000 : null,
+    error: phase === "error" ? "连不上 GitHub，稍后会再试。" : null,
+    checkedAt: phase === "idle" ? null : Date.now(),
+  };
+}
+const updateState = mockUpdateStatus(params.get("update"));
 const startsLocal = params.has("local");
 const state: AppStatus = {
   paired: !params.has("unpaired"),
   mode: params.has("unpaired") ? null : startsLocal ? "local" : "server",
   deviceId: "dev_mock_mbp",
   server: startsLocal ? null : "https://dash.example.com",
-  appVersion: "0.1.0",
+  appVersion: "0.4.0",
   collector: {
     running: true, paused: false, lastScanAt: Date.now() - 40_000, lastUploadAt: Date.now() - 95_000,
     lastHeartbeatAt: Date.now() - 120_000, backlog: 0, uploadState: "ok", backfillComplete: true, lastError: null,
@@ -624,6 +642,36 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return dashboard(String(args.path), (args.query ?? {}) as Q);
     case "app_status":
       return { ...state, collector: { ...state.collector } };
+    case "update_status":
+      return { ...updateState };
+    case "set_auto_check_updates":
+      updateState.autoCheck = Boolean(args.enabled);
+      return { ...updateState };
+    case "check_update": {
+      if (["downloading", "installing"].includes(updateState.phase)) return { ...updateState };
+      updateState.phase = "checking";
+      await delay(350);
+      const next = mockUpdateStatus(params.has("update") ? params.get("update") : "latest");
+      Object.assign(updateState, next, { autoCheck: updateState.autoCheck });
+      return { ...updateState };
+    }
+    case "install_update": {
+      if (!updateState.version || ["downloading", "installing"].includes(updateState.phase)) return { ...updateState };
+      Object.assign(updateState, { phase: "downloading", downloadedBytes: 4_200_000, totalBytes: 10_000_000, error: null });
+      if (params.get("update") === "async-install-error") {
+        // Mirrors the real command: it returns immediately; the Rust task reports
+        // a later failure through update_status / update-changed.
+        setTimeout(() => Object.assign(updateState, { phase: "error", error: "下载没有完成，请稍后重试。" }), 1600);
+        return { ...updateState };
+      }
+      await delay(1600);
+      if (params.get("update") === "install-error") {
+        Object.assign(updateState, { phase: "error", error: "下载没有完成，请稍后重试。" });
+      } else {
+        Object.assign(updateState, { phase: "installing", downloadedBytes: 10_000_000 });
+      }
+      return { ...updateState };
+    }
     case "pair_device":
       if (String(args.code).replace(/[^A-Z0-9]/gi, "").length < 8) throw new ApiError("unauthorized", 401);
       state.paired = true;

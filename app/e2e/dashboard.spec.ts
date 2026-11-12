@@ -270,3 +270,83 @@ test("agent coverage lists agents in use before the rest", async ({ page }) => {
   expect(names.slice(firstUnused, firstUnused + 4)).toEqual(["Cursor", "Copilot", "Cline", "Trae"]);
   expect(errors).toEqual([]);
 });
+
+test("update markers open plain-text release notes and close at 900px", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { query: "?update" });
+  await settle(page, "总览");
+  const nav = page.getByRole("navigation", { name: "主导航" });
+  await nav.getByRole("button", { name: "有新版本 0.4.1", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "更新到 0.4.1" })).toBeVisible();
+  await expect(dialog.getByText(/改善自动更新体验/)).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "下载并更新" })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await nav.getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  await page.getByRole("main").getByRole("button", { name: "有新版本 0.4.1", exact: true }).click();
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "稍后" }).click();
+  await expect(dialog).toBeHidden();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("manual update check works with automatic checks disabled and shows latest", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "settings", query: "?update=latest" });
+  await settle(page, "设置");
+  const auto = page.getByRole("switch", { name: "自动检查更新", exact: true });
+  await expect(auto).toHaveAttribute("aria-checked", "true");
+  await auto.click();
+  await expect(auto).toHaveAttribute("aria-checked", "false");
+  await page.getByRole("button", { name: "检查更新", exact: true }).click();
+  await expect(page.getByText("已是最新版本", { exact: true })).toBeVisible();
+  await expect(auto).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("button", { name: /^有新版本/ })).toHaveCount(0);
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("download progress is visible and cannot start a second installation", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { view: "settings", query: "?update=downloading" });
+  await settle(page, "设置");
+  await expect(page.getByRole("progressbar", { name: "更新下载进度" })).toHaveAttribute("aria-valuenow", "42");
+  await page.getByRole("main").getByRole("button", { name: "有新版本 0.4.1", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("button", { name: "正在下载", exact: true })).toBeDisabled();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(errors).toEqual([]);
+});
+
+test("check failures remain quiet outside settings", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { query: "?update=error" });
+  await settle(page, "总览");
+  await expect(page.getByText("连不上 GitHub，稍后会再试。", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  await expect(page.getByText("连不上 GitHub，稍后会再试。", { exact: true })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+for (const scenario of ["install-error", "async-install-error"]) test(`${scenario}: download failure closes the update dialog and explains only in settings`, async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { query: `?update=${scenario}` });
+  await settle(page, "总览");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "有新版本 0.4.1", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "下载并更新", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("button", { name: "正在下载", exact: true })).toBeDisabled();
+  await expect(page.locator("header h1")).toHaveText("设置");
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page.getByText("下载没有完成，请稍后重试。", { exact: true })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});

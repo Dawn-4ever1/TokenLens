@@ -19,6 +19,8 @@ macOS.
   server you host.
 - **Light in the background**: a tray app that reads agent logs only when they
   change; the window is opened on demand.
+- **In-app updates**: checks public GitHub releases automatically (can be turned
+  off in Settings); download and install a signed update only when you choose.
 
 > Status: early (0.x). The interface is in Simplified Chinese for now.
 
@@ -43,8 +45,8 @@ When the app first opens, pick where the data lives:
 
 - **Only on this computer** (只在这台电脑上): no server, no account. The app
   runs the same sync server code in process and keeps the data in a local
-  SQLite file. It goes online only to download the public price catalogs once a
-  day.
+  SQLite file. It goes online to download public price catalogs daily and, if
+  enabled, check for application updates.
 - **Connect to a server** (连接服务器): several computers on one dashboard.
   Host the server yourself with Docker, see [deploy/README.md](deploy/README.md),
   and pair each computer with a one-time code.
@@ -60,6 +62,10 @@ uploaded when it pairs.
 - Server tokens are stored in the macOS Keychain or Windows Credential Manager
   and never reach the web view; the server stores only their hashes.
 - In local mode nothing is uploaded at all.
+- Update checks use anonymous GET requests to public GitHub releases about
+  10 seconds after launch and every 24 hours; no usage or credentials are sent.
+  Turn off automatic checks in Settings, or check manually. Update signatures
+  are verified before installation; they are separate from OS code signing.
 
 ## Supported agents
 

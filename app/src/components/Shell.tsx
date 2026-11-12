@@ -7,6 +7,7 @@ import type { AppStatus } from "@/lib/types";
 import { AppMark } from "./AppMark";
 import { FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
+import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
 import { StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
 
@@ -59,6 +60,7 @@ export function Shell() {
         </main>
       </div>
       <SessionDrawer sessionKey={sessionKey} onClose={() => openSession(null)} />
+      <UpdateDialog />
     </div>
   );
 }
@@ -151,6 +153,7 @@ function CollectorStatus({ status }: { status: AppStatus | null }) {
   );
   return (
     <div className="border-t border-line/70 px-2.5 py-3">
+      <UpdateNotice />
       <Tip content={detail} side="right">
         <div className="flex items-center justify-center gap-2 rounded-lg px-2.5 py-1.5 min-[1100px]:justify-start">
           <StatusDot tone={state.tone} />

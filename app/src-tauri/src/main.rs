@@ -8,6 +8,7 @@ mod local;
 mod menu;
 mod remote;
 mod tray;
+mod updater;
 mod window;
 
 use std::ffi::OsString;
@@ -69,7 +70,11 @@ fn main() {
                 .with_state_flags(StateFlags::all() - StateFlags::VISIBLE)
                 .build(),
         )
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(AppState::load(config::Paths::resolve()))
+        .manage(updater::UpdateState::load(
+            &config::Paths::resolve().state_dir,
+        ))
         .on_menu_event(|app, event| tray::on_menu_event(app, &event))
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) && window.label() == window::MAIN
@@ -93,6 +98,10 @@ fn main() {
             commands::rename_device,
             commands::rotate_credentials,
             commands::revoke_device,
+            updater::update_status,
+            updater::check_update,
+            updater::install_update,
+            updater::set_auto_check_updates,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]
@@ -104,6 +113,7 @@ fn main() {
             let handle = app.handle().clone();
             tray::install(&handle)?;
             commands::start_collector(&handle);
+            updater::start_schedule(&handle);
             if !background {
                 window::open(&handle);
             }

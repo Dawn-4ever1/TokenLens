@@ -1,6 +1,6 @@
 [package]
 name = "tokenlens-app"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -34,6 +34,13 @@ usage-event = { path = "../../crates/usage-event" }
 
 [target.'cfg(windows)'.dependencies]
 notify-rust = { version = "4.18", default-features = false }
+
+# Keep desktop HTTPS on the system TLS stack, like the collector (D039).
+[target.'cfg(any(windows, target_os = "macos"))'.dependencies]
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
+
+[target.'cfg(not(any(windows, target_os = "macos")))'.dependencies]
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy", "zip"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -2,12 +2,14 @@ import { Check, Monitor, Moon, RefreshCw, Sun } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { LoadError } from "@/components/common";
 import { collectorState } from "@/components/Shell";
+import { UpdateProgress } from "@/components/UpdateNotice";
 import { Badge, Button, Card, Dialog, Segmented, StatusDot, Switch, cn } from "@/components/ui";
 import { app, errorMessage } from "@/lib/api";
 import { useData, useDashboard } from "@/lib/data";
 import { dateTime, duration, exact, relativeTime, shortId } from "@/lib/format";
 import { DIRECTIONS, useSettings, type Direction, type ThemeMode } from "@/lib/settings";
 import { useStatus } from "@/lib/status";
+import { updateInProgress, useUpdates } from "@/lib/updates";
 import type { AppStatus, Devices, Health } from "@/lib/types";
 
 const THEMES: { key: ThemeMode; label: ReactNode }[] = [
@@ -27,10 +29,34 @@ export function Settings() {
   return (
     <div className="mx-auto max-w-3xl space-y-5">
       <Appearance />
+      <Updates />
       <Collection />
       <Connection />
       <Definitions />
     </div>
+  );
+}
+
+function Updates() {
+  const { status, busy, check, setAutoCheck, setDialogOpen } = useUpdates();
+  const { status: appStatus } = useStatus();
+  const progressing = updateInProgress(status);
+  return (
+    <Card title="应用更新" bodyClassName="pt-1">
+      <Row title="自动检查更新" hint="启动后约 10 秒检查，之后每 24 小时一次。只读取 GitHub 的公开版本信息，不发送用量或账号信息；下载和安装前会征求你同意">
+        <Switch label="自动检查更新" checked={status?.autoCheck ?? true} disabled={!status || busy || progressing} onChange={(enabled) => void setAutoCheck(enabled)} />
+      </Row>
+      <Row title={`当前版本 ${appStatus?.appVersion ?? "—"}`} hint="关闭自动检查后，仍可在这里手动检查">
+        {status?.version && <Button size="sm" variant="ghost" className="text-primary" onClick={() => setDialogOpen(true)}>有新版本 {status.version}</Button>}
+        <Button size="sm" disabled={!status || busy || progressing || status.phase === "checking"} onClick={() => void check()}>
+          <RefreshCw className={cn("h-3.5 w-3.5", status?.phase === "checking" && "animate-spin")} aria-hidden />
+          {status?.phase === "checking" ? "正在检查…" : "检查更新"}
+        </Button>
+      </Row>
+      {status?.phase === "latest" && <p role="status" className="pt-1 text-xs text-ink-2">已是最新版本</p>}
+      {status?.phase === "error" && <p role="status" className="pt-1 text-xs leading-5 text-bad">{status.error || "更新没有完成，请稍后重试。"}</p>}
+      {status && progressing && <div className="pt-2"><UpdateProgress status={status} /></div>}
+    </Card>
   );
 }
 
@@ -273,7 +299,7 @@ function Definitions() {
         <Definition term="日期">按 {timeZone} 的自然日统计；跨设备的时间都换算到这个时区。</Definition>
         <Definition term="隐私">
           {status?.mode === "local"
-            ? "本机模式下数据只保存在这台电脑上，只会每天下载一次公开价格表。"
+            ? "本机模式下数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取 GitHub 公开版本信息；这两项请求都不携带用量或账号信息。"
             : "只上传数字统计；提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
         </Definition>
       </dl>
