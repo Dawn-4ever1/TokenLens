@@ -2,10 +2,10 @@ import { CalendarRange, Check, ListFilter, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ClientName, ModelName } from "@/components/common";
 import { compact, relativeTime } from "@/lib/format";
-import { useData } from "@/lib/data";
+import { useDashboard, useData } from "@/lib/data";
 import { clientLabel, modelLabel, NO_PROJECT_KEY } from "@/lib/labels";
-import { RANGE_PRESETS, activeFilterCount, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
-import type { FilterOption } from "@/lib/types";
+import { RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
+import type { FilterOption, FilterOptions, Summary } from "@/lib/types";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, Segmented, Tip, cn, inputClass } from "./ui";
 
 type ListKey = "devices" | "clients" | "models" | "projects";
@@ -89,13 +89,8 @@ function CustomDates({ filters, onChange }: { filters: Filters; onChange: (patch
 }
 
 export function FilterMenu() {
-  const { filters, setFilters, options } = useData();
+  const { filters, setFilters, options, timeZone } = useData();
   const count = activeFilterCount(filters);
-  const toggle = (key: ListKey, value: string) =>
-    setFilters((previous) => {
-      const list = previous[key];
-      return { ...previous, [key]: list.includes(value) ? list.filter((item) => item !== value) : [...list, value] };
-    });
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -120,23 +115,49 @@ export function FilterMenu() {
         {!options ? (
           <p className="px-4 py-6 text-center text-xs text-ink-3">正在读取可选项…</p>
         ) : (
-          <div className="grid max-h-[60vh] grid-cols-2 gap-x-2 overflow-y-auto p-2">
-            {SECTIONS.map((section) => (
-              <FilterSection
-                key={section.key}
-                label={section.label}
-                sectionKey={section.key}
-                options={options[section.key]}
-                selected={filters[section.key]}
-                display={section.display}
-                onToggle={(value) => toggle(section.key, value)}
-                onClear={() => setFilters((previous) => ({ ...previous, [section.key]: [] }))}
-              />
-            ))}
-          </div>
+          <FilterChoices key={JSON.stringify(resolveRange(filters, timeZone))} options={options} />
         )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+/** Mounted only while the picker is open; dates alone determine option counts. */
+function FilterChoices({ options }: { options: FilterOptions }) {
+  const { filters, setFilters, query, timeZone } = useData();
+  const usage = useDashboard<Summary>("summary", query({ devices: [], clients: [], models: [], projects: [] }));
+  const slices = { devices: usage.data?.byDevice, clients: usage.data?.byClient, models: usage.data?.byModel, projects: usage.data?.byProject };
+  const ready = !usage.loading && !usage.error && usage.data !== null;
+  const toggle = (key: ListKey, value: string) =>
+    setFilters((previous) => {
+      const list = previous[key];
+      const next = list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
+      return { ...previous, [key]: next };
+    });
+  return (
+    <>
+      <div className="flex items-center justify-between gap-2 px-4 pt-2 text-[11px] text-ink-3" aria-live="polite">
+        <span>用量 · {rangeLabel(filters, resolveRange(filters, timeZone))}</span>
+        {usage.loading ? <span>读取中…</span> : usage.error ? (
+          <button type="button" className="text-primary hover:underline" onClick={usage.reload}>用量读取失败，重试</button>
+        ) : null}
+      </div>
+      <div className="grid max-h-[60vh] grid-cols-2 gap-x-2 overflow-y-auto p-2" aria-busy={usage.loading}>
+        {SECTIONS.map((section) => (
+          <FilterSection
+            key={section.key}
+            label={section.label}
+            sectionKey={section.key}
+            options={options[section.key]}
+            totals={ready ? new Map(slices[section.key]?.map((slice) => [slice.key, slice.totalTokens])) : null}
+            selected={filters[section.key]}
+            display={section.display}
+            onToggle={(value) => toggle(section.key, value)}
+            onClear={() => setFilters((previous) => ({ ...previous, [section.key]: [] }))}
+          />
+        ))}
+      </div>
+    </>
   );
 }
 
@@ -144,6 +165,7 @@ function FilterSection({
   label,
   sectionKey,
   options,
+  totals,
   selected,
   display,
   onToggle,
@@ -152,6 +174,7 @@ function FilterSection({
   label: string;
   sectionKey: ListKey;
   options: FilterOption[];
+  totals: Map<string, number> | null;
   selected: string[];
   display: (option: FilterOption) => string;
   onToggle: (value: string) => void;
@@ -197,7 +220,7 @@ function FilterSection({
                     <span className="min-w-0 flex-1 truncate">{display(option)}</span>
                   )}
                 </Tip>
-                <span className="num shrink-0 text-[11px] text-ink-3">{compact(option.totalTokens)}</span>
+                <span className="num shrink-0 text-[11px] text-ink-3">{totals ? compact(totals.get(option.key) ?? 0) : "—"}</span>
               </button>
             </li>
           );

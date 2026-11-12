@@ -87,7 +87,7 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
     <nav aria-label="主导航" className="flex w-16 shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-52">
       <div
         data-tauri-drag-region
-        className={cn("flex shrink-0 items-end justify-center gap-2 px-4 pb-3 min-[1100px]:justify-start", mac ? "h-[52px]" : "h-14")}
+        className={cn("flex shrink-0 items-end justify-center gap-2 px-4 pb-3 min-[1100px]:justify-start", mac ? "h-[72px]" : "h-14")}
       >
         <AppMark className="pointer-events-none h-5 w-5" />
         <span data-tauri-drag-region className="display hidden truncate text-[13px] leading-5 text-ink-2 min-[1100px]:inline">
