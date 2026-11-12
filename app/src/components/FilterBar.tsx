@@ -1,4 +1,4 @@
-import { CalendarRange, Check, ListFilter, RefreshCw } from "lucide-react";
+import { CalendarRange, Check, ListFilter, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ClientName, ModelName } from "@/components/common";
 import { compact, relativeTime } from "@/lib/format";
@@ -204,6 +204,56 @@ function FilterSection({
         })}
       </ul>
     </fieldset>
+  );
+}
+
+/**
+ * The filters in force, one removable chip each, so a narrowed view is never
+ * mistaken for the whole. Renders nothing when no filter is set.
+ */
+export function ActiveFilters() {
+  const { filters, setFilters, options } = useData();
+  if (activeFilterCount(filters) === 0) return null;
+  const chips = SECTIONS.flatMap((section) =>
+    filters[section.key].map((value) => {
+      const option = options?.[section.key].find((item) => item.key === value);
+      const name = option
+        ? section.display(option)
+        : section.key === "clients"
+          ? clientLabel(value)
+          : section.key === "models"
+            ? modelLabel(value)
+            : section.key === "projects" && value === NO_PROJECT_KEY
+              ? "未标记项目"
+              : value;
+      return { section, value, name };
+    }),
+  );
+  return (
+    <div role="group" aria-label="生效的筛选" className="flex flex-wrap items-center gap-1.5 border-b border-line/70 bg-surface-2/40 px-6 py-2 text-xs">
+      <span className="text-ink-3">只统计</span>
+      {chips.map(({ section, value, name }) => (
+        <span key={`${section.key}:${value}`} className="inline-flex max-w-60 items-center gap-1 rounded-full border border-primary/30 bg-primary/10 py-0.5 pl-2.5 pr-1 text-ink">
+          <span className="shrink-0 text-ink-3">{section.label}</span>
+          <span className="truncate font-medium">{name}</span>
+          <button
+            type="button"
+            aria-label={`移除筛选：${section.label} ${name}`}
+            onClick={() => setFilters((previous) => ({ ...previous, [section.key]: previous[section.key].filter((item) => item !== value) }))}
+            className="rounded-full p-0.5 text-ink-3 hover:bg-primary/15 hover:text-ink"
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        </span>
+      ))}
+      <button
+        type="button"
+        className="ml-1 text-primary hover:underline"
+        onClick={() => setFilters((previous) => ({ ...previous, devices: [], clients: [], models: [], projects: [] }))}
+      >
+        清除筛选
+      </button>
+    </div>
   );
 }
 

@@ -229,27 +229,60 @@ test("local mode hides server-only actions and offers to switch to a server", as
   expect(errors).toEqual([]);
 });
 
+/** The headline token card; cost comes first on the overview. */
+const tokensKpi = (page: Page) => page.locator("section.card").filter({ hasText: "Tokens ·" });
+
+test("a drill-down shows its filter as a chip and is undone on the way back", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page);
+  await settle(page, "总览");
+  const headline = tokensKpi(page).locator(".num-fit");
+  const whole = await headline.innerText();
+  const chips = page.getByRole("group", { name: "生效的筛选" });
+  await expect(chips).toHaveCount(0);
+  await page.getByRole("button", { name: /Claude Code/ }).first().click();
+  await expect(page.getByRole("heading", { name: "会话", level: 1 })).toBeVisible();
+  await expect(chips).toContainText("Claude Code");
+  // Going back restores the unfiltered numbers.
+  await page.getByRole("button", { name: "总览" }).click();
+  await expect(chips).toHaveCount(0);
+  await expect(headline).toHaveText(whole);
+  // A filter the user picks stays, is visible on every page, and one click removes it.
+  await page.getByRole("button", { name: /Claude Code/ }).first().click();
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "总览" }).click();
+  await expect(chips).toContainText("Codex");
+  await expect(headline).not.toHaveText(whole);
+  await chips.getByRole("button", { name: "清除筛选" }).click();
+  await expect(chips).toHaveCount(0);
+  await expect(headline).toHaveText(whole);
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
 test("clicking a token count switches every count to exact digits and remembers it", async ({ page }) => {
   for (const width of [900, 1200]) {
     await page.setViewportSize({ width, height: 900 });
     const errors = await open(page);
     await settle(page, "总览");
-    const kpi = page.locator("section.card .num-fit").first().getByRole("button", { pressed: false });
+    const kpi = tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: false });
     await expect(kpi).toHaveText(/^[\d.]+[KMBT]$/);
     await kpi.click();
-    const exactKpi = page.locator("section.card .num-fit").first().getByRole("button", { pressed: true });
+    const exactKpi = tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true });
     await expect(exactKpi).toHaveText(/^\d{1,3}(,\d{3})+$/);
     // Every other count follows, e.g. today's tokens under the headline.
-    await expect(page.locator("section.card").first().getByRole("button", { pressed: false })).toHaveCount(0);
+    await expect(tokensKpi(page).getByRole("button", { pressed: false })).toHaveCount(0);
     // Long exact counts must still fit their card.
     expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
     const fits = await exactKpi.evaluate((element) => element.getBoundingClientRect().right <= element.closest("section")!.getBoundingClientRect().right);
     expect(fits).toBe(true);
     await page.reload();
     await settle(page, "总览");
-    await expect(page.locator("section.card .num-fit").first().getByRole("button", { pressed: true })).toHaveText(/,/);
-    await page.locator("section.card .num-fit").first().getByRole("button", { pressed: true }).click();
-    await expect(page.locator("section.card .num-fit").first().getByRole("button", { pressed: false })).toHaveText(/^[\d.]+[KMBT]$/);
+    await expect(tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true })).toHaveText(/,/);
+    await tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true }).click();
+    await expect(tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: false })).toHaveText(/^[\d.]+[KMBT]$/);
     expect(errors).toEqual([]);
     await page.evaluate(() => sessionStorage.clear());
   }

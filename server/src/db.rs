@@ -57,11 +57,49 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 5,
         sql: include_str!("../migrations/0005_pricing.sql"),
     },
+    Migration {
+        version: 6,
+        sql: include_str!("../migrations/0006_counted_flag.sql"),
+    },
 ];
+
+/// How many events carry a `counted` flag that disagrees with the D029 rule
+/// worked out from scratch. Always 0 unless the triggers of schema v6 were
+/// bypassed; tests and the backup check use it.
+pub fn counted_drift(conn: &Connection) -> Result<i64, DbError> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM usage_events e
+         WHERE e.counted IS NOT (NOT EXISTS (
+           SELECT 1
+           FROM usage_events o
+           JOIN devices od ON od.id = o.device_id
+           JOIN devices ed ON ed.id = e.device_id
+           WHERE o.event_key = e.event_key
+             AND o.tenant_id = e.tenant_id
+             AND o.device_id <> e.device_id
+             AND (od.revoked_at IS NOT NULL, od.created_at, od.id)
+               < (ed.revoked_at IS NOT NULL, ed.created_at, ed.id)))",
+        [],
+        |row| row.get(0),
+    )?)
+}
+
+/// A second, read-only connection to a database `open` has already brought
+/// up to date. In WAL mode it reads while the main connection writes, so
+/// dashboard reads do not queue behind uploads.
+pub fn open_reader(path: &Path) -> Result<Connection, DbError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.execute_batch("PRAGMA busy_timeout = 5000; PRAGMA query_only = ON;")?;
+    Ok(conn)
+}
 
 const NEW_STORE_ID: &str =
     "UPDATE server_meta SET value = lower(hex(randomblob(16))) WHERE key = 'store_id'";
 const STORE_ID_SCHEMA: u32 = 3;
+const COUNTED_SCHEMA: u32 = 6;
 pub const DEFAULT_TENANT_ID: &str = "tenant_personal";
 
 pub struct Opened {
@@ -365,6 +403,14 @@ fn verify(conn: &Connection) -> Result<BackupSummary, DbError> {
         .optional()?;
     if let Some(table) = dangling {
         return Err(DbError::Corrupt(format!("dangling reference in {table}")));
+    }
+    if schema_version(conn)? >= COUNTED_SCHEMA {
+        let drift = counted_drift(conn)?;
+        if drift != 0 {
+            return Err(DbError::Corrupt(format!(
+                "{drift} events disagree with the dedup rule"
+            )));
+        }
     }
     Ok(BackupSummary {
         schema_version: schema_version(conn)?,

@@ -43,6 +43,8 @@ const MAX_TEXT_BYTES: usize = 512;
 #[derive(Clone)]
 pub struct AppState {
     db: Arc<Mutex<Connection>>,
+    /// Read-only connection for dashboard reads; `None` shares `db`.
+    reader: Option<Arc<Mutex<Connection>>>,
     clock: Arc<dyn Clock>,
     limiter: Arc<Mutex<ClaimLimiter>>,
     ingest_limiter: Arc<Mutex<IngestLimiter>>,
@@ -54,6 +56,7 @@ impl AppState {
     pub fn new(conn: Connection, clock: Arc<dyn Clock>) -> Self {
         Self {
             db: Arc::new(Mutex::new(conn)),
+            reader: None,
             clock,
             limiter: Arc::new(Mutex::new(ClaimLimiter::default())),
             ingest_limiter: Arc::new(Mutex::new(IngestLimiter::default())),
@@ -128,6 +131,14 @@ impl AppState {
         db::revoke_device(&mut conn, tenant_id, device_id, self.clock.now_ms())
     }
 
+    /// Dashboard reads use this connection (see `db::open_reader`) instead of
+    /// waiting for the one that takes uploads.
+    #[must_use]
+    pub fn with_reader(mut self, reader: Connection) -> Self {
+        self.reader = Some(Arc::new(Mutex::new(reader)));
+        self
+    }
+
     /// Zone for day, week and month buckets on the dashboard.
     #[must_use]
     pub const fn with_time_zone(mut self, time_zone: Tz) -> Self {
@@ -171,13 +182,36 @@ impl AppState {
         F: FnOnce(&Connection, Tz, i64) -> Result<T, QueryError> + Send + 'static,
     {
         let time_zone = self.time_zone;
-        let value = self
-            .with_db(move |conn, now| match work(conn, time_zone, now) {
-                Ok(value) => Ok(Ok(value)),
-                Err(QueryError::Bad) => Ok(Err(ApiError::BadRequest)),
-                Err(QueryError::Db(error)) => Err(error),
-            })
-            .await??;
+        let Some(reader) = self.reader.clone() else {
+            let value = self
+                .with_db(move |conn, now| match work(conn, time_zone, now) {
+                    Ok(value) => Ok(Ok(value)),
+                    Err(QueryError::Bad) => Ok(Err(ApiError::BadRequest)),
+                    Err(QueryError::Db(error)) => Err(error),
+                })
+                .await??;
+            return Ok(axum::Json(value).into_response());
+        };
+        let now = self.clock.now_ms();
+        let value = tokio::task::spawn_blocking(move || {
+            let conn = reader.lock().map_err(|_| ApiError::Internal)?;
+            let failed = |error: db::DbError| {
+                tracing::error!(kind = error_kind(&error), "database read failed");
+                ApiError::Internal
+            };
+            // One snapshot for the whole answer: an upload committing between
+            // two statements must not make the totals disagree with the parts.
+            let snapshot = conn
+                .unchecked_transaction()
+                .map_err(|error| failed(error.into()))?;
+            match work(&snapshot, time_zone, now) {
+                Ok(value) => Ok(value),
+                Err(QueryError::Bad) => Err(ApiError::BadRequest),
+                Err(QueryError::Db(error)) => Err(failed(error)),
+            }
+        })
+        .await
+        .map_err(|_| ApiError::Internal)??;
         Ok(axum::Json(value).into_response())
     }
 }

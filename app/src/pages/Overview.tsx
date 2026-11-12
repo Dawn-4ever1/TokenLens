@@ -45,19 +45,13 @@ export function Overview() {
   const empty = s.messageCount === 0;
   const label = rangeLabel(filters, span);
   const todayTokens = filters.preset === "today" ? s.totalTokens : today.data?.totalTokens;
+  const nonCache = s.inputTokens + s.outputTokens + s.reasoningTokens;
 
   return (
     <div className="space-y-5">
       {summary.error ? <LoadError error={summary.error} onRetry={summary.reload} compact /> : null}
       <CaveatList caveats={s.caveats} />
       <div className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
-        <Kpi
-          label={`Tokens · ${label}`}
-          value={<Num value={s.totalTokens} />}
-          badge={<PrecisionBadge precision={s.precision} />}
-          delta={<Delta current={s.totalTokens} previous={p?.totalTokens} />}
-          sub={todayTokens !== undefined && filters.preset !== "today" ? <>今日 <Num value={todayTokens} className="text-ink-2" /></> : `${exact(s.messageCount)} 条消息`}
-        />
         <Kpi
           label="成本"
           value={<span className="num">{usd(s.costUsd)}</span>}
@@ -80,6 +74,19 @@ export function Overview() {
           }
         />
         <Kpi
+          label={`Tokens · ${label}`}
+          value={<Num value={s.totalTokens} />}
+          badge={<PrecisionBadge precision={s.precision} />}
+          delta={<Delta current={s.totalTokens} previous={p?.totalTokens} />}
+          sub={
+            <>
+              非缓存 <Num value={nonCache} className="text-ink-2" />
+              {todayTokens !== undefined && filters.preset !== "today" ? <> · 今日 <Num value={todayTokens} className="text-ink-2" /></> : null}
+            </>
+          }
+          hint="五类 token 相加，缓存读取通常占九成以上，不等于计费 token。「非缓存」= 输入 + 输出 + 推理"
+        />
+        <Kpi
           label="缓存命中率"
           value={<span className="num">{percent(s.cacheHitRate)}</span>}
           delta={<Delta current={s.cacheHitRate} previous={p?.cacheHitRate} points />}
@@ -94,7 +101,7 @@ export function Overview() {
         />
       </div>
 
-      <Card title="Token 构成" subtitle="五类互斥相加等于总量；缓存读取通常占大头，不等于计费 token" action={<PrecisionBadge precision={s.precision} />}>
+      <Card title="Token 构成" subtitle="五类互斥相加等于总量；缓存读取单独一条，其余四类放大显示" action={<PrecisionBadge precision={s.precision} />}>
         <Composition value={s} />
       </Card>
 
@@ -131,7 +138,7 @@ function Kpi({ label, value, sub, delta, badge, hint }: { label: string; value: 
       <div className="display num-fit mt-2 text-[30px] leading-9 text-ink min-[1300px]:text-[34px]">{value}</div>
       <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-3">
         {delta}
-        {sub && <span className="truncate">{sub}</span>}
+        {sub && <span className="min-w-0">{sub}</span>}
       </div>
     </section>
   );

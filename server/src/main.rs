@@ -144,6 +144,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve => {
             let _lock = db::lock_database(&config.database_path)?;
             let conn = open_db(&config)?;
+            let reader = db::open_reader(&config.database_path)?;
             std::fs::create_dir_all(&config.pricing_dir)?;
             // SAFETY: no other thread exists yet; the runtime starts below.
             unsafe { pricing::configure_dir(&config.pricing_dir) };
@@ -153,8 +154,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             runtime.block_on(async move {
                 let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
                 tracing::info!(addr = %listener.local_addr()?, "listening");
-                let state =
-                    AppState::new(conn, Arc::new(SystemClock)).with_time_zone(config.time_zone);
+                let state = AppState::new(conn, Arc::new(SystemClock))
+                    .with_reader(reader)
+                    .with_time_zone(config.time_zone);
                 tokio::spawn(pricing::maintain(
                     state.clone(),
                     config.pricing_dir.clone(),

@@ -5,7 +5,7 @@ import { PAGES, useNav, type Page } from "@/lib/nav";
 import { useStatus } from "@/lib/status";
 import type { AppStatus } from "@/lib/types";
 import { AppMark } from "./AppMark";
-import { FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
+import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
 import { StatusDot, Tip, cn } from "./ui";
@@ -51,6 +51,7 @@ export function Shell() {
             </div>
           )}
         </header>
+        {FILTERED.includes(page) && <ActiveFilters />}
         <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto max-w-[1440px] px-6 pb-10 pt-5">
             <Suspense fallback={null}>

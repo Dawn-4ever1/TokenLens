@@ -105,7 +105,9 @@ impl LocalServer {
         let path = database_path(state_dir);
         let lock = db::lock_database(&path).map_err(|_| LocalError::Database)?;
         let opened = db::open(&path).map_err(|_| LocalError::Database)?;
+        let reader = db::open_reader(&path).map_err(|_| LocalError::Database)?;
         let state = http::AppState::new(opened.conn, Arc::new(SystemClock))
+            .with_reader(reader)
             .with_time_zone(local_time_zone());
         let router = http::router(state.clone());
         let runtime = tokio::runtime::Builder::new_multi_thread()

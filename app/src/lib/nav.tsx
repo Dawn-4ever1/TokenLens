@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { useData } from "./data";
 import type { Filters } from "./range";
 import { usePersistent } from "./store";
@@ -15,7 +15,11 @@ export const PAGES: { key: Page; label: string }[] = [
 
 interface NavContext {
   page: Page;
-  /** Switches page; `patch` narrows the global filters first (drill-down). */
+  /**
+   * Switches page. `patch` narrows the global filters first (drill-down);
+   * leaving the drilled page puts the earlier filters back, unless the user
+   * changed them in the meantime.
+   */
   go: (page: Page, patch?: Partial<Filters>) => void;
   sessionKey: string | null;
   openSession: (key: string | null) => void;
@@ -25,16 +29,44 @@ const Context = createContext<NavContext | null>(null);
 
 const isPage = (value: unknown): value is Page => PAGES.some((page) => page.key === value);
 
+interface Drill {
+  page: Page;
+  before: Filters;
+  applied: Filters;
+}
+
+const same = (a: Filters, b: Filters) => JSON.stringify(a) === JSON.stringify(b);
+
+/** What `go` does to the filters; `null` filters mean "leave them alone". */
+export function drillStep(
+  pending: Drill | null,
+  current: Filters,
+  next: Page,
+  patch?: Partial<Filters>,
+): { drill: Drill | null; filters: Filters | null } {
+  const untouched = pending !== null && same(pending.applied, current);
+  if (patch) {
+    const applied = { ...current, ...patch };
+    // A drill-down from a drilled page still returns to the original filters.
+    return { drill: { page: next, before: untouched ? pending.before : current, applied }, filters: applied };
+  }
+  if (!pending || next === pending.page) return { drill: pending, filters: null };
+  return { drill: null, filters: untouched ? pending.before : null };
+}
+
 export function NavProvider({ children }: { children: ReactNode }) {
-  const { setFilters } = useData();
+  const { filters, setFilters } = useData();
   const [page, setPage] = usePersistent<Page>("tokenlens.page.v1", "overview", isPage);
   const [sessionKey, setSessionKey] = useState<string | null>(null);
+  const drill = useRef<Drill | null>(null);
   const go = useCallback(
     (next: Page, patch?: Partial<Filters>) => {
-      if (patch) setFilters((previous) => ({ ...previous, ...patch }));
+      const step = drillStep(drill.current, filters, next, patch);
+      drill.current = step.drill;
+      if (step.filters) setFilters(step.filters);
       setPage(next);
     },
-    [setFilters, setPage],
+    [filters, setFilters, setPage],
   );
   const value = useMemo(() => ({ page, go, sessionKey, openSession: setSessionKey }), [page, go, sessionKey]);
   return <Context.Provider value={value}>{children}</Context.Provider>;

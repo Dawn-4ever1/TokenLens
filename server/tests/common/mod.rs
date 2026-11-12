@@ -83,7 +83,11 @@ impl Harness {
         time_zone: chrono_tz::Tz,
     ) -> Self {
         let clock = ManualClock::new(START_MS);
-        let state = AppState::new(conn, Arc::new(clock.clone())).with_time_zone(time_zone);
+        // Same wiring as `serve` in main.rs: reads on their own connection.
+        let reader = db::open_reader(&db_path).expect("reader");
+        let state = AppState::new(conn, Arc::new(clock.clone()))
+            .with_reader(reader)
+            .with_time_zone(time_zone);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
