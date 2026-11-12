@@ -30,7 +30,7 @@ jobs:
       - name: Tag matches the version in every file
         run: node scripts/release-version.mjs check "$TAG"
       - name: Validate release metadata tests
-        run: node --test scripts/release-metadata.test.mjs
+        run: node --test scripts/release-metadata.test.mjs scripts/check-bundle-privacy.test.mjs
       - name: Draft release
         run: |
           version="${TAG#v}"

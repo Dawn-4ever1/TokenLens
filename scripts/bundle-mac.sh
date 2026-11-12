@@ -31,11 +31,9 @@ npm run tauri build -- --bundles app,dmg --config "$override" -- -j 4
 
 bundle="$target/release/bundle"
 binary="$bundle/macos/TokenLens.app/Contents/MacOS/tokenlens-app"
-leaks="$(strings -a "$binary" | grep -c -F "$HOME" || true)"
-if [ "$leaks" != "0" ]; then
-  echo "The app binary still contains this machine's home path ($leaks places)." >&2
-  exit 1
-fi
+# Preserve the existing Mac home-path-only policy (runner account names can be
+# common framework symbols); share the raw-byte scanner and never exempt HOME.
+node "$repo/scripts/check-bundle-privacy.mjs" "$binary" --home-only
 # A broken ad-hoc signature makes macOS call a downloaded copy "damaged".
 codesign --verify --deep --strict "$bundle/macos/TokenLens.app"
 hdiutil verify "$bundle"/dmg/*.dmg >/dev/null

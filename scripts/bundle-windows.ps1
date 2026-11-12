@@ -36,23 +36,11 @@ try {
   Remove-Item -LiteralPath $override -Force
 }
 
-# Search the app binary for the home path and user name, as ASCII and UTF-16.
+# Scan raw UTF-8/UTF-16 bytes; only the approved public repository identifier is
+# exempt from bare user-name matches. Full home paths are never exempt.
 $binary = Join-Path $target 'release\tokenlens-app.exe'
-$latin1 = [Text.Encoding]::GetEncoding(28591)
-$text = $latin1.GetString([IO.File]::ReadAllBytes($binary))
-$leaks = @()
-foreach ($entry in @(@{ Label = 'home path'; Value = $HOME }, @{ Label = 'user name'; Value = $env:USERNAME })) {
-  $needle = $entry.Value
-  foreach ($encoding in @([Text.Encoding]::ASCII, [Text.Encoding]::Unicode)) {
-    $pattern = $latin1.GetString($encoding.GetBytes($needle))
-    if ($text.IndexOf($pattern, [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-      $leaks += "$($entry.Label) ($($encoding.EncodingName))"
-    }
-  }
-}
-if ($leaks.Count -gt 0) {
-  throw "The app binary still contains: $($leaks -join ', ')"
-}
+node (Join-Path $PSScriptRoot 'check-bundle-privacy.mjs') $binary
+if ($LASTEXITCODE -ne 0) { throw 'Build privacy check failed.' }
 
 $installer = Get-ChildItem (Join-Path $target 'release\bundle\nsis') -Filter '*-setup.exe' |
   Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -61,4 +49,4 @@ if ($updater -and -not (Test-Path -LiteralPath "$($installer.FullName).sig" -Pat
   throw 'Updater signature is missing.'
 }
 '{0}  {1:N1} MB  {2}' -f $installer.FullName, ($installer.Length / 1MB), $installer.LastWriteTime
-'Installer ready; no home path or user name inside the app binary.'
+'Installer ready; no private home path or user name inside the app binary.'
