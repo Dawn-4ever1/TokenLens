@@ -49,6 +49,35 @@ export function verifyUpdaterSignature(content, signature, publicKey) {
   return trustedComment;
 }
 
+// The in-app update dialog shows plain text. Keep only the 「本版变化」 section
+// of the Release page and drop Markdown markers; download and first-run help
+// stay on the Release page, where they are useful.
+export const CHANGES_HEADING = "本版变化";
+
+export function updateNotes(body) {
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
+  const heading = (line) => /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+  const start = lines.findIndex((line) => heading(line)?.[2] === CHANGES_HEADING);
+  if (start < 0) throw new Error(`Release notes need a 「## ${CHANGES_HEADING}」 section`);
+  const level = heading(lines[start])[1].length;
+  const section = [];
+  for (const line of lines.slice(start + 1)) {
+    const match = heading(line);
+    if (match && match[1].length <= level) break;
+    section.push(match ? match[2] : line);
+  }
+  const text = section.join("\n")
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\*\*|__|`/g, "")
+    .replace(/^([ \t]*)[-*+][ \t]+/gm, "$1• ")
+    .replace(/^[ \t]*>[ \t]?/gm, "")
+    .replace(/[ \t]+$/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!text) throw new Error(`The 「${CHANGES_HEADING}」 section of the Release notes is empty`);
+  return text;
+}
+
 export function createReleaseMetadata({ tag, repository, assetsDir, notes, pubDate, publicKey }) {
   if (!/^v\d+\.\d+\.\d+$/.test(tag)) throw new Error("Expected a stable vX.Y.Z tag");
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("Invalid repository");
@@ -79,7 +108,7 @@ export function createReleaseMetadata({ tag, repository, assetsDir, notes, pubDa
   };
   const manifest = {
     version,
-    notes,
+    notes: updateNotes(notes),
     pub_date: pubDate,
     platforms: { "windows-x86_64": platform(windows), "darwin-aarch64": platform(mac) },
   };

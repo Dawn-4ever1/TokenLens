@@ -4,7 +4,7 @@ import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto"
 import { mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createReleaseMetadata, verifyUpdaterSignature } from "./release-metadata.mjs";
+import { createReleaseMetadata, updateNotes, verifyUpdaterSignature } from "./release-metadata.mjs";
 
 const encode = (text) => Buffer.from(text).toString("base64");
 
@@ -38,7 +38,7 @@ function fixture(t, signedVersion = "0.4.0") {
     writeFileSync(join(assetsDir, name), data);
     if (name !== "TokenLens_0.4.0_aarch64.dmg") writeFileSync(join(assetsDir, `${name}.sig`), `${synthetic.signature(data, false, signedVersion)}\n`);
   }
-  return { tag: "v0.4.0", repository: "owner/repo", assetsDir, notes: "Release notes as plain text\n<script>not executed</script>", pubDate: "2026-11-12T00:00:00Z", publicKey: synthetic.key, windows, mac };
+  return { tag: "v0.4.0", repository: "owner/repo", assetsDir, notes: "## 本版变化\n\nRelease notes as plain text\n<script>not executed</script>\n\n## 下载\n\n| a | b |", pubDate: "2026-11-12T00:00:00Z", publicKey: synthetic.key, windows, mac };
 }
 
 test("Minisign matches the upstream prehashed test vector", () => {
@@ -59,7 +59,7 @@ test("writes complete manifest links, literal signatures and checksum for every 
   const input = fixture(t);
   const { manifest, latest, sums } = createReleaseMetadata(input);
   assert.equal(manifest.version, "0.4.0");
-  assert.equal(manifest.notes, input.notes);
+  assert.equal(manifest.notes, "Release notes as plain text\n<script>not executed</script>");
   assert.equal(manifest.pub_date, input.pubDate);
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["darwin-aarch64", "windows-x86_64"]);
   for (const [platform, file] of [["windows-x86_64", input.windows], ["darwin-aarch64", input.mac]]) {
@@ -130,4 +130,27 @@ test("rejects invalid tag, repository and publication metadata", (t) => {
   assert.throws(() => createReleaseMetadata({ ...input, repository: "owner/repo/escape" }), /Invalid repository/);
   assert.throws(() => createReleaseMetadata({ ...input, pubDate: "not a date" }), /publication date/);
   assert.throws(() => createReleaseMetadata({ ...input, notes: "" }), /notes are missing/);
+});
+
+test("in-app notes keep only the 本版变化 section as plain text", () => {
+  const body = [
+    "## 本版变化", "", "修好 **两件事**：", "", "- 看板 `趋势` 页更快", "* 详见 [说明](https://example.com)", "",
+    "### 已知问题", "", "> Mac 另验", "", "", "", "## 下载", "", "| 系统 | 文件 |", "|---|---|", "## 第一次打开", "仍要运行",
+  ].join("\r\n");
+  assert.equal(updateNotes(body), "修好 两件事：\n\n• 看板 趋势 页更快\n• 详见 说明\n\n已知问题\n\nMac 另验");
+});
+
+test("Release notes without a filled 本版变化 section prevent publication", (t) => {
+  assert.throws(() => updateNotes("## 下载\n\n| a | b |"), /need a/);
+  assert.throws(() => updateNotes("## 本版变化\n\n   \n## 下载\ntext"), /empty/);
+  const input = fixture(t);
+  assert.throws(() => createReleaseMetadata({ ...input, notes: "## 下载\n\ntext" }), /本版变化/);
+});
+
+test("the Release notes template yields short plain in-app notes", () => {
+  const template = readFileSync(new URL("../.github/release-notes.md", import.meta.url), "utf8");
+  const notes = updateNotes(template);
+  assert.ok(notes.length > 0 && notes.length < 600, "keep the in-app summary short");
+  assert.doesNotMatch(notes, /^#|\||`|\*\*|\{\{VERSION\}\}/m);
+  assert.doesNotMatch(notes, /SHA256SUMS|仍要运行|配对码/, "download and first-run help stay on the Release page");
 });
