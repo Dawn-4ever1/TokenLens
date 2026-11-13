@@ -161,6 +161,11 @@ test("the Release notes template yields short, one-line-at-a-time in-app notes",
   }
 });
 
+test("HTML comments in the template never reach the update dialog", () => {
+  const notes = updateNotes("## 本版变化\n\n<!-- internal note -->\n\n- 一条要点\n- 另一条要点\n\n## 下载\n");
+  assert.equal(notes, "• 一条要点\n• 另一条要点");
+});
+
 test("a single long paragraph is rejected as update notes", () => {
   const paragraph = "## 本版变化\n\n" + "这一整段话会被塞进更新窗口里，用户要读很久才能读完，而且中间没有任何停顿，看起来非常累。".repeat(2) + "\n\n## 下载\n";
   const notes = updateNotes(paragraph);

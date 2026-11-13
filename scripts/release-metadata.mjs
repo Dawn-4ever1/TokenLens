@@ -67,6 +67,7 @@ export function updateNotes(body) {
     section.push(match ? match[2] : line);
   }
   const text = section.join("\n")
+    .replace(/<!--[\s\S]*?-->/g, "")
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\*\*|__|`/g, "")
     .replace(/^([ \t]*)[-*+][ \t]+/gm, "$1• ")
