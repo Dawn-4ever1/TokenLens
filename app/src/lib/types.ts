@@ -252,10 +252,10 @@ export interface Health {
 /** Local app state from the Rust side; never contains a token. */
 export interface AppStatus {
   paired: boolean;
-  /** "local": the server runs inside the app, data stays on this computer (D044). */
+  /** Current dashboard source. Local collection continues with either source. */
   mode: "local" | "server" | null;
   deviceId: string | null;
-  /** Server address; null in local mode. */
+  /** Connected server address, also present while viewing local data; null if disconnected. */
   server: string | null;
   appVersion: string;
   collector: {
@@ -271,11 +271,23 @@ export interface AppStatus {
   };
   autostart: boolean | null;
   platform: "macos" | "windows" | "linux";
+  /** Hosted service preselected for new connections (D049). */
+  cloudServer: string;
+  /** Signed-in account email, or null when this computer is not signed in. */
+  accountEmail: string | null;
+  /** Name of the signed-in space. */
+  accountSpace: string | null;
 }
 
 export interface PairCode {
   code: string;
   expiresAt: string;
+}
+
+/** A space's replaceable pairing code; shown only after signing in (D049). */
+export interface SpaceCode {
+  code: string;
+  replaceable: boolean;
 }
 
 /** Updater state from Rust; checking/downloading never carries user credentials. */
@@ -300,7 +312,10 @@ export type ApiErrorKind =
   | "rate_limited"
   | "server"
   | "keychain"
-  | "unavailable";
+  | "unavailable"
+  | "bad_code"
+  | "bad_email"
+  | "not_signed_in";
 
 export class ApiError extends Error {
   constructor(

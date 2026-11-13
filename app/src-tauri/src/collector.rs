@@ -1,6 +1,8 @@
 //! The background collector: the same watch loop and upload thread as
 //! `collector run`, with its JSON status lines turned into app state.
 
+use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
@@ -10,10 +12,11 @@ use std::time::Duration;
 
 use collector_core::credentials::Credentials;
 use collector_core::schedule::Timing;
-use collector_core::state::StateError;
-use collector_core::sync::{SyncTiming, Syncer};
+use collector_core::snapshot::{ScannedEvent, Scope, Snapshot};
+use collector_core::state::{Prepared, StateError};
+use collector_core::sync::{Recorded, SyncLine, SyncTiming, Syncer};
 use collector_core::transport::{Transport, UreqTransport};
-use collector_core::watch::{self, Msg, WatchOptions};
+use collector_core::watch::{self, Msg, ScanSync, WatchOptions};
 use serde_json::Value;
 
 use crate::config::Paths;
@@ -33,6 +36,8 @@ pub struct Live {
     pub last_scan_at: Option<i64>,
     pub last_error: Option<String>,
     pub upload_state: Option<String>,
+    pub server_upload_state: Option<String>,
+    pub server_queue_error: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +69,16 @@ impl Destination {
 struct Running {
     sender: Sender<Msg>,
     handle: JoinHandle<()>,
+}
+
+enum RunMode {
+    #[cfg(test)]
+    Single(Destination),
+    LocalFirst {
+        local: Destination,
+        server: Option<Destination>,
+        legacy_local_queue: bool,
+    },
 }
 
 #[derive(Default)]
@@ -114,6 +129,7 @@ impl Collector {
             .is_some_and(|running| !running.handle.is_finished())
     }
 
+    #[cfg(test)]
     pub fn start(
         &self,
         options: WatchOptions,
@@ -121,6 +137,33 @@ impl Collector {
         destination: Destination,
         notify: Notify,
     ) {
+        self.start_run(options, state_dir, RunMode::Single(destination), notify);
+    }
+
+    /// One scan feeds the local database and, when paired, a separate server
+    /// queue. The local destination is always active.
+    pub fn start_with_server(
+        &self,
+        options: WatchOptions,
+        state_dir: PathBuf,
+        local: Destination,
+        server: Option<Destination>,
+        legacy_local_queue: bool,
+        notify: Notify,
+    ) {
+        self.start_run(
+            options,
+            state_dir,
+            RunMode::LocalFirst {
+                local,
+                server,
+                legacy_local_queue,
+            },
+            notify,
+        );
+    }
+
+    fn start_run(&self, options: WatchOptions, state_dir: PathBuf, mode: RunMode, notify: Notify) {
         let mut lifecycle = lock(&self.lifecycle);
         if lifecycle.update_resume.is_some()
             || lifecycle
@@ -135,21 +178,47 @@ impl Collector {
         let live = Arc::clone(&self.live);
         let spawned = std::thread::Builder::new()
             .name("collector".to_owned())
-            .spawn(move || {
-                let Some(mut syncer) = start_syncer(
-                    &state_dir,
-                    &destination,
-                    &loop_sender,
-                    &receiver,
-                    &live,
-                    &*notify,
-                    BUSY_RETRY,
-                ) else {
-                    return;
-                };
-                let mut out = StatusSink::new(live, notify);
-                watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
-                syncer.stop();
+            .spawn(move || match mode {
+                RunMode::LocalFirst {
+                    local,
+                    server,
+                    legacy_local_queue,
+                } => {
+                    let Some(mut syncer) = Fanout::start(
+                        &state_dir,
+                        FanoutDestinations {
+                            local: &local,
+                            server: server.as_ref(),
+                            legacy_local_queue,
+                        },
+                        &loop_sender,
+                        &receiver,
+                        &live,
+                        &notify,
+                    ) else {
+                        return;
+                    };
+                    let mut out = StatusSink::new(live, notify);
+                    watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
+                    syncer.stop();
+                }
+                #[cfg(test)]
+                RunMode::Single(destination) => {
+                    let Some(mut syncer) = start_syncer(
+                        &state_dir,
+                        &destination,
+                        &loop_sender,
+                        &receiver,
+                        &live,
+                        &*notify,
+                        BUSY_RETRY,
+                    ) else {
+                        return;
+                    };
+                    let mut out = StatusSink::new(live, notify);
+                    watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
+                    syncer.stop();
+                }
             });
         match spawned {
             Ok(handle) => lifecycle.running = Some(Running { sender, handle }),
@@ -191,6 +260,282 @@ impl Collector {
     pub fn finish_update(&self) -> bool {
         lock(&self.lifecycle).update_resume.take().unwrap_or(false)
     }
+}
+
+/// Each destination consults its own durable queue before accepting changes.
+/// Only the watch loop retains a complete snapshot in memory.
+struct Target {
+    syncer: Syncer,
+}
+
+impl Target {
+    fn new(syncer: Syncer) -> Self {
+        Self { syncer }
+    }
+
+    fn record_scan(
+        &mut self,
+        full: bool,
+        counts: &BTreeMap<String, u64>,
+        changed: &[ScannedEvent],
+        duration: Duration,
+    ) -> Recorded {
+        match self.syncer.filter_unknown(changed) {
+            Ok(needed) => self.syncer.record_scan(full, counts, needed, duration),
+            Err(_) => Recorded {
+                line: SyncLine {
+                    sync: "queued",
+                    ok: false,
+                    error: Some("state_read_failed".to_owned()),
+                    ..SyncLine::default()
+                },
+                forget: changed.iter().map(|event| event.key.clone()).collect(),
+            },
+        }
+    }
+}
+
+struct Fanout {
+    local: Target,
+    server: Option<Target>,
+    live: Arc<Mutex<Live>>,
+    notify: Notify,
+    // Also held without a server pairing, and if opening its queue fails.
+    _root_lock: Arc<File>,
+}
+
+struct FanoutDestinations<'a> {
+    local: &'a Destination,
+    server: Option<&'a Destination>,
+    legacy_local_queue: bool,
+}
+
+impl Fanout {
+    fn start(
+        state_dir: &Path,
+        destinations: FanoutDestinations<'_>,
+        sender: &Sender<Msg>,
+        receiver: &Receiver<Msg>,
+        live: &Arc<Mutex<Live>>,
+        notify: &Notify,
+    ) -> Option<Self> {
+        let FanoutDestinations {
+            local,
+            server,
+            legacy_local_queue,
+        } = destinations;
+        let root_lock = loop {
+            match collector_core::state::lock_queue(state_dir) {
+                Ok(guard) => break Arc::new(guard),
+                Err(StateError::Busy) => {
+                    if lock(live).last_error.as_deref() != Some(BUSY_ERROR) {
+                        lock(live).last_error = Some(BUSY_ERROR.to_owned());
+                        notify(Event::Changed);
+                    }
+                    if wait_or_stop(receiver, BUSY_RETRY) {
+                        return None;
+                    }
+                }
+                Err(_) => {
+                    lock(live).last_error = Some(QUEUE_ERROR.to_owned());
+                    notify(Event::Changed);
+                    return None;
+                }
+            }
+        };
+        if lock(live).last_error.as_deref() == Some(BUSY_ERROR) {
+            lock(live).last_error = None;
+        }
+        if legacy_local_queue
+            && crate::local::migrate_queue(state_dir, &local.credentials.device_id).is_err()
+        {
+            lock(live).last_error = Some(QUEUE_ERROR.to_owned());
+            notify(Event::Changed);
+            return None;
+        }
+        let local_syncer = start_syncer(
+            &state_dir.join("local-queue"),
+            local,
+            sender,
+            receiver,
+            live,
+            &**notify,
+            BUSY_RETRY,
+        )?;
+        let local = Target::new(local_syncer);
+        let server = server.and_then(|destination| {
+            let sink = sender.clone();
+            let status = Arc::clone(live);
+            let started = Syncer::start_with_queue_lock(
+                state_dir,
+                destination.credentials.clone(),
+                destination.transport(),
+                SyncTiming::default(),
+                Box::new(move |mut line| {
+                    apply_server_line(&mut lock(&status), &mut line);
+                    // Wake the watch loop (including restore/resync handling)
+                    // without overwriting the local upload state.
+                    let _ = sink.send(Msg::Sync(line));
+                }),
+                Arc::clone(&root_lock),
+            )
+            .map(Target::new);
+            match started {
+                Ok(target) => Some(target),
+                Err(_) => {
+                    set_server_queue_status(&mut lock(live), false);
+                    notify(Event::Changed);
+                    None
+                }
+            }
+        });
+        Some(Self {
+            local,
+            server,
+            live: Arc::clone(live),
+            notify: Arc::clone(notify),
+            _root_lock: root_lock,
+        })
+    }
+
+    fn stop(self) {
+        self.local.syncer.stop();
+        if let Some(server) = self.server {
+            server.syncer.stop();
+        }
+    }
+}
+
+impl ScanSync for Fanout {
+    fn prepared(&self) -> Prepared {
+        let local = self.local.syncer.prepared;
+        let server = self
+            .server
+            .as_ref()
+            .map(|target| target.syncer.prepared)
+            .unwrap_or_default();
+        Prepared {
+            device_changed: local.device_changed || server.device_changed,
+            generation_changed: local.generation_changed || server.generation_changed,
+        }
+    }
+
+    fn seed(&self, snapshot: &mut Snapshot) -> Result<usize, StateError> {
+        *snapshot = Snapshot::default();
+        if let Err(error) = self.local.syncer.seed(snapshot) {
+            *snapshot = Snapshot::default();
+            return Err(error);
+        }
+        if let Some(server) = &self.server {
+            let mut known = Snapshot::default();
+            if server.syncer.seed(&mut known).is_err() {
+                // Keep all payloads so a later scan can repair the remote
+                // queue, while the local destination remains usable.
+                *snapshot = Snapshot::default();
+                set_server_queue_status(&mut lock(&self.live), false);
+                (self.notify)(Event::Changed);
+                return Ok(0);
+            }
+            if set_server_queue_status(&mut lock(&self.live), true) {
+                (self.notify)(Event::Changed);
+            }
+            snapshot.retain_matching(&known);
+        }
+        Ok(snapshot.len())
+    }
+
+    fn take_resync(&mut self) -> bool {
+        // Always consume both flags: `||` here would defer the second one.
+        let local = self.local.syncer.take_resync();
+        let server = self
+            .server
+            .as_mut()
+            .is_some_and(|target| target.syncer.take_resync());
+        local || server
+    }
+
+    fn record_scan(
+        &mut self,
+        full: bool,
+        counts: &BTreeMap<String, u64>,
+        changed: Vec<ScannedEvent>,
+        duration: Duration,
+    ) -> Recorded {
+        let mut recorded = self.local.record_scan(full, counts, &changed, duration);
+        let status_changed = {
+            let mut live = lock(&self.live);
+            if !recorded.line.ok && live.last_error.as_deref() != Some(QUEUE_ERROR) {
+                live.last_error = Some(QUEUE_ERROR.to_owned());
+                true
+            } else if recorded.line.ok && live.last_error.as_deref() == Some(QUEUE_ERROR) {
+                live.last_error = None;
+                true
+            } else {
+                false
+            }
+        };
+        if status_changed {
+            (self.notify)(Event::Changed);
+        }
+        if let Some(server) = &mut self.server {
+            let remote = server.record_scan(full, counts, &changed, duration);
+            recorded.forget.extend(remote.forget);
+            if set_server_queue_status(&mut lock(&self.live), remote.line.ok) {
+                (self.notify)(Event::Changed);
+            }
+        }
+        recorded
+    }
+
+    fn record_failure(&mut self, scope: &Scope, code: &str) {
+        self.local.syncer.record_failure(scope, code);
+        if let Some(server) = &mut self.server {
+            server.syncer.record_failure(scope, code);
+        }
+    }
+}
+
+/// Queue failures stay visible until a queue operation verifies recovery.
+/// Network heartbeats cannot establish whether scan data can be persisted.
+fn set_server_queue_status(live: &mut Live, okay: bool) -> bool {
+    let previous = live.server_queue_error;
+    live.server_queue_error = !okay;
+    if okay {
+        if live.server_upload_state.as_deref() == Some("queue_error") {
+            live.server_upload_state = None;
+        }
+    } else {
+        live.server_upload_state = Some("queue_error".to_owned());
+    }
+    previous != live.server_queue_error
+}
+
+fn apply_server_line(live: &mut Live, line: &mut SyncLine) {
+    let state = server_sync_state(line);
+    if state.as_deref() == Some("queue_error") {
+        set_server_queue_status(live, false);
+    } else if live.server_queue_error {
+        live.server_upload_state = Some("queue_error".to_owned());
+    } else if let Some(state) = state {
+        live.server_upload_state = Some(state);
+    }
+}
+
+/// Server failures are separate from local collection. In particular a failed
+/// heartbeat can carry `state = ok`, so its actual failure must remain visible.
+fn server_sync_state(line: &mut SyncLine) -> Option<String> {
+    let state = line.state.take();
+    if !line.ok
+        && let Some(error) = &line.error
+    {
+        if error.starts_with("state_") {
+            return Some("queue_error".to_owned());
+        }
+        if state.as_deref() == Some("ok") {
+            return Some(format!("backoff:{error}"));
+        }
+    }
+    state
 }
 
 /// `None` when stopped while waiting, or when the queue cannot be opened.
@@ -365,8 +710,413 @@ impl Write for StatusSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use collector_core::credentials::Credentials;
+    use collector_core::state::State;
+    use collector_core::transport::{HttpResponse, TransportError};
     use serde_json::json;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use usage_event::envelope::FormFactor;
+
+    struct TestTransport {
+        local: LocalTransport,
+        online: Arc<AtomicBool>,
+        uploads: Arc<AtomicUsize>,
+        failed_requests: Arc<AtomicUsize>,
+        store_id: Arc<Mutex<String>>,
+    }
+
+    impl Transport for TestTransport {
+        fn post(
+            &self,
+            url: &str,
+            bearer: Option<&str>,
+            gzip: bool,
+            body: &[u8],
+        ) -> Result<HttpResponse, TransportError> {
+            if !self.online.load(Ordering::SeqCst) {
+                self.failed_requests.fetch_add(1, Ordering::SeqCst);
+                return Err(TransportError::Network);
+            }
+            let mut reply = self.local.post(url, bearer, gzip, body)?;
+            if reply.status == 200 {
+                if url.ends_with("/events") {
+                    self.uploads.fetch_add(1, Ordering::SeqCst);
+                }
+                let mut value: Value = serde_json::from_slice(&reply.body).unwrap();
+                value["storeId"] = json!(lock(&self.store_id).clone());
+                reply.body = serde_json::to_vec(&value).unwrap();
+            }
+            Ok(reply)
+        }
+    }
+
+    struct TestDestination {
+        server: Arc<LocalServer>,
+        credentials: Credentials,
+        online: Arc<AtomicBool>,
+        uploads: Arc<AtomicUsize>,
+        failed_requests: Arc<AtomicUsize>,
+        store_id: Arc<Mutex<String>>,
+        restored: Arc<AtomicBool>,
+    }
+
+    impl TestDestination {
+        fn new(path: &Path, online: bool) -> Self {
+            let server = LocalServer::open_with(path, None).unwrap();
+            let credentials = server.pair(FormFactor::Laptop, "Fixture computer").unwrap();
+            Self {
+                server,
+                credentials,
+                online: Arc::new(AtomicBool::new(online)),
+                uploads: Arc::new(AtomicUsize::new(0)),
+                failed_requests: Arc::new(AtomicUsize::new(0)),
+                store_id: Arc::new(Mutex::new("aaaa".to_owned())),
+                restored: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn target(&self, queue: &Path, guard: Arc<File>) -> Target {
+            let restored = Arc::clone(&self.restored);
+            let syncer = Syncer::start_with_queue_lock(
+                queue,
+                self.credentials.clone(),
+                Box::new(TestTransport {
+                    local: LocalTransport(Arc::clone(&self.server)),
+                    online: Arc::clone(&self.online),
+                    uploads: Arc::clone(&self.uploads),
+                    failed_requests: Arc::clone(&self.failed_requests),
+                    store_id: Arc::clone(&self.store_id),
+                }),
+                SyncTiming {
+                    min_round_gap: Duration::from_millis(5),
+                    heartbeat_interval: Duration::from_millis(20),
+                    backoff_base: Duration::from_millis(5),
+                    backoff_max: Duration::from_millis(20),
+                },
+                Box::new(move |line| {
+                    if line.resync == Some(true) {
+                        restored.store(true, Ordering::SeqCst);
+                    }
+                }),
+                guard,
+            )
+            .unwrap();
+            Target::new(syncer)
+        }
+
+        fn input(&self) -> i64 {
+            let response = LocalTransport(Arc::clone(&self.server))
+                .get(
+                    "local://this-computer/api/dashboard/summary?from=2023-11-01&to=2023-11-30",
+                    Some(&self.credentials.read_token),
+                )
+                .unwrap();
+            let value: Value = serde_json::from_slice(&response.body).unwrap();
+            value["inputTokens"].as_i64().unwrap()
+        }
+    }
+
+    fn fixture_events() -> Vec<ScannedEvent> {
+        let values: Vec<usage_event::UsageEvent> =
+            serde_json::from_str(include_str!("../../../fixtures/usage-events.json")).unwrap();
+        values
+            .into_iter()
+            .map(|event| ScannedEvent {
+                key: event.event_key.clone(),
+                client: event.client.clone(),
+                ts: event.ts,
+                hash: collector_core::event_value_hash(&event),
+                payload: Some(collector_core::canonical_json(
+                    &serde_json::to_value(event).unwrap(),
+                )),
+            })
+            .collect()
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let limit = std::time::Instant::now() + Duration::from_secs(5);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < limit,
+                "background sync timed out"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_disconnected_server_does_not_block_local_data_and_both_recover_without_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let local = TestDestination::new(&root.path().join("local-store"), true);
+        let server = TestDestination::new(&root.path().join("server-store"), false);
+        let queue = root.path().join("queue");
+        let local_queue = queue.join("local-queue");
+        let root_guard = Arc::new(collector_core::state::lock_queue(&queue).unwrap());
+        let local_guard = Arc::new(collector_core::state::lock_queue(&local_queue).unwrap());
+        let counts = BTreeMap::from([
+            ("synthetic-client".to_owned(), 3),
+            ("qoder-intl".to_owned(), 1),
+        ]);
+        let events = fixture_events();
+        let mut local_target = local.target(&local_queue, local_guard);
+        assert_eq!(
+            local_target
+                .record_scan(true, &counts, &events, Duration::ZERO)
+                .line
+                .events,
+            Some(4)
+        );
+        wait_until(|| local.input() == 540 && local.uploads.load(Ordering::SeqCst) == 1);
+        // Connecting a server keeps the already populated local queue.
+        let mut fanout = Fanout {
+            local: local_target,
+            server: Some(server.target(&queue, Arc::clone(&root_guard))),
+            live: Arc::new(Mutex::new(Live::default())),
+            notify: Arc::new(|_| {}),
+            _root_lock: root_guard,
+        };
+        let mut snapshot = Snapshot::default();
+        assert_eq!(
+            fanout.seed(&mut snapshot).unwrap(),
+            0,
+            "new server needs all existing payloads"
+        );
+        let recorded = fanout.record_scan(true, &counts, events.clone(), Duration::ZERO);
+        assert!(recorded.line.ok);
+        assert_eq!(
+            recorded.line.events,
+            Some(0),
+            "existing local values are not uploaded again"
+        );
+        wait_until(|| local.input() == 540);
+        assert_eq!(
+            server.input(),
+            0,
+            "a failed remote request cannot stop the local destination"
+        );
+        assert_eq!(
+            collector_core::sync::local_status(&queue)
+                .unwrap()
+                .unwrap()
+                .outbox_backlog,
+            4
+        );
+        wait_until(|| server.failed_requests.load(Ordering::SeqCst) > 0);
+
+        // Even when another destination needs a payload, this destination
+        // never queues its own unchanged value for upload again.
+        let again = fanout.record_scan(true, &counts, events.clone(), Duration::ZERO);
+        assert_eq!(again.line.events, Some(0));
+        assert_eq!(local.uploads.load(Ordering::SeqCst), 1);
+        server.online.store(true, Ordering::SeqCst);
+        wait_until(|| server.input() == 540);
+        wait_until(|| {
+            collector_core::sync::local_status(&queue)
+                .unwrap()
+                .unwrap()
+                .outbox_backlog
+                == 0
+        });
+        assert_eq!(server.uploads.load(Ordering::SeqCst), 1);
+
+        // Restoring only the server must not re-upload unchanged local data.
+        *lock(&server.store_id) = "bbbb".to_owned();
+        wait_until(|| server.restored.load(Ordering::SeqCst));
+        assert!(fanout.take_resync());
+        assert!(!fanout.take_resync());
+        assert_eq!(fanout.seed(&mut snapshot).unwrap(), 0);
+        assert_eq!(
+            fanout
+                .record_scan(true, &counts, events.clone(), Duration::ZERO)
+                .line
+                .events,
+            Some(0)
+        );
+        wait_until(|| server.uploads.load(Ordering::SeqCst) == 2);
+        wait_until(|| {
+            collector_core::sync::local_status(&queue)
+                .unwrap()
+                .unwrap()
+                .outbox_backlog
+                == 0
+        });
+        assert_eq!(local.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(local.input(), 540);
+        assert_eq!(server.input(), 540);
+
+        // Only a verified queue operation can clear a sticky write error.
+        set_server_queue_status(&mut lock(&fanout.live), false);
+        let mut heartbeat = SyncLine {
+            sync: "heartbeat",
+            ok: true,
+            state: Some("ok".to_owned()),
+            ..SyncLine::default()
+        };
+        apply_server_line(&mut lock(&fanout.live), &mut heartbeat);
+        assert!(lock(&fanout.live).server_queue_error);
+        assert_eq!(
+            lock(&fanout.live).server_upload_state.as_deref(),
+            Some("queue_error")
+        );
+        fanout.record_scan(true, &counts, events.clone(), Duration::ZERO);
+        assert!(!lock(&fanout.live).server_queue_error);
+        assert_ne!(
+            lock(&fanout.live).server_upload_state.as_deref(),
+            Some("queue_error")
+        );
+        assert_eq!(local.uploads.load(Ordering::SeqCst), 1);
+        assert_eq!(server.uploads.load(Ordering::SeqCst), 2);
+        set_server_queue_status(&mut lock(&fanout.live), false);
+        assert_eq!(fanout.seed(&mut snapshot).unwrap(), 4);
+        assert!(!lock(&fanout.live).server_queue_error);
+
+        // Both restore signals must be consumed in the same watch turn.
+        local.restored.store(false, Ordering::SeqCst);
+        server.restored.store(false, Ordering::SeqCst);
+        *lock(&local.store_id) = "cccc".to_owned();
+        *lock(&server.store_id) = "cccc".to_owned();
+        wait_until(|| {
+            local.restored.load(Ordering::SeqCst) && server.restored.load(Ordering::SeqCst)
+        });
+        assert!(fanout.take_resync());
+        let mut known = Snapshot::default();
+        assert_eq!(fanout.local.syncer.seed(&mut known).unwrap(), 0);
+        assert_eq!(
+            fanout
+                .server
+                .as_ref()
+                .unwrap()
+                .syncer
+                .seed(&mut known)
+                .unwrap(),
+            0
+        );
+        assert!(!fanout.take_resync());
+        assert_eq!(fanout.seed(&mut snapshot).unwrap(), 0);
+        fanout.record_scan(true, &counts, events.clone(), Duration::ZERO);
+        wait_until(|| {
+            local.uploads.load(Ordering::SeqCst) == 2 && server.uploads.load(Ordering::SeqCst) == 3
+        });
+        assert_eq!(local.input(), 540);
+        assert_eq!(server.input(), 540);
+        fanout.stop();
+        assert!(collector_core::state::lock_queue(&queue).is_ok());
+        assert!(collector_core::state::lock_queue(&local_queue).is_ok());
+
+        let root_guard = Arc::new(collector_core::state::lock_queue(&queue).unwrap());
+        let local_guard = Arc::new(collector_core::state::lock_queue(&local_queue).unwrap());
+        let mut restarted = Fanout {
+            local: local.target(&local_queue, local_guard),
+            server: Some(server.target(&queue, Arc::clone(&root_guard))),
+            live: Arc::new(Mutex::new(Live::default())),
+            notify: Arc::new(|_| {}),
+            _root_lock: root_guard,
+        };
+        assert_eq!(
+            restarted.seed(&mut snapshot).unwrap(),
+            4,
+            "restart seeds the common values"
+        );
+        assert_eq!(
+            restarted
+                .record_scan(true, &counts, events, Duration::ZERO)
+                .line
+                .events,
+            Some(0)
+        );
+        assert_eq!(local.uploads.load(Ordering::SeqCst), 2);
+        assert_eq!(server.uploads.load(Ordering::SeqCst), 3);
+        restarted.stop();
+    }
+
+    #[test]
+    fn a_corrupt_server_queue_does_not_block_a_new_local_destination() {
+        let root = tempfile::tempdir().unwrap();
+        let local = TestDestination::new(&root.path().join("local-store"), true);
+        let queue = root.path().join("queue");
+        std::fs::create_dir_all(&queue).unwrap();
+        std::fs::write(State::path_in(&queue), b"synthetic invalid SQLite database").unwrap();
+        let local_destination = Destination {
+            credentials: local.credentials.clone(),
+            local: Some(Arc::clone(&local.server)),
+        };
+        let server_destination = Destination {
+            credentials: synthetic_credentials(),
+            local: None,
+        };
+        let (sender, receiver) = watch::channel();
+        let live = Arc::new(Mutex::new(Live::default()));
+        let notify: Notify = Arc::new(|_| {});
+        let mut fanout = Fanout::start(
+            &queue,
+            FanoutDestinations {
+                local: &local_destination,
+                server: Some(&server_destination),
+                legacy_local_queue: false,
+            },
+            &sender,
+            &receiver,
+            &live,
+            &notify,
+        )
+        .expect("local destination starts despite the damaged server queue");
+        assert!(fanout.server.is_none());
+        assert!(lock(&live).server_queue_error);
+        assert_eq!(lock(&live).last_error, None);
+        let counts = BTreeMap::from([
+            ("synthetic-client".to_owned(), 3),
+            ("qoder-intl".to_owned(), 1),
+        ]);
+        assert!(
+            fanout
+                .record_scan(true, &counts, fixture_events(), Duration::ZERO)
+                .line
+                .ok
+        );
+        wait_until(|| local.input() == 540);
+        let mut heartbeat = SyncLine {
+            sync: "heartbeat",
+            ok: true,
+            state: Some("ok".to_owned()),
+            ..SyncLine::default()
+        };
+        apply_server_line(&mut lock(&live), &mut heartbeat);
+        assert!(lock(&live).server_queue_error);
+        assert_eq!(
+            lock(&live).server_upload_state.as_deref(),
+            Some("queue_error")
+        );
+        assert_eq!(
+            lock(&live).last_error,
+            None,
+            "remote errors must not mark local collection broken"
+        );
+        assert!(collector_core::state::lock_queue(&queue).is_err());
+        fanout.stop();
+        assert!(collector_core::state::lock_queue(&queue).is_ok());
+    }
+
+    #[test]
+    fn server_heartbeat_failures_do_not_replace_the_local_upload_state() {
+        let mut line = SyncLine {
+            sync: "heartbeat",
+            ok: false,
+            state: Some("ok".to_owned()),
+            error: Some("network".to_owned()),
+            ..SyncLine::default()
+        };
+        assert_eq!(
+            server_sync_state(&mut line).as_deref(),
+            Some("backoff:network")
+        );
+        assert_eq!(line.state, None);
+        let mut live = Live {
+            upload_state: Some("ok".to_owned()),
+            ..Live::default()
+        };
+        apply(&mut live, &serde_json::to_value(line).unwrap(), 1);
+        assert_eq!(live.upload_state.as_deref(), Some("ok"));
+    }
 
     #[test]
     fn scan_lines_update_the_last_scan_and_clear_scan_errors() {

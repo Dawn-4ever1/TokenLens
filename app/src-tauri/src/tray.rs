@@ -45,13 +45,14 @@ struct Items {
     autostart: CheckMenuItem<Wry>,
 }
 
-pub struct Tray {
+pub struct Tray<R: tauri::Runtime> {
     items: Items,
     sender: Mutex<Sender<Poke>>,
+    marker: std::marker::PhantomData<fn() -> R>,
 }
 
-pub fn poke(app: &AppHandle, poke: Poke) {
-    if let Some(tray) = app.try_state::<Tray>() {
+pub fn poke<R: tauri::Runtime>(app: &AppHandle<R>, poke: Poke) {
+    if let Some(tray) = app.try_state::<Tray<R>>() {
         let _ = tray
             .sender
             .lock()
@@ -122,9 +123,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     };
     builder.build(app)?;
     let (sender, receiver) = mpsc::channel();
-    app.manage(Tray {
+    app.manage(Tray::<Wry> {
         items,
         sender: Mutex::new(sender),
+        marker: std::marker::PhantomData,
     });
     let handle = app.clone();
     std::thread::Builder::new()
@@ -183,7 +185,9 @@ pub fn state_label(status: &AppStatus) -> &'static str {
         return "采集未运行";
     }
     let upload = c.upload_state.as_deref().unwrap_or("ok");
-    if upload == "pairing_required" {
+    if upload == "queue_error" {
+        "服务器同步出错，本机继续记录"
+    } else if upload == "pairing_required" {
         "凭据失效，需重新配对"
     } else if upload == "upgrade_required" {
         "需要升级应用"
@@ -231,7 +235,7 @@ fn fetch_today(app: &AppHandle) -> Option<f64> {
 }
 
 fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
-    let tray = app.state::<Tray>();
+    let tray = app.state::<Tray<Wry>>();
     let mut today: Option<f64> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut fetch_at = Instant::now();
@@ -355,6 +359,9 @@ mod tests {
             },
             autostart: None,
             platform: "macos",
+            cloud_server: crate::account::CLOUD_URL,
+            account_email: None,
+            account_space: None,
         }
     }
 

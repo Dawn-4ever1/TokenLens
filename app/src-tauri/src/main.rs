@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account;
 mod collector;
 mod commands;
 mod config;
@@ -89,6 +90,15 @@ fn main() {
             commands::app_status,
             commands::dashboard_get,
             commands::pair_device,
+            commands::request_login_code,
+            commands::login_account,
+            commands::account_pair_code,
+            commands::refresh_account,
+            commands::start_github_login,
+            commands::poll_github_login,
+            commands::open_github_device_page,
+            commands::logout_account,
+            commands::set_dashboard_mode,
             commands::use_local_mode,
             commands::unpair_device,
             commands::set_paused,
@@ -112,6 +122,7 @@ fn main() {
             }
             let handle = app.handle().clone();
             tray::install(&handle)?;
+            commands::initialize_autostart(&handle);
             commands::start_collector(&handle);
             updater::start_schedule(&handle);
             if !background {

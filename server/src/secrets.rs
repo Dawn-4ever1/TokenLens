@@ -17,6 +17,10 @@ const TOKEN_BYTES: usize = 32;
 pub struct Secret(String);
 
 impl Secret {
+    pub fn from_digits(code: String) -> Self {
+        Self(code)
+    }
+
     pub fn from_header(token: &str) -> Self {
         Self(token.to_owned())
     }
@@ -147,6 +151,14 @@ pub fn new_device_id() -> String {
 
 pub fn new_token_id() -> String {
     format!("tok_{}", random_crockford(16).to_ascii_lowercase())
+}
+
+/// Opaque account login credential. Unlike device tokens it is never an
+/// ingest/read credential and cannot be used to upload or read usage directly.
+pub fn new_session() -> Secret {
+    let mut bytes = [0_u8; TOKEN_BYTES];
+    fill_random(&mut bytes);
+    Secret(format!("tls_{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
 
 #[cfg(test)]

@@ -76,6 +76,44 @@ impl Harness {
         .await
     }
 
+    /// A server wired to a stand-in GitHub for device-flow tests.
+    pub async fn start_with_github(client_id: &str, oauth_base: &str, api_base: &str) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("server.sqlite");
+        let opened = db::open(&db_path).expect("open database");
+        let clock = ManualClock::new(START_MS);
+        let reader = db::open_reader(&db_path).expect("reader");
+        let state = AppState::new(opened.conn, Arc::new(clock.clone()))
+            .with_reader(reader)
+            .with_time_zone(tokenlens_server::DEFAULT_TIME_ZONE)
+            .with_github(tokenlens_server::github::GitHub::with_bases(
+                client_id, oauth_base, api_base,
+            ))
+            .with_pairing_cipher(
+                tokenlens_server::pairing_crypto::PairingCipher::from_base64(
+                    &tokenlens_server::pairing_crypto::PairingCipher::generate(),
+                )
+                .expect("test pairing key"),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        tokio::spawn(tokenlens_server::serve(
+            listener,
+            state.clone(),
+            std::future::pending(),
+        ));
+        Self {
+            base,
+            clock,
+            db_path,
+            http: reqwest::Client::new(),
+            state,
+            _dir: dir,
+        }
+    }
+
     async fn serve(
         dir: tempfile::TempDir,
         db_path: PathBuf,
@@ -87,7 +125,13 @@ impl Harness {
         let reader = db::open_reader(&db_path).expect("reader");
         let state = AppState::new(conn, Arc::new(clock.clone()))
             .with_reader(reader)
-            .with_time_zone(time_zone);
+            .with_time_zone(time_zone)
+            .with_pairing_cipher(
+                tokenlens_server::pairing_crypto::PairingCipher::from_base64(
+                    &tokenlens_server::pairing_crypto::PairingCipher::generate(),
+                )
+                .expect("test pairing key"),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -229,8 +273,68 @@ impl Harness {
         )
         .await
     }
-}
 
+    /// Stages an account email code straight in the database (the HTTP route
+    /// needs a configured mail provider) and logs the account in.
+    pub fn stage_login_code(&self, email: &str) -> String {
+        tokenlens_server::accounts::stage_code(&self.side_db(), email, self.clock.now_ms())
+            .expect("stage code")
+            .expose()
+            .to_owned()
+    }
+
+    /// Returns `(session, status, body)`. Real users ask for a fresh code a
+    /// minute or more later, so the manual clock moves on first.
+    pub async fn login(&self, email: &str) -> (String, StatusCode, Value) {
+        self.clock
+            .advance_ms(tokenlens_server::accounts::SEND_INTERVAL_MS + 1);
+        let code = self.stage_login_code(email);
+        let (status, body) = self
+            .post(
+                "/api/auth/login",
+                None,
+                serde_json::to_vec(&json!({"email": email, "code": code})).expect("encode"),
+                None,
+            )
+            .await;
+        let session = body["session"].as_str().unwrap_or_default().to_owned();
+        (session, status, body)
+    }
+
+    /// Adds this computer to the account's space with the account session.
+    pub async fn add_device_with_session(&self, session: &str) -> Device {
+        let (status, body) = self
+            .post(
+                "/api/account/devices",
+                Some(session),
+                serde_json::to_vec(&json!({
+                    "platform": "macos",
+                    "formFactor": "laptop",
+                    "displayName": "Account Mac"
+                }))
+                .expect("encode"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let text = |name: &str| body[name].as_str().expect(name).to_owned();
+        Device {
+            id: text("deviceId"),
+            ingest: text("ingestToken"),
+            read: text("readToken"),
+        }
+    }
+
+    pub async fn account_pair_code(&self, session: &str, rotate: bool) -> (StatusCode, Value) {
+        self.post(
+            "/api/account/pair-code",
+            Some(session),
+            serde_json::to_vec(&json!({"rotate": rotate})).expect("encode"),
+            None,
+        )
+        .await
+    }
+}
 pub fn fixture_events() -> Vec<Value> {
     serde_json::from_str(include_str!("../../../fixtures/usage-events.json")).expect("fixture")
 }

@@ -11,6 +11,7 @@ import { DIRECTIONS, useSettings, type Direction, type ThemeMode } from "@/lib/s
 import { useStatus } from "@/lib/status";
 import { updateInProgress, useUpdates } from "@/lib/updates";
 import type { AppStatus, Devices, Health } from "@/lib/types";
+import { ConnectServer } from "./Pairing";
 
 const THEMES: { key: ThemeMode; label: ReactNode }[] = [
   { key: "light", label: <span className="inline-flex items-center gap-1.5"><Sun className="h-3.5 w-3.5" aria-hidden />浅色</span> },
@@ -201,85 +202,99 @@ function Connection() {
   const health = useDashboard<Health>("health");
   const devices = useDashboard<Devices>("devices", query());
   const [confirm, setConfirm] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!status) return null;
   const thresholds = devices.data?.thresholds;
   const local = status.mode === "local";
-  const unpair = () => {
+  const connected = Boolean(status.server);
+  const signedIn = Boolean(status.accountEmail);
+  const signOut = async () => {
+    setBusy(true);
     setError(null);
-    app
-      .unpair()
-      .then(set)
-      .catch((reason: unknown) => setError(errorMessage(reason)));
+    try {
+      set(await app.logoutAccount());
+    } catch (next) {
+      setError(errorMessage(next));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const disconnect = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      set(await app.unpair());
+      setConfirm(false);
+    } catch (next) {
+      setError(errorMessage(next));
+    } finally {
+      setBusy(false);
+    }
   };
   return (
     <Card title="连接" bodyClassName="pt-1">
-      {local ? (
-        <Row title="数据位置" hint="本机模式：不连服务器，数据只保存在这台电脑上">
-          <span className="text-xs text-ink-2">只在这台电脑上</span>
-        </Row>
-      ) : (
-        <Row title="服务器">
-          <span className="selectable font-mono text-xs text-ink-2">{status.server ?? "—"}</span>
-        </Row>
-      )}
-      <Row title="这台电脑的设备 ID" hint={local ? "看板页面拿不到读取数据用的凭据" : "凭据保存在系统钥匙串里，看板页面拿不到"}>
+      <Row title="当前查看" hint="本机持续记录，可在「设备」页面切换查看本机或全部设备">
+        <span className="text-xs text-ink-2">{local ? "本机数据" : "全部设备"}</span>
+      </Row>
+      <Row title="服务器" hint={connected ? "本机记录和服务器同步同时运行" : "未连接，数据保存在这台电脑上"}>
+        <span className="selectable font-mono text-xs text-ink-2">{status.server ?? "未连接"}</span>
+      </Row>
+      <Row
+        title="账号"
+        hint={
+          signedIn
+            ? "登录后可以在多台电脑之间共用同一个空间，配对码也在这里查看"
+            : "用邮箱登录你的空间；第一次登录会自动创建"
+        }
+      >
+        {signedIn ? (
+          <span className="flex items-center gap-2">
+            <span className="selectable text-xs text-ink-2">{status.accountEmail}</span>
+            <Button size="sm" onClick={() => void signOut()} disabled={busy}>
+              退出登录
+            </Button>
+          </span>
+        ) : (
+          <Button size="sm" onClick={() => setConnecting(true)}>
+            登录
+          </Button>
+        )}
+      </Row>
+      <Row title="这台电脑的设备 ID" hint="看板页面拿不到读取数据用的凭据">
         <span className="selectable font-mono text-xs text-ink-2">{status.deviceId ? shortId(status.deviceId, 16) : "—"}</span>
       </Row>
       <Row
-        title="服务状态"
-        hint={
-          health.data
-            ? `服务端 ${health.data.serverVersion} · ${exact(health.data.eventCount)} 条用量 · ${health.data.deviceCount} 台设备 · 最后接收 ${relativeTime(health.data.lastIngestAt)} · 时区 ${health.data.timeZone}`
-            : undefined
-        }
+        title={local ? "本机服务状态" : "服务器状态"}
+        hint={health.data ? `${exact(health.data.eventCount)} 条用量 · ${health.data.deviceCount} 台设备 · 最后接收 ${relativeTime(health.data.lastIngestAt)} · 时区 ${health.data.timeZone}` : undefined}
       >
         {health.data ? (
           <Badge tone={health.data.status === "ok" ? "good" : "warn"}>{health.data.status === "ok" ? "正常" : health.data.status}</Badge>
-        ) : health.error ? (
-          <LoadError error={health.error} onRetry={health.reload} compact />
-        ) : (
-          <span className="text-xs text-ink-3">读取中…</span>
-        )}
+        ) : health.error ? <LoadError error={health.error} onRetry={health.reload} compact /> : <span className="text-xs text-ink-3">读取中…</span>}
       </Row>
       {thresholds && !local && (
         <Row title="在线判定" hint="由服务器决定，所有设备一致">
-          <span className="text-xs text-ink-2">
-            {duration(thresholds.onlineMs)} 内有心跳算在线，超过 {duration(thresholds.longOfflineMs)} 算长期未上线
-          </span>
+          <span className="text-xs text-ink-2">{duration(thresholds.onlineMs)} 内有心跳算在线，超过 {duration(thresholds.longOfflineMs)} 算长期未上线</span>
         </Row>
       )}
-      {local ? (
-        <Row title="改为连接服务器" hint="想把几台电脑合在一起看时用；这台电脑上已有的本机数据会保留">
-          <Button size="sm" onClick={() => setConfirm(true)}>
-            改为连接服务器
-          </Button>
+      {connected ? (
+        <Row title="断开服务器" hint="停止服务器同步并查看本机数据；本机采集继续，服务器历史保留">
+          <Button variant="danger" size="sm" onClick={() => setConfirm(true)}>断开服务器</Button>
         </Row>
       ) : (
-        <Row title="取消配对" hint="删除这台电脑保存的凭据并停止采集；服务器上的历史数据不受影响">
-          <Button variant="danger" size="sm" onClick={() => setConfirm(true)}>
-            取消配对
-          </Button>
+        <Row title="连接服务器" hint="合并查看多台设备，也可以直接在「设备 → 添加设备」连接">
+          <Button size="sm" onClick={() => setConnecting(true)}>连接服务器</Button>
         </Row>
       )}
-      {error && <p className="pb-2 text-xs text-bad">{error}</p>}
-      <Dialog open={confirm} onOpenChange={setConfirm} title={local ? "改为连接服务器？" : "取消这台电脑的配对？"}>
-        <p className="text-[13px] leading-6 text-ink-2">
-          {local
-            ? "会停止本机模式，回到开始页面，在那里填服务器地址和配对码。配对成功后，这台电脑的历史用量会全部上传到服务器。已有的本机数据会保留，以后回到本机模式还能看到。"
-            : "这台电脑会停止采集和上传，回到配对页面。服务器上的设备记录和历史用量会保留；如果想彻底移除，请在「设备」页面选择「移除设备」。"}
-        </p>
+      {error && !confirm && <p role="alert" className="pb-2 text-xs text-bad">{error}</p>}
+      <ConnectServer open={connecting} onOpenChange={setConnecting} />
+      <Dialog open={confirm} onOpenChange={setConfirm} title="断开服务器？">
+        <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，自动查看本机数据。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「设备 → 添加设备」重新连接。</p>
+        {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
-          <Button onClick={() => setConfirm(false)}>取消</Button>
-          <Button
-            variant={local ? "primary" : "danger"}
-            onClick={() => {
-              setConfirm(false);
-              unpair();
-            }}
-          >
-            {local ? "继续" : "取消配对"}
-          </Button>
+          <Button onClick={() => setConfirm(false)} disabled={busy}>取消</Button>
+          <Button variant="danger" disabled={busy} onClick={() => void disconnect()}>{busy ? "正在断开…" : "断开服务器"}</Button>
         </div>
       </Dialog>
     </Card>
@@ -294,13 +309,13 @@ function Definitions() {
       <dl className="divide-y divide-line/60 text-[13px] leading-6">
         <Definition term="总 tokens">输入 + 输出 + 缓存读取 + 缓存写入 + 推理，五类互斥相加。缓存读取通常占九成以上，所以总量不等于计费 token。</Definition>
         <Definition term="缓存命中率">缓存读取 ÷（输入 + 缓存读取 + 缓存写入）。不含输出和推理。</Definition>
-        <Definition term="成本">按公开 API 价格折算的「API 等价成本」，不是订阅或中转站账单。价格来自 LiteLLM、OpenRouter、models.dev 三份公开价格表，每天更新一次（本机模式由这台电脑下载，连接服务器时由服务器下载），价格变了历史会一起重算。没有价格的模型不计入，会单独提示；Qoder 只显示 credits，不折算美元。</Definition>
+        <Definition term="成本">按公开 API 价格折算的「API 等价成本」，不是订阅或中转站账单。价格来自 LiteLLM、OpenRouter、models.dev 三份公开价格表，每天更新一次（本机数据由这台电脑算价，服务器数据由服务器算价），价格变了历史会一起重算。没有价格的模型不计入，会单独提示；Qoder 只显示 credits，不折算美元。</Definition>
         <Definition term="Qoder 估算">Qoder 本地大多只记 credits，这里按校准汇率折算成 token，标为「估算」，原始 credits 会一起显示。</Definition>
         <Definition term="日期">按 {timeZone} 的自然日统计；跨设备的时间都换算到这个时区。</Definition>
         <Definition term="隐私">
-          {status?.mode === "local"
-            ? "本机模式下数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取 GitHub 公开版本信息；这两项请求都不携带用量或账号信息。"
-            : "只上传数字统计；提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
+          {!status?.server
+            ? "未连接服务器时数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取 GitHub 公开版本信息；这两项请求都不携带用量或账号信息。"
+            : "本机保留数据，同时向已连接的服务器同步数字统计。即使正在查看本机数据，服务器同步也会继续；提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
         </Definition>
       </dl>
       <p className="mt-3 text-xs text-ink-3">

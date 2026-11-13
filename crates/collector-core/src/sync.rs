@@ -624,7 +624,7 @@ pub struct Syncer {
     full_scans: u64,
     resync: Arc<AtomicBool>,
     pub prepared: Prepared,
-    _lock: File,
+    _lock: Arc<File>,
 }
 
 impl Syncer {
@@ -636,7 +636,21 @@ impl Syncer {
         timing: SyncTiming,
         sink: LineSink,
     ) -> Result<Self, StateError> {
-        let lock = state::lock_queue(state_dir)?;
+        let lock = Arc::new(state::lock_queue(state_dir)?);
+        Self::start_with_queue_lock(state_dir, credentials, transport, timing, sink, lock)
+    }
+
+    /// Starts under a queue lock already held by the app. The caller must
+    /// obtain this guard from `state::lock_queue(state_dir)` and may keep a
+    /// clone so a failed server queue never releases the app/CLI exclusion.
+    pub fn start_with_queue_lock(
+        state_dir: &Path,
+        credentials: Credentials,
+        transport: Box<dyn Transport>,
+        timing: SyncTiming,
+        sink: LineSink,
+        lock: Arc<File>,
+    ) -> Result<Self, StateError> {
         let mut state = State::open(state_dir)?;
         let prepared = state.prepare(&credentials.device_id, crate::PARSER_GENERATION)?;
         let scan = SharedScan::default();
@@ -673,6 +687,21 @@ impl Syncer {
     pub fn seed(&self, snapshot: &mut Snapshot) -> Result<usize, StateError> {
         self.state
             .for_each_known(|key, client, ts, hash| snapshot.seed(key, client, ts, hash))
+    }
+
+    /// Selects changes this destination has not durably queued yet. Used when
+    /// one scan feeds multiple destinations with different upload histories.
+    pub fn filter_unknown(
+        &self,
+        changed: &[ScannedEvent],
+    ) -> Result<Vec<ScannedEvent>, StateError> {
+        let mut needed = Vec::new();
+        for event in changed {
+            if self.state.known_hash(&event.key)? != Some(event.hash) {
+                needed.push(event.clone());
+            }
+        }
+        Ok(needed)
     }
 
     pub fn record_scan(

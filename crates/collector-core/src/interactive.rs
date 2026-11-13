@@ -71,7 +71,8 @@ pub fn redact_home(line: &str, home: &str) -> String {
 
     // Some upstream diagnostics turn an absolute Windows path into a slug;
     // redact that username too.
-    if let Some(username) = Path::new(home).file_name().and_then(OsStr::to_str) {
+    // Diagnostics can contain Windows paths even when processed on macOS/Linux.
+    if let Some(username) = home.rsplit(['/', '\\']).find(|part| !part.is_empty()) {
         let slug = format!("C-Users-{username}");
         line = line.replace(&slug, "~");
     }
@@ -107,6 +108,16 @@ mod tests {
             ),
             r#"Examples: "~\\.dsh\\sessions\\--~-Documents-demo""#
         );
+        for home in [
+            "C:/Users/someone",
+            "C:/Users/someone/",
+            r"C:\Users\someone\",
+        ] {
+            assert_eq!(
+                redact_home("--C-Users-someone-Documents-demo", home),
+                "--~-Documents-demo"
+            );
+        }
     }
 
     #[test]

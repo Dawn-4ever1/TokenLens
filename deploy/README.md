@@ -91,8 +91,38 @@ docker compose exec dashboard tokenlens-server tenant create acme "Acme team"
 docker compose exec dashboard tokenlens-server pair-code create --tenant acme
 ```
 
-There are no user accounts yet: a computer's tenant is fixed by the code it was
-paired with.
+A computer's tenant is fixed by the code it was paired with.
+
+### Accounts and sign-in (optional)
+
+Apps can also sign in instead of using a pairing code: a first sign-in creates
+that person's own space, and later sign-ins return to it.
+
+Your own users reach this server through **Devices → 添加设备 → 自己的服务器**,
+which offers the email code (or the operator-issued pairing code). The app's
+GitHub button only appears for the hosted `tokenlens.online` service.
+
+**GitHub (recommended, no cost).** Create a GitHub OAuth App (Settings →
+Developer settings → OAuth Apps), set its homepage to your domain, tick
+**Enable Device Flow**, then put the client id in `.env`. No client secret is
+needed and the app never stores one.
+
+```sh
+TOKENLENS_GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx
+```
+
+**Email code (fallback).** Set `TOKENLENS_EMAIL_API_KEY` and
+`TOKENLENS_EMAIL_FROM`; Resend's free tier (3,000 mails/month) is enough for a
+small team. Add `TOKENLENS_PAIRING_KEY` so members can see their space's
+reusable pairing code again. Then restart:
+
+```sh
+docker compose up -d
+```
+
+Without these values the sign-in endpoints answer "service unavailable" and the
+pairing-code flow above keeps working exactly as before. Device tokens stay
+separate from account sessions: signing out never stops usage collection.
 
 ## 4. Cost estimates
 

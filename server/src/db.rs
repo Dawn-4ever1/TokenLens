@@ -61,6 +61,14 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 6,
         sql: include_str!("../migrations/0006_counted_flag.sql"),
     },
+    Migration {
+        version: 7,
+        sql: include_str!("../migrations/0007_accounts.sql"),
+    },
+    Migration {
+        version: 8,
+        sql: include_str!("../migrations/0008_identities.sql"),
+    },
 ];
 
 /// How many events carry a `counted` flag that disagrees with the D029 rule
@@ -573,8 +581,8 @@ pub fn claim_pair_code(
             tenant_id
         ],
     )?;
-    let ingest_token = insert_token(&tx, &tenant_id, &device_id, TokenKind::Ingest, now)?;
-    let read_token = insert_token(&tx, &tenant_id, &device_id, TokenKind::Read, now)?;
+    let ingest_token = insert_device_token(&tx, &tenant_id, &device_id, TokenKind::Ingest, now)?;
+    let read_token = insert_device_token(&tx, &tenant_id, &device_id, TokenKind::Read, now)?;
     tx.execute(
         "UPDATE pair_codes SET claimed_device_id = ?2 WHERE code_hash = ?1",
         params![code_hash, device_id],
@@ -587,7 +595,7 @@ pub fn claim_pair_code(
     }))
 }
 
-fn insert_token(
+pub(crate) fn insert_device_token(
     tx: &Transaction<'_>,
     tenant_id: &str,
     device_id: &str,
@@ -872,8 +880,8 @@ pub fn rotate_tokens(
          WHERE tenant_id = ?1 AND device_id = ?2 AND revoked_at IS NULL",
         params![tenant_id, device_id, now],
     )?;
-    let ingest_token = insert_token(&tx, tenant_id, device_id, TokenKind::Ingest, now)?;
-    let read_token = insert_token(&tx, tenant_id, device_id, TokenKind::Read, now)?;
+    let ingest_token = insert_device_token(&tx, tenant_id, device_id, TokenKind::Ingest, now)?;
+    let read_token = insert_device_token(&tx, tenant_id, device_id, TokenKind::Read, now)?;
     tx.commit()?;
     Ok(Some(RotatedTokens {
         ingest_token,

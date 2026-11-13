@@ -1,10 +1,15 @@
 //! TokenLens sync server: pairing, ingest and dashboard reads.
 
+pub mod accounts;
+pub mod auth_http;
 pub mod clock;
 pub mod dashboard;
 pub mod db;
+pub mod github;
 pub mod http;
 pub mod limiter;
+pub mod mailer;
+pub mod pairing_crypto;
 pub mod pricing;
 pub mod secrets;
 

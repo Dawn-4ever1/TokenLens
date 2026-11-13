@@ -67,6 +67,31 @@ impl IngestLimiter {
     }
 }
 
+/// Bounded in-memory guard for account code requests and login attempts.
+/// Successful delivery is required before `allow` is called by the endpoint.
+#[derive(Debug, Default)]
+pub struct AuthLimiter {
+    windows: std::collections::HashMap<String, (i64, u32)>,
+}
+
+impl AuthLimiter {
+    pub fn allow(&mut self, key: &str, now: i64) -> bool {
+        let window = now - now.rem_euclid(60_000);
+        if self.windows.len() > 10_000 {
+            self.windows.retain(|_, (start, _)| *start == window);
+        }
+        let entry = self.windows.entry(key.to_owned()).or_insert((window, 0));
+        if entry.0 != window {
+            *entry = (window, 0);
+        }
+        if entry.1 >= 20 {
+            return false;
+        }
+        entry.1 += 1;
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,6 +1,6 @@
 [package]
 name = "tokenlens-app"
-version = "0.5.1"
+version = "0.5.2"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -20,6 +20,7 @@ chrono-tz = "0.10"
 collector-core = { path = "../../crates/collector-core" }
 dirs.workspace = true
 iana-time-zone = "0.1"
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2.12", features = ["tray-icon"] }
@@ -44,3 +45,4 @@ tauri-plugin-updater = { version = "2.14", default-features = false, features = 
 
 [dev-dependencies]
 tempfile = "3"
+tauri = { version = "2.12", features = ["test"] }

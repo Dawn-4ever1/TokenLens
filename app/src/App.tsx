@@ -13,8 +13,9 @@ export function App() {
     return <div data-tauri-drag-region className="h-full" />;
   }
   if (!status.paired) return <Pairing />;
+  const sourceKey = `${status.mode}:${status.mode === "server" ? status.server ?? "" : ""}:${status.deviceId ?? ""}`;
   return (
-    <DataProvider enabled>
+    <DataProvider key={sourceKey} enabled sourceKey={sourceKey}>
       <NavProvider>
         <Shell />
       </NavProvider>

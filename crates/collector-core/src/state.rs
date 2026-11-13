@@ -155,6 +155,27 @@ impl State {
         Ok(Self { conn })
     }
 
+    /// Copies a consistent SQLite snapshot, including committed WAL rows. The
+    /// caller owns both queue locks; an existing destination is never replaced.
+    pub fn copy_to(&self, directory: &Path) -> Result<(), StateError> {
+        std::fs::create_dir_all(directory)?;
+        restrict(directory, 0o700)?;
+        let destination = Self::path_in(directory);
+        let temporary = directory.join("collector-migration.sqlite");
+        if destination.exists() {
+            return Ok(());
+        }
+        // VACUUM INTO reads committed WAL data and fails if its target exists.
+        if temporary.exists() {
+            std::fs::remove_file(&temporary)?;
+        }
+        self.conn
+            .execute("VACUUM INTO ?1", [temporary.to_string_lossy().as_ref()])?;
+        restrict(&temporary, 0o600)?;
+        std::fs::rename(temporary, destination)?;
+        Ok(())
+    }
+
     pub fn meta(&self, key: &str) -> Result<Option<String>, StateError> {
         Ok(self
             .conn
@@ -230,6 +251,16 @@ impl State {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Looks up one queued value without retaining another complete snapshot.
+    /// A malformed hash is treated as unknown so a scan can repair that row.
+    pub fn known_hash(&self, key: &str) -> Result<Option<[u8; 32]>, StateError> {
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT hash FROM known WHERE event_key = ?1")?;
+        let hash: Option<Vec<u8>> = statement.query_row([key], |row| row.get(0)).optional()?;
+        Ok(hash.and_then(|bytes| bytes.as_slice().try_into().ok()))
     }
 
     /// Queues changed events and records them as known, in one transaction.
@@ -424,6 +455,23 @@ mod tests {
             .expect("bump");
         drop(state);
         assert!(matches!(State::open(&state_dir), Err(StateError::TooNew)));
+    }
+
+    #[test]
+    fn known_hash_tracks_values_and_leaves_corrupt_hashes_unknown() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = State::open(dir.path()).expect("open");
+        state.prepare("dev_a", "g1").expect("prepare");
+        assert_eq!(state.known_hash("a").expect("lookup"), None);
+        state
+            .record_changes("g1", &[event("a", 1, 3)], 1)
+            .expect("record");
+        assert_eq!(state.known_hash("a").expect("lookup"), Some([3; 32]));
+        state
+            .conn
+            .execute("UPDATE known SET hash = X'01' WHERE event_key = 'a'", [])
+            .expect("synthetic corruption");
+        assert_eq!(state.known_hash("a").expect("lookup"), None);
     }
 
     #[test]

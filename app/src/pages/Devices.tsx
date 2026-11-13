@@ -7,66 +7,83 @@ import { useData, useDashboard } from "@/lib/data";
 import { compact, dateTime, duration, exact, relativeTime, shortId } from "@/lib/format";
 import { clientColor, coverageColumns, formFactorLabel, platformLabel } from "@/lib/labels";
 import { useStatus } from "@/lib/status";
-import type { DeviceStatus, DeviceUsage, Devices as DevicesData, PairCode } from "@/lib/types";
+import type { DeviceStatus, DeviceUsage, Devices as DevicesData } from "@/lib/types";
 import { deviceTone } from "./Overview";
+import { ConnectServer } from "./Pairing";
 
 export function Devices() {
   const { query, timeZone } = useData();
-  const { status } = useStatus();
+  const { status, set } = useStatus();
   const local = status?.mode === "local";
+  const connected = Boolean(status?.server);
   const devices = useDashboard<DevicesData>("devices", query());
   const [adding, setAdding] = useState(false);
-
-  if (!devices.data) {
-    if (devices.error) return <LoadError error={devices.error} onRetry={devices.reload} />;
-    return (
-      <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
-        {[0, 1, 2, 3].map((i) => (
-          <Skeleton key={i} className="h-56 rounded-[var(--radius-card)]" />
-        ))}
-      </div>
-    );
-  }
+  const [switching, setSwitching] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const switchSource = async (mode: "local" | "server") => {
+    setSwitching(true);
+    setError(null);
+    try {
+      set(await app.setDashboardMode(mode));
+    } catch (next) {
+      setError(errorMessage(next));
+    } finally {
+      setSwitching(false);
+    }
+  };
   const data = devices.data;
-  const max = Math.max(0, ...data.usage.map((usage) => usage.totalTokens));
+  const max = Math.max(0, ...(data?.usage ?? []).map((usage) => usage.totalTokens));
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center gap-3">
-        <p className="mr-auto text-xs leading-5 text-ink-3">
-          {local
-            ? "本机模式只统计这一台电脑。想把几台电脑合在一起看，到「设置」里改为连接服务器。"
-            : "每台电脑装一个应用、配对一次。台式机关机、笔记本合盖时显示离线是正常的，开机后会自动补传。"}
+        <p className="min-w-[200px] flex-1 text-xs leading-5 text-ink-3">
+          {connected
+            ? "本机持续记录，服务器同步多台设备。切换查看范围不影响采集和同步。"
+            : "正在记录这台电脑的用量。想合并查看其他电脑，点击「添加设备」连接服务器，本机记录会继续运行。"}
         </p>
-        {!local && (
-          <Button variant="primary" onClick={() => setAdding(true)}>
-            <Plus className="h-4 w-4" aria-hidden /> 添加设备
-          </Button>
+        {connected && (
+          <div role="group" aria-label="查看范围" className="flex gap-1 rounded-lg border border-line p-1">
+            <Button size="sm" variant={local ? "primary" : "ghost"} aria-pressed={local} disabled={switching} onClick={() => void switchSource("local")}>本机</Button>
+            <Button size="sm" variant={local ? "ghost" : "primary"} aria-pressed={!local} disabled={switching} onClick={() => void switchSource("server")}>全部设备</Button>
+          </div>
         )}
+        <Button variant="primary" onClick={() => setAdding(true)}>
+          <Plus className="h-4 w-4" aria-hidden /> 添加设备
+        </Button>
       </div>
+      {error && <p role="alert" className="text-xs text-bad">{error}</p>}
       {devices.error ? <LoadError error={devices.error} onRetry={devices.reload} compact /> : null}
-      <CaveatList caveats={data.caveats} />
-      {data.devices.length === 0 ? (
-        <Card>
-          <EmptyState title="还没有设备" hint="点击「添加设备」生成配对码，在另一台电脑的应用里输入。" />
-        </Card>
-      ) : (
-        <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
-          {data.devices.map((device) => (
-            <DeviceCard
-              key={device.deviceId}
-              device={device}
-              usage={data.usage.find((item) => item.deviceId === device.deviceId)}
-              max={max}
-              minCollectorVersion={data.minCollectorVersion}
-              timeZone={timeZone}
-              local={local}
-              onChanged={devices.reload}
-            />
-          ))}
+      {!data ? (
+        !devices.error && <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+          {[0, 1].map((i) => <Skeleton key={i} className="h-56 rounded-[var(--radius-card)]" />)}
         </div>
+      ) : (
+        <>
+          <CaveatList caveats={data.caveats} />
+          {data.devices.length === 0 ? (
+            <Card><EmptyState title="还没有设备" hint="本机数据正在准备；连接服务器后还可以添加其他电脑。" /></Card>
+          ) : (
+            <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+              {data.devices.map((device) => (
+                <DeviceCard
+                  key={device.deviceId}
+                  device={device}
+                  usage={data.usage.find((item) => item.deviceId === device.deviceId)}
+                  max={max}
+                  minCollectorVersion={data.minCollectorVersion}
+                  timeZone={timeZone}
+                  local={local}
+                  onChanged={devices.reload}
+                />
+              ))}
+            </div>
+          )}
+          <Coverage data={data} timeZone={timeZone} />
+        </>
       )}
-      <Coverage data={data} timeZone={timeZone} />
-      <AddDevice open={adding} onOpenChange={setAdding} onDone={devices.reload} />
+      {connected
+        ? <AddDevice open={adding} onOpenChange={setAdding} onDone={devices.reload} />
+        : <ConnectServer open={adding} onOpenChange={setAdding} />}
     </div>
   );
 }
@@ -315,9 +332,9 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()} title={`移除「${device.displayName}」`}>
       <div className="space-y-2 text-[13px] leading-6 text-ink-2">
-        <p>这台设备会立即停止上传，也不能再查看看板。它已经上传的历史用量会保留在统计里。</p>
+        <p>这台设备会停止服务器同步，也不能再查看这个服务器上的看板。本机记录继续运行，已上传的历史用量保留。</p>
         {device.isCurrent ? (
-          <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">这是你现在正在用的电脑。移除后这里会回到配对页面，需要用新的配对码重新加入。</p>
+          <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">这是你现在正在用的电脑。移除后会自动查看本机数据；以后需要新的配对码才能重新连接服务器。</p>
         ) : (
           <p>以后想再加入，需要在那台电脑上用新的配对码重新配对。</p>
         )}
@@ -334,10 +351,13 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
 }
 
 function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (open: boolean) => void; onDone: () => void }) {
-  const [code, setCode] = useState<PairCode | null>(null);
+  const { status } = useStatus();
+  const signedIn = Boolean(status?.accountEmail);
+  const [code, setCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(Date.now());
+  const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
   useEffect(() => {
     if (!open) {
       setCode(null);
@@ -345,25 +365,32 @@ function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange
       setCopied(false);
       return;
     }
+    if (!signedIn) return;
     let alive = true;
     app
-      .createPairCode()
-      .then((next) => alive && setCode(next))
+      .accountPairCode(false)
+      .then((next) => alive && setCode(next.code))
       .catch((reason: unknown) => alive && setError(errorMessage(reason)));
     return () => {
       alive = false;
     };
-  }, [open]);
-  useEffect(() => {
-    if (!open) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [open]);
-  const left = code ? Math.max(0, Date.parse(code.expiresAt) - now) : 0;
-  const expired = code !== null && left === 0;
+  }, [open, signedIn]);
+  const rotate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const next = await app.accountPairCode(true);
+      setCode(next.code);
+      setCopied(false);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
   const copy = () => {
     if (!code) return;
-    void navigator.clipboard?.writeText(code.code).then(() => setCopied(true));
+    void navigator.clipboard?.writeText(code).then(() => setCopied(true));
   };
   const close = (next: boolean) => {
     onOpenChange(next);
@@ -373,31 +400,48 @@ function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange
     <Dialog open={open} onOpenChange={close} title="添加设备">
       <ol className="list-decimal space-y-1 pl-5 text-[13px] leading-6 text-ink-2">
         <li>在另一台电脑上安装并打开 TokenLens。</li>
-        <li>填入服务器地址和下面的配对码。</li>
+        <li>选择「TokenLens 云服务」，用同一个邮箱登录。</li>
+        <li>也可以在「连接服务器」里填入下面的服务器地址和配对码。</li>
       </ol>
-      <div className="mt-4 rounded-xl bg-surface-2 px-4 py-5 text-center">
-        {error ? (
-          <p className="text-sm text-bad">{error}</p>
-        ) : !code ? (
-          <Skeleton className="mx-auto h-9 w-48" />
-        ) : (
-          <>
-            <div className={cn("selectable font-mono text-3xl font-semibold tracking-[0.2em] text-ink", expired && "line-through opacity-40")}>{code.code}</div>
-            <div className="mt-2 text-xs text-ink-3">
-              {expired ? "配对码已过期，请关闭后重新生成" : `${Math.floor(left / 60000)} 分 ${String(Math.floor((left % 60000) / 1000)).padStart(2, "0")} 秒后过期，只能用一次`}
-            </div>
-          </>
-        )}
+      <div className="mt-4">
+        <Field label="服务器地址">
+          <input className={cn(inputClass, "selectable font-mono text-xs")} readOnly value={status?.server ?? status?.cloudServer ?? ""} />
+        </Field>
       </div>
+      {!signedIn ? (
+        <div className="mt-4 space-y-3 rounded-xl bg-surface-2 px-4 py-4">
+          <p className="text-[13px] leading-6 text-ink-2">这个空间的配对码需要在登录后查看。登录后多台电脑共用同一个看板。</p>
+          <Button variant="primary" onClick={() => setSigningIn(true)}>登录查看配对码</Button>
+        </div>
+      ) : (
+        <>
+          <div className="mt-4 rounded-xl bg-surface-2 px-4 py-5 text-center">
+            {error ? (
+              <p className="text-sm text-bad">{error}</p>
+            ) : !code ? (
+              <Skeleton className="mx-auto h-9 w-48" />
+            ) : (
+              <>
+                <div className="selectable font-mono text-3xl font-semibold tracking-[0.2em] text-ink">{code}</div>
+                <div className="mt-2 text-xs text-ink-3">一直有效；每用一次只添加一台电脑。泄露时可以换一个。</div>
+              </>
+            )}
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <Button size="sm" onClick={copy} disabled={!code}>
+              {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
+              {copied ? "已复制" : "复制配对码"}
+            </Button>
+            <Button size="sm" variant="danger" onClick={() => void rotate()} disabled={busy || !code}>
+              {busy ? "正在更换…" : "换一个配对码"}
+            </Button>
+          </div>
+        </>
+      )}
       <div className="mt-5 flex justify-end gap-2">
-        <Button onClick={copy} disabled={!code || expired}>
-          {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-          {copied ? "已复制" : "复制配对码"}
-        </Button>
-        <Button variant="primary" onClick={() => close(false)}>
-          完成
-        </Button>
+        <Button variant="primary" onClick={() => close(false)}>完成</Button>
       </div>
+      <ConnectServer open={signingIn} onOpenChange={(next) => { setSigningIn(next); if (!next) onDone(); }} />
     </Dialog>
   );
 }

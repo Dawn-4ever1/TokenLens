@@ -41,18 +41,22 @@ The installers are not code-signed yet, so the system asks once:
 
 ## Two ways to use it
 
-When the app first opens, pick where the data lives:
+The app opens directly onto this computer's dashboard, without requiring a
+server or an account. Local collection continues even when you add a server.
+The app runs the same sync server code in process and keeps local data in
+SQLite. It downloads public price catalogs daily and, if enabled, checks for
+application updates.
 
-- **Only on this computer** (只在这台电脑上): no server, no account. The app
-  runs the same sync server code in process and keeps the data in a local
-  SQLite file. It goes online to download public price catalogs daily and, if
-  enabled, check for application updates.
-- **Connect to a server** (连接服务器): several computers on one dashboard.
-  Host the server yourself with Docker, see [deploy/README.md](deploy/README.md),
-  and pair each computer with a one-time code.
+For several computers, open Devices → 添加设备. The hosted service
+[https://tokenlens.online](https://tokenlens.online) is preselected: authorize
+with GitHub to create or return to your own space, with no password to remember.
+The space's replaceable pairing code is available after signing in. You may
+choose your own server instead; see [deploy/README.md](deploy/README.md).
+One-time operator codes remain supported for existing installations.
 
-You can switch from local to a server later; the computer's history is
-uploaded when it pairs.
+Local history is preserved and backfilled after connecting. Device ingest/read
+tokens remain separate from the account session, which never reaches the web
+view.
 
 ## Privacy
 

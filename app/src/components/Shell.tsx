@@ -8,7 +8,7 @@ import { AppMark } from "./AppMark";
 import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
-import { StatusDot, Tip, cn } from "./ui";
+import { Badge, StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
 
 const Trends = lazy(() => import("@/pages/Trends").then((m) => ({ default: m.Trends })));
@@ -43,6 +43,7 @@ export function Shell() {
           <h1 data-tauri-drag-region className="display mr-auto text-xl text-ink">
             {title}
           </h1>
+          <Badge tone="neutral">{status?.mode === "server" ? "全部设备" : "本机数据"}</Badge>
           {FILTERED.includes(page) && (
             <div className="flex flex-wrap items-center gap-2">
               <RangePicker />
@@ -131,6 +132,7 @@ export function collectorState(status: AppStatus | null): { tone: "good" | "neut
   if (c.lastError) return { tone: "bad", label: "采集出错" };
   if (!c.running) return { tone: "neutral", label: "采集未运行" };
   const upload = c.uploadState ?? "ok";
+  if (upload === "queue_error") return { tone: "bad", label: "服务器同步出错，本机继续记录" };
   if (upload === "pairing_required") return { tone: "bad", label: "凭据失效，需重新配对" };
   if (upload === "upgrade_required") return { tone: "warn", label: "需要升级应用" };
   const local = status.mode === "local";

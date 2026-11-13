@@ -50,6 +50,9 @@ pub struct AppState {
     ingest_limiter: Arc<Mutex<IngestLimiter>>,
     time_zone: Tz,
     pricer: Arc<RwLock<Option<Arc<Pricer>>>>,
+    pairing_cipher: Option<Result<crate::pairing_crypto::PairingCipher, &'static str>>,
+    github: Option<std::sync::Arc<crate::github::GitHub>>,
+    auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
 }
 
 impl AppState {
@@ -62,7 +65,43 @@ impl AppState {
             ingest_limiter: Arc::new(Mutex::new(IngestLimiter::default())),
             time_zone: crate::DEFAULT_TIME_ZONE,
             pricer: Arc::new(RwLock::new(None)),
+            pairing_cipher: None,
+            github: None,
+            auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
         }
+    }
+
+    #[must_use]
+    pub fn with_pairing_cipher(mut self, cipher: crate::pairing_crypto::PairingCipher) -> Self {
+        self.pairing_cipher = Some(Ok(cipher));
+        self
+    }
+
+    pub fn pairing_cipher(
+        &self,
+    ) -> Option<Result<crate::pairing_crypto::PairingCipher, &'static str>> {
+        self.pairing_cipher.clone()
+    }
+
+    #[must_use]
+    pub fn with_github(mut self, github: crate::github::GitHub) -> Self {
+        self.github = Some(std::sync::Arc::new(github));
+        self
+    }
+
+    pub fn github(&self) -> Option<std::sync::Arc<crate::github::GitHub>> {
+        self.github.clone()
+    }
+
+    pub fn db_handle(&self) -> Result<Arc<Mutex<Connection>>, ApiError> {
+        Ok(Arc::clone(&self.db))
+    }
+
+    pub fn allow_auth(&self, key: &str) -> bool {
+        self.auth_limiter
+            .lock()
+            .map(|mut limiter| limiter.allow(key, self.now_ms()))
+            .unwrap_or(false)
     }
 
     /// The price catalog new events are priced with (D042); `None` until one
@@ -231,6 +270,20 @@ fn error_kind(error: &db::DbError) -> &'static str {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/api/auth/code", post(crate::auth_http::request_code))
+        .route("/api/auth/login", post(crate::auth_http::login))
+        .route("/api/auth/me", get(crate::auth_http::me))
+        .route("/api/auth/logout", post(crate::auth_http::logout))
+        .route(
+            "/api/auth/github/start",
+            post(crate::auth_http::github_start),
+        )
+        .route("/api/auth/github/poll", post(crate::auth_http::github_poll))
+        .route(
+            "/api/account/pair-code",
+            get(crate::auth_http::pairing_code).post(crate::auth_http::pairing_code),
+        )
+        .route("/api/account/devices", post(crate::auth_http::pair_device))
         .route("/api/pair/claim", post(pair_claim))
         .route("/api/pair/codes", post(pair_codes))
         .route("/api/ingest/events", post(ingest_events))
@@ -349,7 +402,7 @@ fn no_store<T: Serialize>(value: &T) -> Response {
 
 // ------------------------------------------------------------------- auth --
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ")?;
     (!token.is_empty() && token.len() <= 128).then_some(token)
@@ -453,7 +506,7 @@ fn is_plain_text(text: &str, max: usize) -> bool {
     text.len() <= max && !text.chars().any(char::is_control)
 }
 
-fn display_name(raw: &str) -> Option<String> {
+pub(crate) fn valid_display_name(raw: &str) -> Option<String> {
     let name = raw.trim();
     (!name.is_empty() && name.chars().count() <= 64 && is_plain_text(name, 256))
         .then(|| name.to_owned())
@@ -537,7 +590,7 @@ async fn pair_claim(State(state): State<AppState>, body: Body) -> Result<Respons
     let bytes = read_limited(body, SMALL_BODY_BYTES).await?;
     let request =
         serde_json::from_slice::<PairClaimRequest>(&bytes).map_err(|_| ApiError::BadRequest)?;
-    let display_name = display_name(&request.display_name).ok_or(ApiError::BadRequest)?;
+    let display_name = valid_display_name(&request.display_name).ok_or(ApiError::BadRequest)?;
     let claimed = match secrets::normalize_pair_code(&request.code) {
         None => None,
         Some(code) => {
@@ -546,7 +599,20 @@ async fn pair_claim(State(state): State<AppState>, body: Body) -> Result<Respons
             let form_factor = request.form_factor.as_str();
             state
                 .with_db(move |conn, now| {
-                    db::claim_pair_code(
+                    let one_time = db::claim_pair_code(
+                        conn,
+                        &hash,
+                        now,
+                        &NewDevice {
+                            platform,
+                            form_factor,
+                            display_name: &display_name,
+                        },
+                    )?;
+                    if one_time.is_some() {
+                        return Ok(one_time);
+                    }
+                    crate::accounts::claim_tenant_code(
                         conn,
                         &hash,
                         now,
@@ -556,6 +622,12 @@ async fn pair_claim(State(state): State<AppState>, body: Body) -> Result<Respons
                             display_name: &display_name,
                         },
                     )
+                    .map_err(|error| match error {
+                        crate::accounts::AccountError::Unavailable => db::DbError::Corrupt(
+                            "persistent pairing code could not be used".to_owned(),
+                        ),
+                        _ => db::DbError::Corrupt("pairing failed".to_owned()),
+                    })
                 })
                 .await?
         }
@@ -976,7 +1048,7 @@ async fn device_rename(
     let bytes = read_limited(body, SMALL_BODY_BYTES).await?;
     let request =
         serde_json::from_slice::<RenameRequest>(&bytes).map_err(|_| ApiError::BadRequest)?;
-    let name = display_name(&request.display_name).ok_or(ApiError::BadRequest)?;
+    let name = valid_display_name(&request.display_name).ok_or(ApiError::BadRequest)?;
     let (target, stored, tenant) = (id.clone(), name.clone(), caller.tenant_id.clone());
     let renamed = state
         .with_db(move |conn, _| db::rename_device(conn, &tenant, &target, &stored))

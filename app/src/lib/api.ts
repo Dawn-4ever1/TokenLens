@@ -1,4 +1,4 @@
-import type { AppStatus, PairCode, UpdateStatus } from "./types";
+import type { AppStatus, PairCode, SpaceCode, UpdateStatus } from "./types";
 import { ApiError, type ApiErrorKind } from "./types";
 import type { Query } from "./range";
 
@@ -8,6 +8,7 @@ export const isTauri = (): boolean =>
 const KINDS: ApiErrorKind[] = [
   "not_paired", "unauthorized", "network", "bad_request", "not_found",
   "forbidden", "rate_limited", "server", "keychain", "unavailable",
+  "bad_code", "bad_email", "not_signed_in",
 ];
 
 function toApiError(error: unknown): ApiError {
@@ -60,6 +61,30 @@ export const app = {
   useLocal: (input: { formFactor: "laptop" | "desktop"; name: string; autostart: boolean }) =>
     call<AppStatus>("use_local_mode", input),
   unpair: () => call<AppStatus>("unpair_device"),
+  setDashboardMode: (mode: "local" | "server") => call<AppStatus>("set_dashboard_mode", { mode }),
+  requestLoginCode: (server: string, email: string) =>
+    call<void>("request_login_code", { server, email }),
+  loginAccount: (input: {
+    server: string;
+    email: string;
+    code: string;
+    formFactor: "laptop" | "desktop";
+    name: string;
+    autostart: boolean;
+  }) => call<AppStatus>("login_account", input),
+  refreshAccount: () => call<string | null>("refresh_account"),
+  accountPairCode: (rotate: boolean) => call<SpaceCode>("account_pair_code", { rotate }),
+  logoutAccount: () => call<AppStatus>("logout_account"),
+  startGitHubLogin: (server: string) =>
+    call<{ userCode: string; verificationUri: string }>("start_github_login", { server }),
+  pollGitHubLogin: (input: {
+    server: string;
+    formFactor: "laptop" | "desktop";
+    name: string;
+    autostart: boolean;
+  }) =>
+    call<{ status: string; retryAfterSeconds?: number; app?: AppStatus }>("poll_github_login", input),
+  openGitHubDevicePage: (url: string) => call<void>("open_github_device_page", { url }),
   setPaused: (paused: boolean) => call<AppStatus>("set_paused", { paused }),
   syncNow: () => call<AppStatus>("sync_now"),
   setAutostart: (enabled: boolean) => call<AppStatus>("set_autostart", { enabled }),
@@ -95,6 +120,12 @@ export function errorMessage(error: unknown): string {
       return "无法读取系统钥匙串中的凭据。";
     case "unavailable":
       return "请在 TokenLens 应用中打开此页面。";
+    case "bad_code":
+      return "验证码不对或已过期，请重新获取。";
+    case "bad_email":
+      return "邮箱格式不对，请检查后重试。";
+    case "not_signed_in":
+      return "请先登录账号。";
     default:
       return "服务器出错了，请稍后重试。";
   }

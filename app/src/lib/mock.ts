@@ -71,7 +71,7 @@ function pick<T extends { weight: number }>(items: T[], r: number): T {
 
 let cache: { events: Ev[]; now: number } | null = null;
 
-function events(): Ev[] {
+function rawEvents(): Ev[] {
   const now = Date.now();
   if (cache && now - cache.now < 60_000) return cache.events;
   const rand = rng(20261110);
@@ -129,6 +129,12 @@ function events(): Ev[] {
   out.sort((a, b) => a.ts - b.ts);
   cache = { events: out, now };
   return out;
+}
+
+/** The local store contains this computer only; server views share the tenant's devices. */
+function events(): Ev[] {
+  const all = rawEvents();
+  return state.mode === "local" ? all.filter((event) => event.device === "dev_mock_mbp") : all;
 }
 
 const localDate = (ts: number) => new Date(ts + OFFSET_MS).toISOString().slice(0, 10);
@@ -480,7 +486,7 @@ function deviceStatuses(): DeviceStatus[] {
     "dsh", "gemini", "goose", "junie", "kilocode", "kimi", "kiro", "openclaw", "opencode", "qoder-intl", "qwen",
     "roocode", "trae", "warp", "workbuddy", "zcode", "zed",
   ];
-  return DEVICES.filter((d) => !revoked.has(d.id)).map((d) => {
+  return DEVICES.filter((d) => state.mode === "local" ? d.id === "dev_mock_mbp" : !revoked.has(d.id)).map((d) => {
     const mine = all.filter((e) => e.device === d.id);
     const seen = now - d.seen;
     const connection = d.seen <= 15 * 60_000 ? "online" : d.seen <= 3 * DAY ? "offline" : "long_offline";
@@ -561,7 +567,7 @@ function health(): Health {
   const all = events();
   return {
     status: "ok", serverVersion: "0.1.0", schemaVersion: 4,
-    eventCount: all.length, deviceCount: DEVICES.length, lastIngestAt: iso(Date.now() - 90_000),
+    eventCount: all.length, deviceCount: deviceStatuses().length, lastIngestAt: iso(Date.now() - 90_000),
     timeZone: TZ, minCollectorVersion: "0.1.0", minAppVersion: "0.1.0", generatedAt: iso(Date.now()),
   };
 }
@@ -616,12 +622,15 @@ export function mockUpdateStatus(scenario: string | null): UpdateStatus {
   };
 }
 const updateState = mockUpdateStatus(params.get("update"));
-const startsLocal = params.has("local");
+const startsLocal = !params.has("server") && !params.has("offline");
 const state: AppStatus = {
-  paired: !params.has("unpaired"),
-  mode: params.has("unpaired") ? null : startsLocal ? "local" : "server",
+  paired: !params.has("local-error"),
+  mode: startsLocal ? "local" : "server",
   deviceId: "dev_mock_mbp",
   server: startsLocal ? null : "https://dash.example.com",
+  cloudServer: "https://tokenlens.online",
+  accountEmail: params.has("server") || params.has("signed") ? "mock@example.com" : null,
+  accountSpace: params.has("server") || params.has("signed") ? "我的空间" : null,
   appVersion: "0.4.0",
   collector: {
     running: true, paused: false, lastScanAt: Date.now() - 40_000, lastUploadAt: Date.now() - 95_000,
@@ -631,11 +640,13 @@ const state: AppStatus = {
   platform: "macos",
 };
 
+let pollCount = 0;
+
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function command(name: string, args: Record<string, unknown>): Promise<unknown> {
   await delay(params.has("slow") ? 1500 : 120);
-  if (params.has("offline") && name === "dashboard_get") throw new ApiError("network");
+  if (name === "dashboard_get" && state.mode === "server" && (params.has("offline") || (params.has("devices-error") && args.path === "devices"))) throw new ApiError("network");
   switch (name) {
     case "dashboard_get":
       if (!state.paired) throw new ApiError("not_paired");
@@ -673,49 +684,90 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { ...updateState };
     }
     case "pair_device":
+      if (params.has("pairfail")) throw new ApiError("network");
       if (String(args.code).replace(/[^A-Z0-9]/gi, "").length < 8) throw new ApiError("unauthorized", 401);
       state.paired = true;
       state.mode = "server";
       state.server = String(args.server);
       state.autostart = Boolean(args.autostart);
-      return state;
+      return { ...state, collector: { ...state.collector } };
     case "use_local_mode":
-      if (state.paired) throw new ApiError("bad_request", 400);
       state.paired = true;
       state.mode = "local";
       state.server = null;
       state.autostart = Boolean(args.autostart);
-      return state;
+      return { ...state, collector: { ...state.collector } };
     case "unpair_device":
-      state.paired = false;
-      state.mode = null;
+      state.paired = true;
+      state.mode = "local";
       state.server = null;
-      return state;
+      return { ...state, collector: { ...state.collector } };
+    case "set_dashboard_mode":
+      if (!["local", "server"].includes(String(args.mode)) || (args.mode === "server" && !state.server)) throw new ApiError("bad_request", 400);
+      state.mode = args.mode as "local" | "server";
+      return { ...state, collector: { ...state.collector } };
     case "set_paused":
       state.collector.paused = Boolean(args.paused);
       state.collector.running = !state.collector.paused;
-      return state;
+      return { ...state, collector: { ...state.collector } };
     case "sync_now":
       state.collector.lastScanAt = Date.now();
-      return state;
+      return { ...state, collector: { ...state.collector } };
     case "set_autostart":
       state.autostart = Boolean(args.enabled);
-      return state;
+      return { ...state, collector: { ...state.collector } };
+    case "start_github_login":
+      if (params.has("githubfail")) throw new ApiError("unavailable");
+      return { userCode: "ABCD-1234", verificationUri: "https://github.com/login/device" };
+    case "poll_github_login": {
+      pollCount += 1;
+      if (pollCount % 2 === 1) return { status: "pending" };
+      state.accountEmail = "octo@example.com";
+      state.accountSpace = "我的空间";
+      state.server = "https://tokenlens.online";
+      state.mode = "server";
+      state.paired = true;
+      return { status: "ok", app: { ...state, collector: { ...state.collector } } };
+    }
+    case "open_github_device_page":
+      return null;
+    case "request_login_code":
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(args.email))) throw new ApiError("bad_email");
+      return null;
+    case "login_account": {
+      if (params.has("pairfail") || params.has("offline")) throw new ApiError("network");
+      state.accountEmail = String(args.email);
+      state.accountSpace = "我的空间";
+      state.server = String(args.server);
+      state.mode = "server";
+      state.paired = true;
+      return { ...state, collector: { ...state.collector } };
+    }
+    case "refresh_account":
+      return state.accountEmail;
+    case "account_pair_code":
+      if (!state.accountEmail) throw new ApiError("not_signed_in");
+      return { code: args.rotate ? "NEWW-CODE-0002" : "K7QM-4XPR", replaceable: true };
+    case "logout_account":
+      state.accountEmail = null;
+      state.accountSpace = null;
+      return { ...state, collector: { ...state.collector } };
     case "create_pair_code":
-      if (state.mode === "local") throw new ApiError("bad_request", 400);
+      if (!state.server) throw new ApiError("bad_request", 400);
       return { code: "K7QM-4XPR", expiresAt: iso(Date.now() + 10 * 60_000) };
     case "rename_device":
       renamed.set(String(args.deviceId), String(args.displayName));
       return { deviceId: args.deviceId, displayName: args.displayName };
     case "rotate_credentials":
-      return state;
+      return { ...state, collector: { ...state.collector } };
     case "revoke_device":
       if (args.deviceId === state.deviceId) {
-        state.paired = false;
-        state.mode = null;
+        state.paired = true;
+        state.mode = "local";
+        state.server = null;
       }
       revoked.add(String(args.deviceId));
-      return state;
+      return { ...state, collector: { ...state.collector } };
     default:
       throw new ApiError("not_found");
   }

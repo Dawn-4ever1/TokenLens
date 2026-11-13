@@ -39,6 +39,14 @@ impl CommandError {
     }
 }
 
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.kind)
+    }
+}
+
+impl std::error::Error for CommandError {}
+
 pub type CmdResult<T> = Result<T, CommandError>;
 
 const READ_PATHS: [&str; 7] = [

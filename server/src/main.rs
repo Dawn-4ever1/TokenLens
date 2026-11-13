@@ -157,6 +157,17 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let state = AppState::new(conn, Arc::new(SystemClock))
                     .with_reader(reader)
                     .with_time_zone(config.time_zone);
+                let state = match tokenlens_server::github::GitHub::from_env() {
+                    Some(github) => state.with_github(github),
+                    None => state,
+                };
+                let state = match std::env::var("TOKENLENS_PAIRING_KEY") {
+                    Ok(key) => state.with_pairing_cipher(
+                        tokenlens_server::pairing_crypto::PairingCipher::from_base64(&key)
+                            .expect("TOKENLENS_PAIRING_KEY must be 32 random bytes in base64"),
+                    ),
+                    Err(_) => state,
+                };
                 tokio::spawn(pricing::maintain(
                     state.clone(),
                     config.pricing_dir.clone(),

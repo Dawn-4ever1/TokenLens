@@ -6,6 +6,7 @@ import { useSettings } from "./settings";
 import type { FilterOptions } from "./types";
 
 interface DataContext {
+  sourceKey: string;
   filters: Filters;
   setFilters: (next: Filters | ((previous: Filters) => Filters)) => void;
   timeZone: string;
@@ -24,9 +25,35 @@ function isFilters(value: unknown): value is Filters {
   return Boolean(value) && typeof value === "object" && typeof (value as Filters).preset === "string";
 }
 
-export function DataProvider({ children, enabled }: { children: ReactNode; enabled: boolean }) {
+/** Source IDs are non-secret. Keep dates, but never carry device/project filters between sources. */
+function initialFilters(sourceKey: string): Filters {
+  try {
+    if (localStorage.getItem("tokenlens.source.v1") === sourceKey) return DEFAULT_FILTERS;
+    const previous: unknown = JSON.parse(localStorage.getItem("tokenlens.filters.v1") ?? "null");
+    if (isFilters(previous)) return { ...previous, devices: [], clients: [], models: [], projects: [] };
+  } catch {
+    // Storage is optional.
+  }
+  return DEFAULT_FILTERS;
+}
+
+export function DataProvider({ children, enabled, sourceKey }: { children: ReactNode; enabled: boolean; sourceKey: string }) {
   const { settings } = useSettings();
-  const [filters, setFilters] = usePersistent<Filters>("tokenlens.filters.v1", DEFAULT_FILTERS, isFilters);
+  const [initial] = useState(() => initialFilters(sourceKey));
+  const [filters, setFilters] = usePersistent<Filters>("tokenlens.filters.v1", initial, (value): value is Filters => {
+    try {
+      return localStorage.getItem("tokenlens.source.v1") === sourceKey && isFilters(value);
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem("tokenlens.source.v1", sourceKey);
+    } catch {
+      // Storage is optional.
+    }
+  }, [sourceKey]);
   const [options, setOptions] = useState<FilterOptions | null>(null);
   const [tick, setTick] = useState(0);
   const [lastLoadedAt, setLastLoadedAt] = useState<number | null>(null);
@@ -52,6 +79,7 @@ export function DataProvider({ children, enabled }: { children: ReactNode; enabl
   const timeZone = options?.timeZone ?? DEFAULT_TIME_ZONE;
   const value = useMemo<DataContext>(
     () => ({
+      sourceKey,
       filters,
       setFilters,
       timeZone,
@@ -62,7 +90,7 @@ export function DataProvider({ children, enabled }: { children: ReactNode; enabl
       markLoaded,
       query: (overrides) => filterQuery(filters, timeZone, overrides),
     }),
-    [filters, setFilters, timeZone, options, tick, refresh, lastLoadedAt, markLoaded],
+    [sourceKey, filters, setFilters, timeZone, options, tick, refresh, lastLoadedAt, markLoaded],
   );
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
@@ -82,14 +110,14 @@ export interface Loaded<T> {
 
 /** Fetches a dashboard endpoint; keeps the previous data while reloading. */
 export function useDashboard<T>(path: string | null, query: Query = {}): Loaded<T> {
-  const { tick, markLoaded } = useData();
+  const { tick, markLoaded, sourceKey } = useData();
   const [state, setState] = useState<{ data: T | null; error: unknown; loading: boolean }>({
     data: null,
     error: null,
     loading: path !== null,
   });
   const [local, setLocal] = useState(0);
-  const key = path === null ? null : `${path}?${JSON.stringify(query)}`;
+  const key = path === null ? null : `${sourceKey}/${path}?${JSON.stringify(query)}`;
   const latest = useRef(key);
   latest.current = key;
   useEffect(() => {

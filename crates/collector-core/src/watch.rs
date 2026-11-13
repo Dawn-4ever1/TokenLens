@@ -3,7 +3,7 @@
 //!
 //! Output is numbers only: no path, key, title, or content is ever printed.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,8 +18,9 @@ use serde::Serialize;
 use crate::DateRange;
 use crate::roots::{RootMap, WatchRoot, watch_roots};
 use crate::schedule::{ScanKind, Scheduler, Timing};
-use crate::snapshot::{MergeStats, Scope, Snapshot};
-use crate::sync::{SyncLine, Syncer};
+use crate::snapshot::{MergeStats, ScannedEvent, Scope, Snapshot};
+use crate::state::{Prepared, StateError};
+use crate::sync::{Recorded, SyncLine, Syncer};
 use crate::worker::{self, KeepPayload, WorkerFailure, WorkerOutput};
 
 /// Agent root overrides read by the locked upstream rev (clients.rs `PathRoot::EnvVar`).
@@ -262,14 +263,57 @@ fn write(snapshot: &RwLock<Snapshot>) -> RwLockWriteGuard<'_, Snapshot> {
     snapshot.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// With a `Syncer`, the snapshot starts from the events already queued in an
+/// A scan can feed one destination or several independent upload queues.
+pub trait ScanSync {
+    fn prepared(&self) -> Prepared;
+    fn seed(&self, snapshot: &mut Snapshot) -> Result<usize, StateError>;
+    fn take_resync(&mut self) -> bool;
+    fn record_scan(
+        &mut self,
+        full: bool,
+        counts: &BTreeMap<String, u64>,
+        changed: Vec<ScannedEvent>,
+        duration: Duration,
+    ) -> Recorded;
+    fn record_failure(&mut self, scope: &Scope, code: &str);
+}
+
+impl ScanSync for Syncer {
+    fn prepared(&self) -> Prepared {
+        self.prepared
+    }
+
+    fn seed(&self, snapshot: &mut Snapshot) -> Result<usize, StateError> {
+        Syncer::seed(self, snapshot)
+    }
+
+    fn take_resync(&mut self) -> bool {
+        Syncer::take_resync(self)
+    }
+
+    fn record_scan(
+        &mut self,
+        full: bool,
+        counts: &BTreeMap<String, u64>,
+        changed: Vec<ScannedEvent>,
+        duration: Duration,
+    ) -> Recorded {
+        Syncer::record_scan(self, full, counts, changed, duration)
+    }
+
+    fn record_failure(&mut self, scope: &Scope, code: &str) {
+        Syncer::record_failure(self, scope, code);
+    }
+}
+
+/// With a `ScanSync`, the snapshot starts from the events already queued in an
 /// earlier run, and every new or changed event is handed to the outbox.
 pub fn run(
     options: &WatchOptions,
     sender: Sender<Msg>,
     receiver: Receiver<Msg>,
     out: &mut dyn Write,
-    mut sync: Option<&mut Syncer>,
+    mut sync: Option<&mut dyn ScanSync>,
 ) -> WatchSummary {
     let started = Instant::now();
     let exit_at = options.exit_after.map(|after| started + after);
@@ -283,8 +327,8 @@ pub fn run(
                 state: "seed",
                 ok: seeded.is_ok(),
                 known: seeded.unwrap_or(0),
-                device_changed: syncer.prepared.device_changed,
-                generation_changed: syncer.prepared.generation_changed,
+                device_changed: syncer.prepared().device_changed,
+                generation_changed: syncer.prepared().generation_changed,
             },
         );
     }

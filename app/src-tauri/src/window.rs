@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
 
+#[cfg(windows)]
 use crate::commands::AppState;
 
 pub const MAIN: &str = "main";

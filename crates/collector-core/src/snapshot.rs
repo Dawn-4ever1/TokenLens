@@ -81,6 +81,12 @@ impl Snapshot {
         self.entries.get(key).map(|entry| entry.hash)
     }
 
+    /// Keeps only values already recorded by both independent destinations.
+    pub fn retain_matching(&mut self, other: &Self) {
+        self.entries
+            .retain(|key, entry| other.hash_of(key) == Some(entry.hash));
+    }
+
     /// Restores entries already handed to the outbox in an earlier run.
     pub fn seed(&mut self, key: String, client: &str, ts: i64, hash: [u8; 32]) {
         let entry = Entry {
@@ -266,6 +272,24 @@ mod tests {
         );
         assert_eq!((stats.new, stats.unchanged), (1, 1));
         assert_eq!(changed.len(), 1);
+    }
+
+    #[test]
+    fn shared_snapshot_keeps_only_keys_with_the_same_value_in_both_queues() {
+        let t = 1_793_577_600_000;
+        let mut local = Snapshot::default();
+        local.seed("shared".into(), "codex", t, [1; 32]);
+        local.seed("changed".into(), "codex", t, [2; 32]);
+        local.seed("local-only".into(), "codex", t, [3; 32]);
+        let mut server = Snapshot::default();
+        server.seed("shared".into(), "codex", t, [1; 32]);
+        server.seed("changed".into(), "codex", t, [4; 32]);
+        server.seed("server-only".into(), "codex", t, [5; 32]);
+        local.retain_matching(&server);
+        assert_eq!(local.len(), 1);
+        assert_eq!(local.hash_of("shared"), Some([1; 32]));
+        assert_eq!(local.hash_of("changed"), None);
+        assert_eq!(local.hash_of("local-only"), None);
     }
 
     #[test]

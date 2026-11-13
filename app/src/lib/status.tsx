@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { app, isTauri } from "./api";
 import type { AppStatus } from "./types";
 
@@ -15,12 +15,21 @@ const Context = createContext<StatusContext | null>(null);
 export function StatusProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const revision = useRef(0);
+  const set = useCallback((next: AppStatus) => {
+    revision.current += 1;
+    setStatus(next);
+    setError(null);
+  }, []);
   const refresh = useCallback(async () => {
+    const current = ++revision.current;
     try {
-      setStatus(await app.status());
+      const next = await app.status();
+      if (revision.current !== current) return;
+      setStatus(next);
       setError(null);
     } catch (next) {
-      setError(next);
+      if (revision.current === current) setError(next);
     }
   }, []);
   useEffect(() => {
@@ -41,7 +50,7 @@ export function StatusProvider({ children }: { children: ReactNode }) {
       unlisten?.();
     };
   }, [refresh]);
-  const value = useMemo(() => ({ status, error, refresh, set: setStatus }), [status, error, refresh]);
+  const value = useMemo(() => ({ status, error, refresh, set }), [status, error, refresh, set]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 

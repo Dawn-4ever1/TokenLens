@@ -398,7 +398,7 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
   return (
     <Card
       title="设备"
-      subtitle={local ? "本机模式只统计这一台电脑" : "台式机关机、笔记本合盖时显示离线是正常的，开机后会自动补传"}
+      subtitle={local ? "正在查看这台电脑的本机记录" : "台式机关机、笔记本合盖时显示离线是正常的，开机后会自动补传"}
       action={
         <Button variant="ghost" size="sm" onClick={() => go("devices")}>
           管理 <ChevronRight className="h-3.5 w-3.5" aria-hidden />

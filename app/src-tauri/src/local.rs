@@ -31,6 +31,28 @@ pub fn is_local(credentials: &Credentials) -> bool {
     credentials.server_url == LOCAL_SERVER_URL
 }
 
+/// Called with the root queue lock held, before a server syncer can prepare
+/// that queue. Old local-mode outboxes must survive the move to a child queue.
+pub fn migrate_queue(
+    state_dir: &Path,
+    device_id: &str,
+) -> Result<(), collector_core::state::StateError> {
+    use collector_core::state::{self, State};
+    let destination = state_dir.join("local-queue");
+    // This marker is written before the local credentials. A crash during the
+    // first migration must be retried after restart; its presence is not proof
+    // that the old root queue was copied successfully.
+    if State::exists_in(&destination) || !State::exists_in(state_dir) {
+        return Ok(());
+    }
+    let _local_lock = state::lock_queue(&destination)?;
+    let previous = State::open(state_dir)?;
+    if previous.meta(state::meta::DEVICE_ID)?.as_deref() == Some(device_id) {
+        previous.copy_to(&destination)?;
+    }
+    Ok(())
+}
+
 /// Price catalogs for local mode, in the per-user cache folder. Also the
 /// process's `TOKSCALE_CONFIG_DIR` (set in `main` before any thread starts).
 pub fn prices_dir() -> Option<PathBuf> {
@@ -64,6 +86,7 @@ pub fn save_credentials(state_dir: &Path, credentials: &Credentials) -> std::io:
     std::fs::rename(&temporary, &path)
 }
 
+#[cfg(test)]
 pub fn delete_credentials(state_dir: &Path) {
     let _ = std::fs::remove_file(credentials_path(state_dir));
 }
@@ -101,7 +124,10 @@ impl LocalServer {
     }
 
     /// `prices: None` never prices events and never goes online (tests).
-    fn open_with(state_dir: &Path, prices: Option<PathBuf>) -> Result<Arc<Self>, LocalError> {
+    pub(crate) fn open_with(
+        state_dir: &Path,
+        prices: Option<PathBuf>,
+    ) -> Result<Arc<Self>, LocalError> {
         let path = database_path(state_dir);
         let lock = db::lock_database(&path).map_err(|_| LocalError::Database)?;
         let opened = db::open(&path).map_err(|_| LocalError::Database)?;
@@ -328,6 +354,106 @@ mod tests {
             .get(&summary_url, Some(&next.read_token))
             .expect("summary");
         assert_eq!(json_of(&summary)["inputTokens"], 540);
+    }
+
+    #[test]
+    fn an_old_local_queue_keeps_pending_wal_rows_when_moved() {
+        use collector_core::snapshot::ScannedEvent;
+        use collector_core::state::{self, State};
+        let dir = tempfile::tempdir().unwrap();
+        let _root_lock = state::lock_queue(dir.path()).unwrap();
+        let mut old = State::open(dir.path()).unwrap();
+        old.prepare("dev_local", "generation-test").unwrap();
+        old.record_changes(
+            "generation-test",
+            &[ScannedEvent {
+                key: "event-pending".into(),
+                client: "codex".into(),
+                ts: 42,
+                hash: [7; 32],
+                payload: Some("{}".into()),
+            }],
+            43,
+        )
+        .unwrap();
+        migrate_queue(dir.path(), "dev_local").unwrap();
+        let copied = State::open(&dir.path().join("local-queue")).unwrap();
+        assert_eq!(copied.backlog().unwrap(), 1);
+        assert_eq!(
+            copied.meta(state::meta::DEVICE_ID).unwrap().as_deref(),
+            Some("dev_local")
+        );
+        assert_eq!(
+            copied.next_batch(10).unwrap().unwrap().rows[0].event_key,
+            "event-pending"
+        );
+        // Preparing the root for a server cannot erase the copied local data.
+        old.prepare("dev_network", "generation-test").unwrap();
+        assert_eq!(old.backlog().unwrap(), 0);
+        assert_eq!(copied.backlog().unwrap(), 1);
+        migrate_queue(dir.path(), "dev_local").unwrap();
+        assert_eq!(copied.backlog().unwrap(), 1);
+    }
+
+    #[test]
+    fn an_interrupted_first_migration_is_retried_but_a_finished_one_is_not_repeated() {
+        use collector_core::snapshot::ScannedEvent;
+        use collector_core::state::{self, State};
+        let dir = tempfile::tempdir().unwrap();
+        let _root_lock = state::lock_queue(dir.path()).unwrap();
+        let mut old = State::open(dir.path()).unwrap();
+        old.prepare("dev_local", "generation-test").unwrap();
+        old.record_changes(
+            "generation-test",
+            &[ScannedEvent {
+                key: "event-pending".into(),
+                client: "codex".into(),
+                ts: 42,
+                hash: [7; 32],
+                payload: Some("{}".into()),
+            }],
+            43,
+        )
+        .unwrap();
+        // The layout marker is written before the local credentials, so it can
+        // already exist even though no collection or migration has run yet.
+        std::fs::write(dir.path().join("local-queue-v2"), b"").unwrap();
+        migrate_queue(dir.path(), "dev_local").unwrap();
+        assert_eq!(
+            State::open(&dir.path().join("local-queue"))
+                .unwrap()
+                .backlog()
+                .unwrap(),
+            1
+        );
+        // Once a real child queue exists, later local credentials may be
+        // repaired without copying the retired root queue over it again.
+        old.prepare("dev_network", "generation-test").unwrap();
+        assert_eq!(old.backlog().unwrap(), 0);
+        migrate_queue(dir.path(), "dev_local").unwrap();
+        assert_eq!(
+            State::open(&dir.path().join("local-queue"))
+                .unwrap()
+                .backlog()
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_does_not_copy_a_servers_queue_to_the_local_device() {
+        use collector_core::state::State;
+        let dir = tempfile::tempdir().unwrap();
+        let mut old = State::open(dir.path()).unwrap();
+        old.prepare("dev_network", "generation-test").unwrap();
+        migrate_queue(dir.path(), "dev_local").unwrap();
+        assert!(!State::exists_in(&dir.path().join("local-queue")));
+        assert_eq!(
+            old.meta(collector_core::state::meta::DEVICE_ID)
+                .unwrap()
+                .as_deref(),
+            Some("dev_network")
+        );
     }
 
     #[test]

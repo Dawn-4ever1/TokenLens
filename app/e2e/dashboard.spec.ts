@@ -10,7 +10,7 @@ const VIEWS: { key: View; label: string }[] = [
   { key: "settings", label: "设置" },
 ];
 const WIDTHS = [1440, 1200, 900];
-const STORAGE_KEYS = ["tokenlens.filters.v1", "tokenlens.page.v1", "tokenlens.settings.v1"];
+const STORAGE_KEYS = ["tokenlens.filters.v1", "tokenlens.page.v1", "tokenlens.settings.v1", "tokenlens.source.v1"];
 
 interface Options {
   view?: View;
@@ -20,7 +20,7 @@ interface Options {
 }
 
 /** Seeds UI state once per tab and records console errors and page errors. */
-async function open(page: Page, { view = "overview", theme = "light", direction = "editorial", query = "" }: Options = {}) {
+async function open(page: Page, { view = "overview", theme = "light", direction = "editorial", query = "?server" }: Options = {}) {
   await page.addInitScript(
     ([settings, initialView]) => {
       if (sessionStorage.getItem("e2e-seeded")) return;
@@ -169,16 +169,22 @@ test("offline state explains the problem without crashing", async ({ page }) => 
   expect(errors.filter((error) => !error.includes("network"))).toEqual([]);
 });
 
-test("pairing never leaves the code or a credential in web storage or the URL", async ({ page }) => {
+/** Signs in through the connect dialog with the browser mock backend. */
+async function signIn(dialog: import("@playwright/test").Locator, email = "user@example.com") {
+  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  await dialog.getByLabel("邮箱").fill(email);
+  await dialog.getByRole("button", { name: "获取验证码", exact: true }).click();
+  await dialog.getByLabel("验证码").fill("123456");
+  await dialog.getByRole("button", { name: "登录并连接", exact: true }).click();
+}
+
+test("signing in never leaves the code or a session in web storage or the URL", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  await open(page, { query: "?unpaired" });
-  await expect(page.getByRole("heading", { name: "开始使用 TokenLens" })).toBeVisible();
-  await page.getByRole("radio", { name: "连接服务器" }).click();
-  const code = "QWER-TYUI";
-  await page.getByLabel("服务器地址").fill("https://dash.example.com");
-  await page.getByLabel("配对码").fill(code);
-  await page.getByRole("button", { name: "配对", exact: true }).click();
-  await settle(page, "总览");
+  await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await signIn(page.getByRole("dialog"));
+  await settle(page, "设备");
   for (const view of VIEWS) {
     await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: view.label, exact: true }).click();
     await settle(page, view.label);
@@ -190,42 +196,165 @@ test("pairing never leaves the code or a credential in web storage or the URL", 
   expect(Object.keys(stored.local).sort()).toEqual(STORAGE_KEYS);
   // Key names are fixed above and contain "tokenlens", so only values are scanned.
   const everything = JSON.stringify([...Object.values(stored.local), ...Object.values(stored.session), stored.url, stored.cookies]);
-  expect(everything).not.toContain(code);
-  expect(everything).not.toContain(code.replace("-", ""));
-  expect(everything).not.toMatch(/bearer|secret|token/i);
+  expect(everything).not.toContain("123456");
+  expect(everything).not.toMatch(/tls_|bearer|secret|tdi_|tdr_/i);
   expect(everything).not.toMatch(/[A-Za-z0-9_-]{32,}/);
   expect(stored.cookies).toBe("");
 });
 
-test("first run can start in local mode without a server or a code", async ({ page }) => {
+test("the code input and the request button sit on the same aligned row", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  const input = await dialog.getByLabel("验证码", { exact: true }).boundingBox();
+  const button = await dialog.getByRole("button", { name: "获取验证码", exact: true }).boundingBox();
+  if (!input || !button) throw new Error("code row missing");
+  // The input and the button share a top edge and a height.
+  expect(Math.abs(input.y - button.y)).toBeLessThanOrEqual(1);
+  expect(Math.abs(input.height - button.height)).toBeLessThanOrEqual(1);
+  // The button sits to the right of the input, with no overlap.
+  expect(button.x).toBeGreaterThan(input.x + input.width - 1);
+  // The hint lives below the row, not inside it.
+  const hint = await dialog.getByText("6 位数字，10 分钟内有效", { exact: true }).boundingBox();
+  if (!hint) throw new Error("hint missing");
+  expect(hint.y).toBeGreaterThan(input.y + input.height);
+});
+
+test("a self-hosted server offers only the email code, never GitHub", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toBeVisible();
+  await expect(dialog.getByText("默认连接 https://tokenlens.online", { exact: true })).toBeVisible();
+  await dialog.getByRole("radio", { name: "自己的服务器" }).click();
+  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "用 GitHub 登录" })).toHaveCount(0);
+  await expect(dialog.getByLabel("服务器地址")).toBeVisible();
+  await expect(dialog.getByLabel("邮箱")).toBeVisible();
+  await expect(dialog.getByLabel("验证码")).toBeVisible();
+  // Switching back restores the GitHub choice for the hosted service.
+  await dialog.getByRole("radio", { name: "TokenLens 云服务" }).click();
+  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+});
+
+test("GitHub sign-in shows a device code and finishes without any email", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toHaveAttribute("aria-checked", "true");
+  await dialog.getByRole("button", { name: "用 GitHub 登录", exact: true }).click();
+  await expect(dialog.getByText("ABCD-1234", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  // The mock approves on the second poll, so the dialog closes by itself.
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  await settle(page, "设备");
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("first run opens local data directly without asking for a server or a mode", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 });
-  const errors = await open(page, { query: "?unpaired" });
-  await expect(page.getByRole("heading", { name: "开始使用 TokenLens" })).toBeVisible();
-  // Local mode is the default and asks for neither an address nor a code.
-  await expect(page.getByRole("radio", { name: "只在这台电脑上" })).toHaveAttribute("aria-checked", "true");
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  await expect(page.getByText("本机数据", { exact: true })).toBeVisible();
   await expect(page.getByLabel("服务器地址")).toHaveCount(0);
   await expect(page.getByLabel("配对码")).toHaveCount(0);
-  await page.getByRole("radio", { name: "连接服务器" }).click();
-  await expect(page.getByRole("button", { name: "配对", exact: true })).toBeDisabled();
-  await page.getByRole("radio", { name: "只在这台电脑上" }).click();
-  await page.getByRole("button", { name: "开始使用", exact: true }).click();
-  await settle(page, "总览");
+  await expect(page.getByRole("heading", { name: "开始使用 TokenLens" })).toHaveCount(0);
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设备", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("button", { name: "添加设备", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /Mac mini|Windows 台式机|旧笔记本/ })).toHaveCount(0);
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });
 
-test("local mode hides server-only actions and offers to switch to a server", async ({ page }) => {
-  await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "?local" });
+test("a failed or cancelled sign-in keeps local collection and data available", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  const errors = await open(page, { view: "devices", query: "?pairfail" });
   await settle(page, "设备");
-  await expect(page.getByRole("button", { name: /添加设备/ })).toHaveCount(0);
-  await expect(page.getByText("本机模式只统计这一台电脑")).toBeVisible();
-  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await signIn(dialog);
+  await expect(dialog.getByRole("alert")).toContainText("连不上服务器");
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText("本机数据", { exact: true })).toBeVisible();
+  await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  await expect(dialog.getByLabel("验证码")).toHaveValue("");
+  await expect(dialog.getByLabel("邮箱")).toHaveValue("");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("signing in from Devices allows local and all-device views, clears old filters and keeps both connected", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  await settle(page, "设备");
+  const source = page.getByRole("group", { name: "查看范围", exact: true });
+  await expect(source.getByRole("button", { name: "全部设备", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Windows 台式机/ }).click();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
+  await source.getByRole("button", { name: "本机", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "复制配对码" })).toBeVisible();
+  await expect(dialog.getByText("K7QM-4XPR", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await source.getByRole("button", { name: "全部设备", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("disconnecting a server returns to local data without stopping collection", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "settings", query: "?server" });
   await settle(page, "设置");
-  await expect(page.getByText("只在这台电脑上", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "改为连接服务器" }).click();
-  await page.getByRole("dialog").getByRole("button", { name: "继续" }).click();
-  await expect(page.getByRole("heading", { name: "开始使用 TokenLens" })).toBeVisible();
+  await page.getByRole("button", { name: "断开服务器", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "断开服务器", exact: true }).click();
+  await settle(page, "设置");
+  await expect(page.getByRole("main").getByText("本机数据", { exact: true })).toBeVisible();
+  await expect(page.getByText("后台采集中", { exact: true }).first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "连接服务器", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("server read failures leave Devices controls available so the user can view local data", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { view: "devices", query: "?offline" });
+  await expect(page.getByText("连不上服务器").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "添加设备", exact: true })).toBeVisible();
+  await page.getByRole("group", { name: "查看范围", exact: true }).getByRole("button", { name: "本机", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByText("连不上服务器")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "添加设备", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
