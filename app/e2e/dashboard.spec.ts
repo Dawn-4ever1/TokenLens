@@ -202,6 +202,37 @@ test("signing in never leaves the code or a session in web storage or the URL", 
   expect(stored.cookies).toBe("");
 });
 
+for (const theme of ["light", "dark"] as const) {
+  test(`the selected login method stays highlighted in ${theme} mode`, async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 900 });
+    await open(page, { view: "devices", theme, query: "" });
+    await settle(page, "设备");
+    await page.getByRole("button", { name: "添加设备", exact: true }).click();
+    const group = page.getByRole("radiogroup", { name: "登录方式" });
+    const selected = group.getByRole("radio", { name: "GitHub（推荐）" });
+    await expect(selected).toHaveAttribute("aria-checked", "true");
+    const { track, pill } = await page.evaluate(() => {
+      // Computed colours are OKLCH here; its first component is perceptual
+      // lightness, which is exactly what "raised above the track" means.
+      const lightness = (colour: string) => {
+        const oklch = colour.match(/oklch\(\s*([\d.]+)/);
+        if (oklch) return Number(oklch[1]);
+        const [r = 0, g = 0, b = 0] = (colour.match(/[\d.]+/g) ?? []).map(Number);
+        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+      };
+      const group = document.querySelector('[role="radiogroup"][aria-label="登录方式"]');
+      const selected = group?.querySelector('[role="radio"][aria-checked="true"]');
+      return {
+        track: lightness(getComputedStyle(group as Element).backgroundColor),
+        pill: lightness(getComputedStyle(selected as Element).backgroundColor),
+      };
+    });
+    // The selected pill must read as raised above the track in both themes;
+    // in dark mode it used to be darker than the track, so it looked unselected.
+    expect(pill).toBeGreaterThan(track + 0.03);
+  });
+}
+
 test("the code input and the request button sit on the same aligned row", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page, { view: "devices", query: "" });

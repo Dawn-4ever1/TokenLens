@@ -136,7 +136,7 @@ export function Segmented<T extends string>({
           className={cn(
             "rounded-md px-2.5 font-medium text-ink-2 transition-colors hover:text-ink",
             size === "sm" ? "h-6 text-xs" : "h-7 text-[13px]",
-            option.key === value && "bg-surface text-ink shadow-sm",
+            option.key === value && "bg-raised text-ink shadow-sm",
           )}
         >
           {option.label}
