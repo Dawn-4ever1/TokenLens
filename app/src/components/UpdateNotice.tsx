@@ -5,6 +5,30 @@ import { downloadPercent, updateInProgress, useUpdates } from "@/lib/updates";
 import type { UpdateStatus } from "@/lib/types";
 import { Button, Dialog, Tip } from "./ui";
 
+/**
+ * Release notes arrive as untrusted plain text. Bullet lines become one short
+ * point per row so an update reads at a glance; anything else stays a paragraph.
+ */
+function NoteBody({ text }: { text: string }) {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length >= 2 && lines.every((line) => line.startsWith("• "))) {
+    return (
+      <ul className="space-y-1.5">
+        {lines.map((line) => (
+          <li key={line} className="flex gap-2">
+            <span aria-hidden className="mt-[9px] h-1 w-1 shrink-0 rounded-full bg-ink-3" />
+            <span>{line.slice(2)}</span>
+          </li>
+        ))}
+      </ul>
+    );
+  }
+  return <p className="whitespace-pre-wrap">{text}</p>;
+}
+
 /** Kept in the bottom status area, including a named icon in the narrow sidebar. */
 export function UpdateNotice() {
   const { status, setDialogOpen } = useUpdates();
@@ -83,8 +107,8 @@ export function UpdateDialog() {
     <Dialog open={dialogOpen} onOpenChange={setDialogOpen} title={`更新到 ${status.version}`}>
       <p className="text-xs leading-5 text-ink-3">更新会保留配对、数据和设置。下载完成后会短暂停止采集，安装并自动重启。</p>
       {/* Release notes are untrusted plain text, never interpreted as HTML or links. */}
-      <div className="selectable my-4 max-h-[min(40vh,280px)] overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-surface-2/50 p-3 text-[13px] leading-6 text-ink-2">
-        {status.notes?.trim() || "这个版本没有提供更新说明。"}
+      <div className="selectable my-4 max-h-[min(40vh,280px)] overflow-y-auto break-words rounded-lg border border-line bg-surface-2/50 px-4 py-3 text-[13px] leading-6 text-ink-2">
+        {status.notes?.trim() ? <NoteBody text={status.notes.trim()} /> : "这个版本没有提供更新说明。"}
       </div>
       <UpdateProgress status={status} />
       <div className="mt-5 flex flex-wrap justify-end gap-2">

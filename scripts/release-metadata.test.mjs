@@ -147,10 +147,25 @@ test("Release notes without a filled 本版变化 section prevent publication", 
   assert.throws(() => createReleaseMetadata({ ...input, notes: "## 下载\n\ntext" }), /本版变化/);
 });
 
-test("the Release notes template yields short plain in-app notes", () => {
+test("the Release notes template yields short, one-line-at-a-time in-app notes", () => {
   const template = readFileSync(new URL("../.github/release-notes.md", import.meta.url), "utf8");
   const notes = updateNotes(template);
   assert.ok(notes.length > 0 && notes.length < 600, "keep the in-app summary short");
   assert.doesNotMatch(notes, /^#|\||`|\*\*|\{\{VERSION\}\}/m);
   assert.doesNotMatch(notes, /SHA256SUMS|仍要运行|配对码/, "download and first-run help stay on the Release page");
+  const lines = notes.split("\n").filter((line) => line.trim());
+  assert.ok(lines.length >= 3, "the update dialog should list several short points");
+  for (const line of lines) {
+    assert.match(line, /^• /, `every line is one point: ${line}`);
+    assert.ok([...line].length <= 40, `each point stays on one line: ${line}`);
+  }
+});
+
+test("a single long paragraph is rejected as update notes", () => {
+  const paragraph = "## 本版变化\n\n" + "这一整段话会被塞进更新窗口里，用户要读很久才能读完，而且中间没有任何停顿，看起来非常累。".repeat(2) + "\n\n## 下载\n";
+  const notes = updateNotes(paragraph);
+  const lines = notes.split("\n").filter((line) => line.trim());
+  assert.ok(lines.length === 1);
+  // The template test above enforces the bullet format; this documents why.
+  assert.ok([...lines[0]].length > 40);
 });

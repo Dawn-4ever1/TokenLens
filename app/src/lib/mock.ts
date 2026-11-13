@@ -614,7 +614,7 @@ export function mockUpdateStatus(scenario: string | null): UpdateStatus {
   return {
     autoCheck: true, phase,
     version: available ? "0.4.1" : null,
-    notes: available ? "TokenLens 0.4.1\n\n改善自动更新体验。\n配对、数据和设置保持不变。" : null,
+    notes: available ? "• 更新说明改成一条一条\n• 打开即可看本机用量\n• 用 GitHub 授权登录\n• 配对、数据和设置保持不变" : null,
     downloadedBytes: phase === "downloading" ? 4_200_000 : 0,
     totalBytes: phase === "downloading" ? 10_000_000 : null,
     error: phase === "error" ? "连不上 GitHub，稍后会再试。" : null,

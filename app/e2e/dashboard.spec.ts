@@ -441,7 +441,11 @@ test("update markers open plain-text release notes and close at 900px", async ({
   await nav.getByRole("button", { name: "有新版本 0.4.1", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("heading", { name: "更新到 0.4.1" })).toBeVisible();
-  await expect(dialog.getByText(/改善自动更新体验/)).toBeVisible();
+  // One short point per row, never a single wall of text.
+  const points = dialog.locator("ul li");
+  await expect(points).toHaveCount(4);
+  await expect(points.first()).toHaveText("更新说明改成一条一条");
+  await expect(dialog.getByText(/配对、数据和设置保持不变/)).toBeVisible();
   await expect(dialog.getByRole("button", { name: "下载并更新" })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   await page.keyboard.press("Escape");
