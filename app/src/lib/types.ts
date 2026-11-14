@@ -181,6 +181,8 @@ export interface ClientCoverage {
 
 export type Connection = "online" | "offline" | "long_offline";
 
+export type FormFactor = "laptop" | "desktop";
+
 export interface DeviceStatus {
   deviceId: string;
   displayName: string;
@@ -275,6 +277,8 @@ export interface AppStatus {
   cloudServer: string;
   /** Signed-in account email, or null when this computer is not signed in. */
   accountEmail: string | null;
+  accountDisplayName: string | null;
+  accountAvatarUrl: string | null;
   /** Name of the signed-in space. */
   accountSpace: string | null;
 }

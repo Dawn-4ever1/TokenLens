@@ -475,6 +475,10 @@ function sessionDetail(key: string): SessionDetail {
 }
 
 const renamed = new Map<string, string>();
+const savedFormFactors = (() => {
+  try { return JSON.parse(sessionStorage.getItem("tokenlens.mock.form-factors") ?? "{}") as Record<string, "laptop" | "desktop">; } catch { return {}; }
+})();
+const formFactors = new Map<string, "laptop" | "desktop">(Object.entries(savedFormFactors));
 const revoked = new Set<string>();
 
 function deviceStatuses(): DeviceStatus[] {
@@ -494,7 +498,7 @@ function deviceStatuses(): DeviceStatus[] {
       deviceId: d.id,
       displayName: renamed.get(d.id) ?? d.name,
       platform: d.platform,
-      formFactor: d.form,
+      formFactor: formFactors.get(d.id) ?? d.form,
       osName: d.platform === "macos" ? "macOS" : "Windows",
       osVersion: d.platform === "macos" ? "15.6" : "11 23H2",
       createdAt: iso(now - 160 * DAY),
@@ -630,6 +634,8 @@ const state: AppStatus = {
   server: startsLocal ? null : "https://dash.example.com",
   cloudServer: "https://tokenlens.online",
   accountEmail: params.has("server") || params.has("signed") ? "mock@example.com" : null,
+  accountDisplayName: params.has("server") || params.has("signed") ? "octocat" : null,
+  accountAvatarUrl: null,
   accountSpace: params.has("server") || params.has("signed") ? "我的空间" : null,
   appVersion: "0.4.0",
   collector: {
@@ -702,6 +708,14 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       state.mode = "local";
       state.server = null;
       return { ...state, collector: { ...state.collector } };
+    case "remove_local_device":
+      if (state.server) throw new ApiError("bad_request", 400);
+      state.paired = false;
+      state.mode = null;
+      state.collector.running = false;
+      state.collector.paused = true;
+      revoked.add("dev_mock_mbp");
+      return { ...state, collector: { ...state.collector } };
     case "set_dashboard_mode":
       if (!["local", "server"].includes(String(args.mode)) || (args.mode === "server" && !state.server)) throw new ApiError("bad_request", 400);
       state.mode = args.mode as "local" | "server";
@@ -723,6 +737,8 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       pollCount += 1;
       if (pollCount % 2 === 1) return { status: "pending" };
       state.accountEmail = "octo@example.com";
+      state.accountDisplayName = "octocat";
+      state.accountAvatarUrl = sessionStorage.getItem("tokenlens.mock.avatar");
       state.accountSpace = "我的空间";
       state.server = "https://tokenlens.online";
       state.mode = "server";
@@ -737,6 +753,8 @@ export async function command(name: string, args: Record<string, unknown>): Prom
     case "login_account": {
       if (params.has("pairfail") || params.has("offline")) throw new ApiError("network");
       state.accountEmail = String(args.email);
+      state.accountDisplayName = null;
+      state.accountAvatarUrl = null;
       state.accountSpace = "我的空间";
       state.server = String(args.server);
       state.mode = "server";
@@ -750,6 +768,8 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { code: args.rotate ? "NEWW-CODE-0002" : "K7QM-4XPR", replaceable: true };
     case "logout_account":
       state.accountEmail = null;
+      state.accountDisplayName = null;
+      state.accountAvatarUrl = null;
       state.accountSpace = null;
       return { ...state, collector: { ...state.collector } };
     case "create_pair_code":
@@ -758,6 +778,14 @@ export async function command(name: string, args: Record<string, unknown>): Prom
     case "rename_device":
       renamed.set(String(args.deviceId), String(args.displayName));
       return { deviceId: args.deviceId, displayName: args.displayName };
+    case "set_device_form_factor": {
+      if (!["laptop", "desktop"].includes(String(args.formFactor))) throw new ApiError("bad_request", 400);
+      const deviceId = String(args.deviceId);
+      const formFactor = args.formFactor as "laptop" | "desktop";
+      formFactors.set(deviceId, formFactor);
+      sessionStorage.setItem("tokenlens.mock.form-factors", JSON.stringify(Object.fromEntries(formFactors)));
+      return { deviceId, formFactor };
+    }
     case "rotate_credentials":
       return { ...state, collector: { ...state.collector } };
     case "revoke_device":

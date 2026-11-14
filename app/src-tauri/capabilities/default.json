@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "The dashboard window: app commands, status events and title-bar dragging only.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "clipboard-manager:allow-write-text"]
 }

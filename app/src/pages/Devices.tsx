@@ -1,13 +1,14 @@
-import { Check, Copy, KeyRound, MoreHorizontal, Pencil, Plus, ShieldOff } from "lucide-react";
+import { Check, Copy, KeyRound, Laptop, MoreHorizontal, Pencil, Plus, ShieldOff, Unplug } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { CaveatList, ClientName, LoadError, Num, ShareBar } from "@/components/common";
-import { Badge, Button, Card, Dialog, EmptyState, Field, Popover, PopoverContent, PopoverTrigger, Skeleton, StatusDot, Tip, cn, inputClass } from "@/components/ui";
+import { Badge, Button, Card, Dialog, EmptyState, Field, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, StatusDot, Tip, cn, inputClass } from "@/components/ui";
 import { app, errorMessage } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { useData, useDashboard } from "@/lib/data";
 import { compact, dateTime, duration, exact, relativeTime, shortId } from "@/lib/format";
 import { clientColor, coverageColumns, formFactorLabel, platformLabel } from "@/lib/labels";
 import { useStatus } from "@/lib/status";
-import type { DeviceStatus, DeviceUsage, Devices as DevicesData } from "@/lib/types";
+import type { DeviceStatus, DeviceUsage, Devices as DevicesData, FormFactor } from "@/lib/types";
 import { deviceTone } from "./Overview";
 import { ConnectServer } from "./Pairing";
 
@@ -72,6 +73,7 @@ export function Devices() {
                   max={max}
                   minCollectorVersion={data.minCollectorVersion}
                   timeZone={timeZone}
+                  connected={connected}
                   local={local}
                   onChanged={devices.reload}
                 />
@@ -94,6 +96,7 @@ function DeviceCard({
   max,
   minCollectorVersion,
   timeZone,
+  connected,
   local,
   onChanged,
 }: {
@@ -102,11 +105,12 @@ function DeviceCard({
   max: number;
   minCollectorVersion: string;
   timeZone: string;
+  connected: boolean;
   local: boolean;
   onChanged: () => void;
 }) {
   const tone = deviceTone(device);
-  const [dialog, setDialog] = useState<"rename" | "rotate" | "revoke" | null>(null);
+  const [dialog, setDialog] = useState<"rename" | "form-factor" | "rotate" | "revoke" | null>(null);
   const kind = [platformLabel(device.platform), formFactorLabel(device.formFactor)].filter(Boolean).join(" ");
   const os = device.osName ? `${device.osName}${device.osVersion ? ` ${device.osVersion}` : ""}` : null;
   const clients = (usage?.byClient ?? []).filter((slice) => slice.totalTokens > 0);
@@ -128,7 +132,7 @@ function DeviceCard({
         </span>
       }
       subtitle={[kind, os, tone.label].filter(Boolean).join(" · ")}
-      action={<DeviceMenu device={device} local={local} onPick={setDialog} />}
+      action={<DeviceMenu device={device} connected={connected} local={local} onPick={setDialog} />}
     >
       <div className="flex items-end justify-between gap-3">
         <div>
@@ -163,8 +167,13 @@ function DeviceCard({
         <Info label="配对于" value={dateTime(device.createdAt, timeZone, false, true)} />
       </dl>
       <RenameDialog open={dialog === "rename"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
+      <FormFactorDialog open={dialog === "form-factor"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
       <RotateDialog open={dialog === "rotate"} onClose={() => setDialog(null)} onDone={onChanged} />
-      <RevokeDialog open={dialog === "revoke"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
+      {local ? (
+        <LocalDeviceDialog open={dialog === "revoke"} connected={connected} onClose={() => setDialog(null)} onChanged={onChanged} />
+      ) : (
+        <RevokeDialog open={dialog === "revoke"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
+      )}
     </Card>
   );
 }
@@ -182,17 +191,19 @@ function Info({ label, value, title, mono }: { label: string; value: string; tit
 
 function DeviceMenu({
   device,
+  connected,
   local,
   onPick,
 }: {
   device: DeviceStatus;
-  /** Local mode (D044) has one computer and no credentials to rotate. */
+  connected: boolean;
+  /** Local data has no network credentials; it must never revoke its only device. */
   local: boolean;
-  onPick: (action: "rename" | "rotate" | "revoke") => void;
+  onPick: (action: "rename" | "form-factor" | "rotate" | "revoke") => void;
 }) {
   const [open, setOpen] = useState(false);
   const item = "flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] hover:bg-surface-2";
-  const pick = (action: "rename" | "rotate" | "revoke") => {
+  const pick = (action: "rename" | "form-factor" | "rotate" | "revoke") => {
     setOpen(false);
     onPick(action);
   };
@@ -207,18 +218,70 @@ function DeviceMenu({
         <button type="button" className={item} onClick={() => pick("rename")}>
           <Pencil className="h-3.5 w-3.5 text-ink-3" aria-hidden /> 重命名
         </button>
+        <button type="button" className={item} onClick={() => pick("form-factor")}>
+          <Laptop className="h-3.5 w-3.5 text-ink-3" aria-hidden /> 更改设备性质
+        </button>
         {device.isCurrent && !local && (
           <button type="button" className={item} onClick={() => pick("rotate")}>
             <KeyRound className="h-3.5 w-3.5 text-ink-3" aria-hidden /> 更换这台电脑的凭据
           </button>
         )}
-        {!local && (
+        {local ? (
+          <button type="button" className={cn(item, "text-bad")} onClick={() => pick("revoke")}>
+            {connected ? <Unplug className="h-3.5 w-3.5" aria-hidden /> : <ShieldOff className="h-3.5 w-3.5" aria-hidden />}
+            {connected ? "断开服务器" : "移除设备"}
+          </button>
+        ) : (
           <button type="button" className={cn(item, "text-bad")} onClick={() => pick("revoke")}>
             <ShieldOff className="h-3.5 w-3.5" aria-hidden /> 移除设备
           </button>
         )}
       </PopoverContent>
     </Popover>
+  );
+}
+
+function LocalDeviceDialog({ open, connected, onClose, onChanged }: { open: boolean; connected: boolean; onClose: () => void; onChanged: () => void }) {
+  const { set } = useStatus();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const title = connected ? "断开服务器？" : "移除本机设备？";
+  const confirm = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      set(await (connected ? app.unpair() : app.removeLocalDevice()));
+      onChanged();
+      onClose();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title={title}>
+      <div className="space-y-2 text-[13px] leading-6 text-ink-2">
+        {connected ? (
+          <>
+            <p>停止向服务器同步，并回到只查看这台电脑的本机数据。</p>
+            <p>本机采集继续运行，本机记录和服务器上的历史用量都保留。以后可以重新连接服务器。</p>
+          </>
+        ) : (
+          <>
+            <p>这台电脑及其记录将从本机看板移除，采集会暂停。</p>
+            <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">重新开始并恢复采集后，会扫描现有日志，历史用量可能再次出现。已同步到其他设备或服务器的记录不受影响。</p>
+          </>
+        )}
+      </div>
+      {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
+      <div className="mt-5 flex justify-end gap-2">
+        <Button onClick={onClose} disabled={busy}>取消</Button>
+        <Button variant="danger" onClick={() => void confirm()} disabled={busy}>
+          {busy ? connected ? "正在断开…" : "移除中…" : connected ? "断开服务器" : "移除"}
+        </Button>
+      </div>
+    </Dialog>
   );
 }
 
@@ -279,6 +342,64 @@ function RenameDialog({ open, device, onClose, onDone }: { open: boolean; device
   );
 }
 
+function FormFactorDialog({ open, device, onClose, onDone }: { open: boolean; device: DeviceStatus; onClose: () => void; onDone: () => void }) {
+  const [formFactor, setFormFactor] = useState<FormFactor | "">("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setFormFactor(device.formFactor === "laptop" || device.formFactor === "desktop" ? device.formFactor : "");
+      setError(null);
+    }
+  }, [open, device.formFactor]);
+  const submit = async () => {
+    if (!formFactor || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await app.setDeviceFormFactor(device.deviceId, formFactor);
+      onDone();
+      onClose();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !busy) onClose();
+      }}
+      title={`更改「${device.displayName}」的设备性质`}
+    >
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void submit();
+        }}
+        className="space-y-4"
+      >
+        <div>
+          <span className="text-[13px] font-medium text-ink">设备性质</span>
+          <div className="mt-1.5">
+            <Segmented label="设备性质" value={formFactor} onChange={setFormFactor} options={[{ key: "laptop", label: "笔记本" }, { key: "desktop", label: "台式机" }]} />
+          </div>
+          <p className="mt-2 text-xs leading-5 text-ink-3">只修改看板里的设备资料，不影响设备名称、凭据和历史用量。</p>
+        </div>
+        {error && <p role="alert" className="text-xs text-bad">{error}</p>}
+        <div className="flex justify-end gap-2">
+          <Button onClick={onClose} disabled={busy}>取消</Button>
+          <Button type="submit" variant="primary" disabled={busy || !formFactor}>
+            {busy ? "保存中…" : "保存"}
+          </Button>
+        </div>
+      </form>
+    </Dialog>
+  );
+}
+
 function RotateDialog({ open, onClose, onDone }: { open: boolean; onClose: () => void; onDone: () => void }) {
   const { set } = useStatus();
   const [error, setError] = useState<string | null>(null);
@@ -299,7 +420,7 @@ function RotateDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
   return (
     <Dialog open={open} onOpenChange={(next) => !next && onClose()} title="更换这台电脑的凭据">
       <p className="text-[13px] leading-6 text-ink-2">
-        会生成一对新的凭据并保存到系统钥匙串，旧凭据立刻失效。已上传的数据不受影响，采集会自动继续。怀疑凭据泄露时使用。
+        凭据是这台电脑连接服务器时使用的身份钥匙，不是账号密码，也不是服务器地址。更换后旧钥匙立即失效，新钥匙自动保存；历史用量不变，采集和同步继续。一般只在怀疑钥匙泄露时使用。
       </p>
       {error && <p className="mt-3 text-xs text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
@@ -388,9 +509,15 @@ function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange
       setBusy(false);
     }
   };
-  const copy = () => {
+  const copy = async () => {
     if (!code) return;
-    void navigator.clipboard?.writeText(code).then(() => setCopied(true));
+    try {
+      await copyText(code);
+      setCopied(true);
+      setError(null);
+    } catch (reason) {
+      setError(errorMessage(reason));
+    }
   };
   const close = (next: boolean) => {
     onOpenChange(next);
@@ -428,7 +555,7 @@ function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange
             )}
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" onClick={copy} disabled={!code}>
+            <Button size="sm" onClick={() => void copy()} disabled={!code}>
               {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
               {copied ? "已复制" : "复制配对码"}
             </Button>

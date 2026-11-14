@@ -204,8 +204,9 @@
 @utility num-fit {
   container-type: inline-size;
   & [data-exact] {
-    /* Digits plus commas measure ~0.49–0.52em in the three directions; 0.56 leaves room for Mac fonts. */
-    font-size: min(1em, calc(100cqi / (var(--num-chars, 1) * 0.56)));
+    /* Digits plus commas measure ~0.49–0.52em; 0.60 keeps a margin so the
+       longest exact count never spills past the card at 1200px. */
+    font-size: min(1em, calc(100cqi / (var(--num-chars, 1) * 0.6)));
   }
 }
 

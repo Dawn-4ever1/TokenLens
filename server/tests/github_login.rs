@@ -78,7 +78,7 @@ impl Stub {
                 } else if path.starts_with("/user/emails") {
                     Value::Array(mail.lock().expect("lock").clone())
                 } else if path.starts_with("/user") {
-                    json!({ "id": 4242, "login": "octocat" })
+                    json!({ "id": 4242, "login": "octocat", "avatar_url": "https://avatars.githubusercontent.com/u/4242?v=4" })
                 } else {
                     json!({ "error": "not_found" })
                 };
@@ -142,12 +142,22 @@ async fn device_flow_signs_in_and_reuses_the_same_space() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["status"], "ok");
     assert_eq!(body["via"], "github");
+    assert_eq!(body["displayName"], "octocat");
+    assert_eq!(
+        body["avatarUrl"],
+        "https://avatars.githubusercontent.com/u/4242?v=4"
+    );
     let session = body["session"].as_str().expect("session").to_owned();
     assert!(session.starts_with("tls_"));
 
     let (status, me) = h.get("/api/auth/me", Some(&session)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(me["email"], "octo@example.com");
+    assert_eq!(me["displayName"], "octocat");
+    assert_eq!(
+        me["avatarUrl"],
+        "https://avatars.githubusercontent.com/u/4242?v=4"
+    );
     assert_eq!(
         h.count("SELECT COUNT(*) FROM tenants WHERE id <> 'tenant_personal'"),
         1

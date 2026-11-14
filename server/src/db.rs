@@ -69,6 +69,10 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 8,
         sql: include_str!("../migrations/0008_identities.sql"),
     },
+    Migration {
+        version: 9,
+        sql: include_str!("../migrations/0009_identity_profiles.sql"),
+    },
 ];
 
 /// How many events carry a `counted` flag that disagrees with the D029 rule
@@ -835,6 +839,21 @@ pub fn revoke_device(
     )?;
     tx.commit()?;
     Ok(true)
+}
+
+/// Corrects the user-selected form factor without changing device identity,
+/// credentials, or usage history. Returns `false` if no such live device exists.
+pub fn set_device_form_factor(
+    conn: &Connection,
+    tenant_id: &str,
+    device_id: &str,
+    form_factor: &str,
+) -> Result<bool, DbError> {
+    Ok(conn.execute(
+        "UPDATE devices SET form_factor = ?3
+         WHERE tenant_id = ?1 AND id = ?2 AND revoked_at IS NULL",
+        params![tenant_id, device_id, form_factor],
+    )? > 0)
 }
 
 /// Returns `false` if no such live device exists.

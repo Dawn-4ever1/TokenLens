@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_FILTERS, activeFilterCount, addDays, daysBetween, filterQuery, previousSpan, resolveRange, todayIn } from "./range";
+import { DEFAULT_FILTERS, RANGE_PRESETS, activeFilterCount, addDays, daysBetween, filterQuery, normalizeFilters, previousSpan, resolveRange, todayIn } from "./range";
 
 const now = new Date("2026-11-10T20:30:00Z");
 
@@ -20,10 +20,26 @@ describe("resolveRange", () => {
   const tz = "Asia/Shanghai";
   it("presets end today, inclusive", () => {
     expect(resolveRange({ ...DEFAULT_FILTERS, preset: "today" }, tz, now)).toEqual({ from: "2026-11-11", to: "2026-11-11" });
-    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "7d" }, tz, now)).toEqual({ from: "2026-11-05", to: "2026-11-11" });
-    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "30d" }, tz, now)).toEqual({ from: "2026-10-13", to: "2026-11-11" });
+    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "week" }, tz, now)).toEqual({ from: "2026-11-09", to: "2026-11-11" });
     expect(resolveRange({ ...DEFAULT_FILTERS, preset: "month" }, tz, now)).toEqual({ from: "2026-11-01", to: "2026-11-11" });
     expect(resolveRange({ ...DEFAULT_FILTERS, preset: "all" }, tz, now)).toEqual({});
+    expect(RANGE_PRESETS.map(({ label }) => label)).toEqual(["日", "周", "月", "总计", "自定义"]);
+    expect(DEFAULT_FILTERS.preset).toBe("month");
+  });
+
+  it("starts the week on Monday in every timezone", () => {
+    const monday = new Date("2026-11-09T00:30:00Z");
+    const sunday = new Date("2026-11-08T15:30:00Z");
+    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "week" }, tz, monday)).toEqual({ from: "2026-11-09", to: "2026-11-09" });
+    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "week" }, tz, sunday)).toEqual({ from: "2026-11-02", to: "2026-11-08" });
+    expect(resolveRange({ ...DEFAULT_FILTERS, preset: "week" }, "UTC", sunday)).toEqual({ from: "2026-11-02", to: "2026-11-08" });
+  });
+
+  it("maps saved old ranges and rejects unknown ones", () => {
+    expect(normalizeFilters({ preset: "7d" })?.preset).toBe("week");
+    expect(normalizeFilters({ preset: "30d" })?.preset).toBe("month");
+    expect(normalizeFilters({ preset: "future" })?.preset).toBe("month");
+    expect(normalizeFilters({ preset: "all", devices: "bad" })).toBeNull();
   });
 
   it("swaps a reversed custom range", () => {

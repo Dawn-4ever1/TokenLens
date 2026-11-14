@@ -86,9 +86,11 @@ pub fn save_credentials(state_dir: &Path, credentials: &Credentials) -> std::io:
     std::fs::rename(&temporary, &path)
 }
 
-#[cfg(test)]
-pub fn delete_credentials(state_dir: &Path) {
-    let _ = std::fs::remove_file(credentials_path(state_dir));
+pub fn delete_credentials(state_dir: &Path) -> std::io::Result<()> {
+    let path = credentials_path(state_dir);
+    let temporary = path.with_extension("json.removing");
+    std::fs::rename(&path, &temporary)?;
+    std::fs::remove_file(temporary)
 }
 
 /// The computer's IANA zone for day buckets (D044, item 6); UTC if unknown.
@@ -105,6 +107,12 @@ pub enum LocalError {
     Database,
     #[error("this computer could not be set up")]
     Pair,
+}
+
+impl From<LocalError> for crate::remote::CommandError {
+    fn from(_: LocalError) -> Self {
+        Self::new("server")
+    }
 }
 
 pub struct LocalServer {
@@ -236,6 +244,14 @@ impl LocalServer {
     /// later return creates a fresh one instead of listing two.
     pub fn revoke(&self, device_id: &str) {
         let _ = self.state.revoke_device_now(DEFAULT_TENANT_ID, device_id);
+    }
+
+    /// Device removal is explicit: local history is retired from the dashboard,
+    /// not silently hidden while it continues to accept uploads.
+    pub fn retire(&self, device_id: &str) -> Result<bool, LocalError> {
+        self.state
+            .revoke_device_now(DEFAULT_TENANT_ID, device_id)
+            .map_err(|_| LocalError::Pair)
     }
 }
 
@@ -492,7 +508,7 @@ mod tests {
         };
         save_credentials(dir.path(), &remote).expect("save");
         assert!(load_credentials(dir.path()).is_none());
-        delete_credentials(dir.path());
+        delete_credentials(dir.path()).expect("delete");
         assert!(load_credentials(dir.path()).is_none());
     }
 }

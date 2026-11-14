@@ -314,13 +314,14 @@ async fn other_tenants_devices_cannot_be_changed() {
     };
     let rename = |id: &str| format!("/api/dashboard/devices/{id}/rename");
     let name = serde_json::to_vec(&json!({"displayName": "Mine now"})).unwrap();
+    let form_factor = serde_json::to_vec(&json!({"formFactor": "desktop"})).unwrap();
 
-    for verb in ["rename", "revoke"] {
+    for verb in ["rename", "form-factor", "revoke"] {
         let path = |id: &str| format!("/api/dashboard/devices/{id}/{verb}");
-        let body = if verb == "rename" {
-            name.clone()
-        } else {
-            Vec::new()
+        let body = match verb {
+            "rename" => name.clone(),
+            "form-factor" => form_factor.clone(),
+            _ => Vec::new(),
         };
         let foreign = post(path(&b.id), a.read.clone(), body.clone()).await;
         let missing = post(path("dev_missing"), a.read.clone(), body).await;
@@ -351,11 +352,33 @@ async fn other_tenants_devices_cannot_be_changed() {
     // The team device is untouched and still works.
     let devices = read(h, "/api/dashboard/devices", &b.read).await;
     assert_eq!(devices["devices"][0]["displayName"], "Test Mac");
+    assert_eq!(devices["devices"][0]["formFactor"], "laptop");
     beat(h, b).await;
     // Within a tenant the same actions still work.
     assert_eq!(
         post(rename(&a2.id), a.read.clone(), name.clone()).await.0,
         StatusCode::OK
+    );
+    let edit_form_factor = || format!("/api/dashboard/devices/{}/form-factor", a2.id);
+    assert_eq!(
+        post(edit_form_factor(), a.read.clone(), form_factor.clone())
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        post(edit_form_factor(), a.read.clone(), Vec::new()).await.0,
+        StatusCode::BAD_REQUEST
+    );
+    let devices = read(h, "/api/dashboard/devices", &a.read).await;
+    assert_eq!(
+        devices["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|device| device["deviceId"] == a2.id)
+            .unwrap()["formFactor"],
+        "desktop"
     );
     assert_eq!(
         post(
@@ -824,7 +847,7 @@ async fn upgrading_puts_existing_data_in_the_personal_tenant() {
     assert_eq!(summary["totalTokens"], 345);
     assert_eq!(
         read(&h, "/api/dashboard/health", read_token.expose()).await["schemaVersion"],
-        8
+        9
     );
     let old_pc = Device {
         id: device.clone(),

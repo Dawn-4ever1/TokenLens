@@ -267,6 +267,8 @@ pub fn login_with_identity(
     provider: &str,
     subject: &str,
     email: &str,
+    display_name: Option<&str>,
+    avatar_url: Option<&str>,
     now: i64,
 ) -> Result<Login, AccountError> {
     if provider.is_empty() || subject.is_empty() {
@@ -293,9 +295,10 @@ pub fn login_with_identity(
     let account = match linked {
         Some(account) => {
             tx.execute(
-                "UPDATE account_identities SET last_login_at = ?3, email = ?4
+                "UPDATE account_identities SET last_login_at = ?3, email = ?4,
+                    display_name = ?5, avatar_url = ?6
                  WHERE provider = ?1 AND subject = ?2",
-                params![provider, subject, now, email],
+                params![provider, subject, now, email, display_name, avatar_url],
             )?;
             account
         }
@@ -313,9 +316,9 @@ pub fn login_with_identity(
             };
             tx.execute(
                 "INSERT INTO account_identities
-                   (provider, subject, account_id, email, created_at, last_login_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![provider, subject, account.id, email, now],
+                   (provider, subject, account_id, email, display_name, avatar_url, created_at, last_login_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+                params![provider, subject, account.id, email, display_name, avatar_url, now],
             )?;
             account
         }
@@ -323,6 +326,23 @@ pub fn login_with_identity(
     let session = open_session(&tx, &account, now)?;
     tx.commit()?;
     Ok(Login { session, account })
+}
+
+pub type PublicProfile = (Option<String>, Option<String>);
+
+/// Public profile fields of the account's GitHub identity, if it has one.
+pub fn github_profile(
+    conn: &Connection,
+    account_id: &str,
+) -> Result<Option<PublicProfile>, AccountError> {
+    Ok(conn
+        .query_row(
+            "SELECT display_name, avatar_url FROM account_identities
+             WHERE account_id = ?1 AND provider = 'github'",
+            params![account_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
 }
 
 pub fn authenticate(

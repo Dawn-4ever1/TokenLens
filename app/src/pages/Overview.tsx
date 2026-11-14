@@ -80,8 +80,13 @@ export function Overview() {
           delta={<Delta current={s.totalTokens} previous={p?.totalTokens} />}
           sub={
             <>
-              非缓存 <Num value={nonCache} className="text-ink-2" />
-              {todayTokens !== undefined && filters.preset !== "today" ? <> · 今日 <Num value={todayTokens} className="text-ink-2" /></> : null}
+              {/* Fixed lines: toggling exact/compact changes digits in place
+                  instead of reflowing this row (the count used to wrap or slide
+                  across the card when the exact digits got longer). */}
+              <span className="block">非缓存 <Num value={nonCache} className="text-ink-2" /></span>
+              {todayTokens !== undefined && filters.preset !== "today" ? (
+                <span className="block">今日 <Num value={todayTokens} className="text-ink-2" /></span>
+              ) : null}
             </>
           }
           hint="五类 token 相加，缓存读取通常占九成以上，不等于计费 token。「非缓存」= 输入 + 输出 + 推理"

@@ -6,7 +6,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use http_body_util::{BodyExt, LengthLimitError, Limited};
-use serde::Serialize;
 
 use crate::accounts::{self, Account, AccountError};
 use crate::db;
@@ -45,13 +44,7 @@ struct NewDeviceRequest {
     display_name: String,
 }
 
-#[derive(Serialize)]
-struct AccountReply {
-    email: String,
-    space_name: String,
-}
-
-fn json<T: Serialize>(value: &T) -> Response {
+fn json<T: serde::Serialize>(value: &T) -> Response {
     let mut response = axum::Json(value).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
@@ -60,11 +53,24 @@ fn json<T: Serialize>(value: &T) -> Response {
     response
 }
 
-fn account_reply(account: Account) -> Response {
-    json(&AccountReply {
-        email: account.email,
-        space_name: "我的空间".to_owned(),
-    })
+fn profile_json(state: &AppState, account: &Account) -> serde_json::Value {
+    let profile = state.db_handle().ok().and_then(|db| {
+        db.lock()
+            .ok()
+            .and_then(|conn| accounts::github_profile(&conn, &account.id).ok().flatten())
+    });
+    let (name, avatar) = profile.unwrap_or((None, None));
+    serde_json::json!({ "displayName": name, "avatarUrl": avatar })
+}
+
+fn account_reply(state: &AppState, account: Account) -> Response {
+    let profile = profile_json(state, &account);
+    json(&serde_json::json!({
+        "email": account.email,
+        "spaceName": "我的空间",
+        "displayName": profile["displayName"],
+        "avatarUrl": profile["avatarUrl"],
+    }))
 }
 
 fn session_cookie(session: &str) -> String {
@@ -226,7 +232,7 @@ pub async fn login(State(state): State<AppState>, body: Body) -> Response {
 
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match authorized_account(&state, &headers) {
-        Ok(account) => account_reply(account),
+        Ok(account) => account_reply(&state, account),
         Err(error) => error.into_response(),
     }
 }
@@ -381,7 +387,12 @@ pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response 
         crate::github::Poll::Expired => json(&serde_json::json!({ "status": "expired" })),
         crate::github::Poll::Denied => json(&serde_json::json!({ "status": "denied" })),
         crate::github::Poll::Failed => json(&serde_json::json!({ "status": "failed" })),
-        crate::github::Poll::Ready { subject, email } => {
+        crate::github::Poll::Ready {
+            subject,
+            email,
+            display_name,
+            avatar_url,
+        } => {
             let outcome = {
                 let Ok(db) = state.db_handle() else {
                     return ApiError::Internal.into_response();
@@ -389,7 +400,15 @@ pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response 
                 let Ok(mut conn) = db.lock() else {
                     return ApiError::Internal.into_response();
                 };
-                accounts::login_with_identity(&mut conn, "github", &subject, &email, state.now_ms())
+                accounts::login_with_identity(
+                    &mut conn,
+                    "github",
+                    &subject,
+                    &email,
+                    display_name.as_deref(),
+                    avatar_url.as_deref(),
+                    state.now_ms(),
+                )
             };
             match outcome {
                 Ok(login) => json(&serde_json::json!({
@@ -398,6 +417,8 @@ pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response 
                     "spaceName": "我的空间",
                     "session": login.session.expose(),
                     "via": "github",
+                    "displayName": display_name,
+                    "avatarUrl": avatar_url,
                 })),
                 Err(error) => account_error(error),
             }

@@ -59,6 +59,7 @@ fn main() {
     tauri::async_runtime::set(runtime.handle().clone());
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             window::open(app);
         }))
@@ -101,11 +102,13 @@ fn main() {
             commands::set_dashboard_mode,
             commands::use_local_mode,
             commands::unpair_device,
+            commands::remove_local_device,
             commands::set_paused,
             commands::sync_now,
             commands::set_autostart,
             commands::create_pair_code,
             commands::rename_device,
+            commands::set_device_form_factor,
             commands::rotate_credentials,
             commands::revoke_device,
             updater::update_status,

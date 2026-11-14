@@ -1,7 +1,9 @@
-import { ChevronDown, Copy, ShieldCheck } from "lucide-react";
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { Check, ChevronDown, Copy, Mail, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { Button, Dialog, Field, Segmented, cn, inputClass } from "@/components/ui";
 import { app, errorMessage } from "@/lib/api";
+import { AppMark } from "@/components/AppMark";
+import { copyText } from "@/lib/clipboard";
 import { formFactorLabel, platformLabel } from "@/lib/labels";
 import { useStatus } from "@/lib/status";
 import { ApiError } from "@/lib/types";
@@ -9,6 +11,14 @@ import { ApiError } from "@/lib/types";
 type FormFactor = "laptop" | "desktop";
 type Where = "cloud" | "own";
 type Method = "github" | "email";
+
+function GitHubIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden className={className} fill="currentColor">
+      <path d="M12 .5a12 12 0 0 0-3.79 23.39c.6.11.82-.26.82-.58v-2.23c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.66-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.49 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58A12 12 0 0 0 12 .5Z" />
+    </svg>
+  );
+}
 
 function loginError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -42,9 +52,9 @@ export function Pairing() {
     <div className="flex h-full items-center justify-center p-6">
       <div className="card max-w-md space-y-4 p-6">
         <h1 className="display text-xl text-ink">准备本机数据</h1>
-        <p className="text-sm leading-6 text-ink-2">TokenLens 默认在这台电脑上记录用量。本机数据库暂时无法打开，请重试。</p>
+        <p className="text-sm leading-6 text-ink-2">本机设备已移除或暂时无法打开。点击下方按钮会新建本机设备并重新开始记录；已经移除的本机历史不会恢复，服务器上已有的历史不受影响。</p>
         {error && <p role="alert" className="text-sm text-bad">{error}</p>}
-        <Button variant="primary" disabled={busy} onClick={() => void retry()}>{busy ? "正在准备…" : "重试"}</Button>
+        <Button variant="primary" disabled={busy} onClick={() => void retry()}>{busy ? "正在准备…" : "重新开始本机记录"}</Button>
       </div>
     </div>
   );
@@ -55,7 +65,7 @@ export function ConnectServer({ open, onOpenChange }: { open: boolean; onOpenCha
   const [busy, setBusy] = useState(false);
   // Unmount the form on close so an emailed code is never retained in a hidden form.
   return (
-    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)} title="连接服务器">
+    <Dialog open={open} onOpenChange={(next) => !busy && onOpenChange(next)} title="登录 TokenLens" brand={<><AppMark className="h-8 w-8" /><span className="display text-xl text-ink">TokenLens</span></>}>
       {open && <ConnectForm onClose={() => onOpenChange(false)} onBusy={setBusy} />}
     </Dialog>
   );
@@ -69,6 +79,8 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [method, setMethod] = useState<Method>("github");
   const [gh, setGh] = useState<{ userCode: string; verificationUri: string } | null>(null);
   const [ghState, setGhState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
+  const [copyState, setCopyState] = useState<"idle" | "busy" | "copied" | "failed">("idle");
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // A self-hosted server has no TokenLens GitHub app, so GitHub is offered
   // only for the hosted service; choosing "own" falls back to the email code.
   useEffect(() => {
@@ -76,14 +88,20 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       setMethod("email");
       setGh(null);
       setGhState("idle");
+      setCopyState("idle");
+      setChooser(true);
     }
   }, [where]);
+  useEffect(() => () => {
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+  }, []);
   const [ownServer, setOwnServer] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [formFactor, setFormFactor] = useState<FormFactor>("laptop");
   const [name, setName] = useState<string | null>(null);
   const [deviceOpen, setDeviceOpen] = useState(false);
+  const [chooser, setChooser] = useState(true);
   const [busy, setBusy] = useState(false);
   const [sending, setSending] = useState(false);
   const [sentAt, setSentAt] = useState<number | null>(null);
@@ -155,6 +173,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       const next = await app.startGitHubLogin(server);
       setGh(next);
       setGhState("pending");
+      setCopyState("idle");
       await app.openGitHubDevicePage(next.verificationUri).catch(() => undefined);
     } catch (next) {
       setError(loginError(next));
@@ -183,6 +202,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
         if (next.status === "expired" || next.status === "denied" || next.status === "failed") {
           setGhState(next.status);
           setGh(null);
+          setCopyState("idle");
         }
       } catch (next) {
         if (alive) setError(loginError(next));
@@ -200,97 +220,88 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
 
   const remaining = useMemo(() => Math.ceil(waitLeft / 1000), [waitLeft]);
 
+  if (chooser && !gh && where === "cloud") {
+    return (
+      <div className="space-y-3">
+        {where === "cloud" && (
+          <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("github"); }}>
+            <GitHubIcon className="h-5 w-5" /> 使用 GitHub 继续
+          </Button>
+        )}
+        <div className="flex items-center gap-3 py-2 text-xs text-ink-3" aria-hidden>
+          <span className="h-px flex-1 bg-line" />或<span className="h-px flex-1 bg-line" />
+        </div>
+        <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("email"); }}>
+          <Mail className="h-5 w-5" /> 使用邮箱继续
+        </Button>
+        <p className="pt-3 text-center text-xs leading-5 text-ink-3">默认连接 TokenLens 云服务，首次登录自动创建空间</p>
+        {ghState !== "idle" && (
+          <p role="alert" className="text-center text-[13px] leading-5 text-bad">
+            {ghState === "expired" ? "授权超时了，请重新开始。" : ghState === "denied" ? "你取消了授权。" : "GitHub 授权没有完成，请重试。"}
+          </p>
+        )}
+        {error && <p role="alert" className="text-center text-[13px] leading-5 text-bad">{error}</p>}
+        <button type="button" className="mx-auto block pt-1 text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setWhere("own"); setChooser(false); setMethod("email"); }}>
+          使用自己的服务器
+        </button>
+      </div>
+    );
+  }
   return (
     <form className="max-h-[75vh] space-y-5 overflow-y-auto" onSubmit={submit}>
-      <p className="text-[13px] leading-6 text-ink-2">
-        登录你的空间，多台电脑共用一个看板。第一次登录会自动创建你的空间，本机记录继续保留。
-      </p>
-
-      <div>
-        <span className="text-[13px] font-medium text-ink">服务器</span>
-        <div className="mt-1.5">
-          <Segmented
-            label="服务器"
-            value={where}
-            onChange={setWhere}
-            options={[
-              { key: "cloud", label: "TokenLens 云服务" },
-              { key: "own", label: "自己的服务器" },
-            ]}
-          />
+      {method === "github" && !gh ? (
+        <div className="space-y-4">
+          <p className="text-[13px] leading-6 text-ink-2">在 GitHub 上确认授权，不需要密码，也不会收到邮件。第一次登录会自动创建你的空间。</p>
+          {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
+          <Button type="button" variant="primary" className="h-11 w-full justify-center gap-2.5" disabled={!serverOk || busy} onClick={() => void startGitHub()}>
+            <GitHubIcon className="h-5 w-5" /> {busy ? "正在打开…" : "继续前往 GitHub"}
+          </Button>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => setChooser(true)}>返回登录方式</button>
         </div>
-        <p className="mt-1.5 text-xs leading-5 text-ink-3">
-          {where === "cloud" ? `默认连接 ${cloud}` : "填写你自己的 TokenLens 服务器地址"}
-        </p>
-      </div>
-      {where === "own" && (
-        <Field label="服务器地址" hint="必须支持 HTTPS">
-          <input aria-label="服务器地址" className={inputClass} value={ownServer} onChange={(event) => setOwnServer(event.target.value)} placeholder="https://" autoComplete="off" spellCheck={false} inputMode="url" />
-        </Field>
-      )}
-
-      {where === "cloud" && (
-        <div>
-          <span className="text-[13px] font-medium text-ink">登录方式</span>
-          <div className="mt-1.5">
-            <Segmented
-              label="登录方式"
-              value={method}
-              onChange={setMethod}
-              options={[
-                { key: "github", label: "GitHub（推荐）" },
-                { key: "email", label: "邮箱验证码" },
-              ]}
-            />
-          </div>
-        </div>
-      )}
-
-      {method === "github" ? (
-        <div className="space-y-4 rounded-xl border border-line bg-surface-2 px-5 py-5">
-          {gh ? (
+      ) : method === "github" ? (
+        <div className="space-y-4">
+          <p className="text-[13px] leading-6 text-ink-2">在打开的 GitHub 页面输入下面的代码，授权后这里会自动完成登录。</p>
+          {gh && (
             <>
-              <p className="text-[13px] leading-6 text-ink-2">
-                在打开的 GitHub 页面输入下面的代码，授权后这里会自动完成登录。
-              </p>
               <button
                 type="button"
-                className="flex w-full items-center justify-center gap-2 rounded-lg border border-line bg-surface px-4 py-3 text-center transition hover:border-primary"
-                title="复制授权码"
-                aria-label="复制授权码"
-                onClick={() => void navigator.clipboard?.writeText(gh.userCode)}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-line bg-surface-2 px-4 py-3 text-center transition hover:border-primary"
+                title="复制 GitHub 授权码"
+                aria-label={copyState === "copied" ? "已复制 GitHub 授权码" : "复制 GitHub 授权码"}
+                disabled={copyState === "busy"}
+                onClick={async () => {
+                  setCopyState("busy");
+                  try {
+                    await copyText(gh.userCode);
+                    setCopyState("copied");
+                    if (copyTimer.current) clearTimeout(copyTimer.current);
+                    copyTimer.current = setTimeout(() => setCopyState("idle"), 2000);
+                  } catch {
+                    setCopyState("failed");
+                  }
+                }}
               >
                 <span className="selectable font-mono text-2xl font-semibold tracking-[0.15em] text-ink">{gh.userCode}</span>
-                <Copy className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />
+                {copyState === "copied" ? <Check className="h-4 w-4 shrink-0 text-good" aria-hidden /> : <Copy className="h-4 w-4 shrink-0 text-ink-3" aria-hidden />}
               </button>
+              <p role="status" aria-live="polite" className={cn("min-h-5 text-center text-xs", copyState === "failed" ? "text-bad" : "text-good")}>
+                {copyState === "failed" ? "复制失败，请选中上方的授权码手动复制。" : copyState === "copied" ? "已复制，去 GitHub 粘贴。" : ""}
+              </p>
               <div className="flex flex-wrap justify-center gap-2">
-                <Button type="button" size="sm" onClick={() => void app.openGitHubDevicePage(gh.verificationUri)}>
-                  重新打开授权页
-                </Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => { setGh(null); setGhState("idle"); }}>
-                  取消
-                </Button>
+                <Button type="button" size="sm" onClick={() => void app.openGitHubDevicePage(gh.verificationUri)}>重新打开授权页</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { setGh(null); setGhState("idle"); setCopyState("idle"); }}>取消</Button>
               </div>
               <p className="text-center text-xs text-ink-3">等待授权…</p>
-            </>
-          ) : (
-            <>
-              <p className="text-[13px] leading-6 text-ink-2">
-                用 GitHub 账号登录，不需要密码，也不会收到邮件。第一次登录会自动创建你的空间。
-              </p>
-              {ghState !== "idle" && (
-                <p role="alert" className="text-[13px] leading-5 text-bad">
-                  {ghState === "expired" ? "授权超时了，请重新开始。" : ghState === "denied" ? "你取消了授权。" : "GitHub 授权没有完成，请重试。"}
-                </p>
-              )}
-              <Button type="button" variant="primary" className="w-full" disabled={!serverOk || busy} onClick={() => void startGitHub()}>
-                {busy ? "正在打开…" : "用 GitHub 登录"}
-              </Button>
             </>
           )}
         </div>
       ) : (
-        <>
+        <div className="space-y-4">
+          {where === "own" && (
+            <Field label="服务器地址" hint="自建服务器使用邮箱验证码登录">
+              <input aria-label="服务器地址" className={inputClass} value={ownServer} onChange={(event) => setOwnServer(event.target.value)} placeholder="https://" autoComplete="off" spellCheck={false} inputMode="url" />
+            </Field>
+          )}
           <Field label="邮箱" hint="用来登录，也用来接收验证码">
             <input aria-label="邮箱" className={inputClass} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" spellCheck={false} inputMode="email" />
           </Field>
@@ -302,49 +313,29 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
                 {sending ? "发送中…" : waitLeft > 0 ? `${remaining} 秒后可重发` : sentAt === null ? "获取验证码" : "重新发送"}
               </Button>
             </div>
-            <span className="mt-1 block text-xs leading-5 text-ink-3">
-              {sentAt === null ? "6 位数字，10 分钟内有效" : "已发送，请查收邮件（也看看垃圾箱）"}
-            </span>
+            <span className="mt-1 block text-xs leading-5 text-ink-3">{sentAt === null ? "6 位数字，10 分钟内有效" : "已发送，请查收邮件（也看看垃圾箱）"}</span>
           </div>
-        </>
+          {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
+          <Button type="submit" variant="primary" className="w-full" disabled={!ready || busy}>{busy ? "正在登录…" : "登录并连接"}</Button>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { if (where === "cloud") { setChooser(true); } else { setWhere("cloud"); setChooser(true); } }}>返回登录方式</button>
+        </div>
       )}
-
-      <div className="rounded-xl border border-line">
-        <button
-          type="button"
-          className="flex w-full items-center justify-between gap-2 px-4 py-3 text-left"
-          aria-expanded={deviceOpen}
-          onClick={() => setDeviceOpen((value) => !value)}
-        >
-          <span className="text-[13px] font-medium text-ink">这台电脑</span>
-          <span className="flex items-center gap-2 text-xs text-ink-3">
-            {name ?? defaultName}
-            <ChevronDown className={cn("h-4 w-4 transition-transform", deviceOpen && "rotate-180")} aria-hidden />
-          </span>
-        </button>
-        {deviceOpen && (
-          <div className="space-y-4 border-t border-line px-4 py-4">
-            <div>
-              <span className="text-[13px] font-medium text-ink">设备形态</span>
-              <div className="mt-1.5">
-                <Segmented label="设备形态" value={formFactor} onChange={setFormFactor} options={[{ key: "laptop", label: "笔记本" }, { key: "desktop", label: "台式机" }]} />
-              </div>
+      {method === "email" || gh ? (
+        <div className="border-t border-line/70 pt-4">
+          <button type="button" className="flex w-full items-center justify-between gap-2 text-left" aria-expanded={deviceOpen} onClick={() => setDeviceOpen((value) => !value)}>
+            <span className="text-xs font-medium text-ink-2">设备与隐私</span>
+            <ChevronDown className={cn("h-4 w-4 text-ink-3 transition-transform", deviceOpen && "rotate-180")} aria-hidden />
+          </button>
+          {deviceOpen && (
+            <div className="mt-4 space-y-4">
+              <Segmented label="设备形态" value={formFactor} onChange={setFormFactor} options={[{ key: "laptop", label: "笔记本" }, { key: "desktop", label: "台式机" }]} />
+              <Field label="显示名称"><input className={inputClass} value={name ?? defaultName} onChange={(event) => setName(event.target.value)} maxLength={64} /></Field>
+              <p className="flex gap-2 text-xs leading-5 text-ink-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />只同步数字，不上传提示词、回答、代码或文件内容。登录后已有历史会补传。</p>
             </div>
-            <Field label="显示名称" hint="用来区分不同电脑，以后可以改">
-              <input className={inputClass} value={name ?? defaultName} onChange={(event) => setName(event.target.value)} maxLength={64} />
-            </Field>
-          </div>
-        )}
-      </div>
-
-      <p className="flex gap-2 text-xs leading-5 text-ink-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />只同步数字，不上传提示词、回答、代码或文件内容。登录后这台电脑已有历史会被补传。</p>
-      {error && <p role="alert" className="rounded-lg bg-bad/10 px-3 py-2 text-[13px] leading-5 text-bad">{error}</p>}
-      <div className="flex justify-end gap-2">
-        <Button type="button" onClick={onClose} disabled={busy}>取消</Button>
-        {method === "email" && (
-          <Button type="submit" variant="primary" disabled={!ready || busy}>{busy ? "正在登录…" : "登录并连接"}</Button>
-        )}
-      </div>
+          )}
+        </div>
+      ) : null}
     </form>
+
   );
 }

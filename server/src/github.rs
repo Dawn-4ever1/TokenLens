@@ -31,7 +31,12 @@ pub struct DeviceStart {
 pub enum Poll {
     Pending,
     SlowDown(u64),
-    Ready { subject: String, email: String },
+    Ready {
+        subject: String,
+        email: String,
+        display_name: Option<String>,
+        avatar_url: Option<String>,
+    },
     Denied,
     Expired,
     Failed,
@@ -182,6 +187,17 @@ impl GitHub {
         let Some(subject) = user["id"].as_i64().map(|id| id.to_string()) else {
             return Poll::Failed;
         };
+        let display_name = user["login"]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && value.chars().count() <= 64)
+            .map(str::to_owned);
+        let avatar_url = user["avatar_url"]
+            .as_str()
+            .filter(|url| {
+                url.starts_with("https://avatars.githubusercontent.com/") && url.len() <= 2048
+            })
+            .map(str::to_owned);
         // Only a verified address may create or join a space.
         let emails = Self::agent()
             .get(&format!("{}/user/emails", self.api_base))
@@ -215,7 +231,12 @@ impl GitHub {
             .and_then(|entry| entry["email"].as_str())
             .map(str::to_owned);
         match email {
-            Some(email) => Poll::Ready { subject, email },
+            Some(email) => Poll::Ready {
+                subject,
+                email,
+                display_name,
+                avatar_url,
+            },
             None => Poll::Failed,
         }
     }

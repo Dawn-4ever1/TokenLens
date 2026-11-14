@@ -1,11 +1,10 @@
-export type RangePreset = "today" | "7d" | "30d" | "month" | "all" | "custom";
+export type RangePreset = "today" | "week" | "month" | "all" | "custom";
 
 export const RANGE_PRESETS: { key: RangePreset; label: string }[] = [
-  { key: "today", label: "今天" },
-  { key: "7d", label: "7 天" },
-  { key: "30d", label: "30 天" },
-  { key: "month", label: "本月" },
-  { key: "all", label: "全部" },
+  { key: "today", label: "日" },
+  { key: "week", label: "周" },
+  { key: "month", label: "月" },
+  { key: "all", label: "总计" },
   { key: "custom", label: "自定义" },
 ];
 
@@ -20,7 +19,7 @@ export interface Filters {
 }
 
 export const DEFAULT_FILTERS: Filters = {
-  preset: "30d",
+  preset: "month",
   devices: [],
   clients: [],
   models: [],
@@ -60,15 +59,46 @@ export interface DateSpan {
   to?: string;
 }
 
+/** A calendar week starts on Monday, including the current day. */
+export function weekStart(date: string): string {
+  const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return addDays(date, weekday === 0 ? -6 : 1 - weekday);
+}
+
+function normalizePreset(preset: string): RangePreset {
+  // Preserve the approximate meaning of windows saved by older app versions.
+  if (preset === "7d") return "week";
+  if (preset === "30d") return "month";
+  return RANGE_PRESETS.some(({ key }) => key === preset) ? preset as RangePreset : DEFAULT_FILTERS.preset;
+}
+
+/** Older builds accepted any string from storage; never let it silently select all history. */
+export function normalizeFilters(value: unknown): Filters | null {
+  if (typeof value !== "object" || value === null) return null;
+  const candidate = value as Partial<Filters>;
+  if (typeof candidate.preset !== "string") return null;
+  const filters: Filters = {
+    ...DEFAULT_FILTERS,
+    preset: normalizePreset(candidate.preset),
+    customFrom: typeof candidate.customFrom === "string" ? candidate.customFrom : undefined,
+    customTo: typeof candidate.customTo === "string" ? candidate.customTo : undefined,
+  };
+  for (const key of ["devices", "clients", "models", "projects"] as const) {
+    if (candidate[key] !== undefined) {
+      if (!Array.isArray(candidate[key]) || candidate[key].some((item) => typeof item !== "string")) return null;
+      filters[key] = candidate[key];
+    }
+  }
+  return filters;
+}
+
 export function resolveRange(filters: Filters, timeZone: string, now = new Date()): DateSpan {
   const today = todayIn(timeZone, now);
   switch (filters.preset) {
     case "today":
       return { from: today, to: today };
-    case "7d":
-      return { from: addDays(today, -6), to: today };
-    case "30d":
-      return { from: addDays(today, -29), to: today };
+    case "week":
+      return { from: weekStart(today), to: today };
     case "month":
       return { from: `${today.slice(0, 8)}01`, to: today };
     case "all":
@@ -90,7 +120,7 @@ export function previousSpan(span: DateSpan): DateSpan | null {
 }
 
 export function rangeLabel(filters: Filters, span: DateSpan): string {
-  if (filters.preset === "all") return "全部时间";
+  if (filters.preset === "all") return "总计";
   if (filters.preset === "custom" && span.from && span.to) return `${span.from} – ${span.to}`;
   return RANGE_PRESETS.find((preset) => preset.key === filters.preset)?.label ?? "";
 }

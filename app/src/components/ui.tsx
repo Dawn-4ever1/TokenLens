@@ -266,20 +266,27 @@ export function Dialog({
   onOpenChange,
   title,
   children,
+  brand,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   title: ReactNode;
   children: ReactNode;
+  /** Optional compact brand header, e.g. the sign-in chooser. */
+  brand?: ReactNode;
 }) {
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/25 dark:bg-black/50" />
         <DialogPrimitive.Content className="card fixed left-1/2 top-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 p-6 shadow-2xl outline-none">
-          <DialogPrimitive.Title className="display text-base text-ink">{title}</DialogPrimitive.Title>
+          {brand && <div className="mb-6 flex items-center justify-center gap-2">{brand}</div>}
+          <DialogPrimitive.Close aria-label="关闭对话框" className="absolute right-4 top-4 rounded-md p-1.5 text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink">
+            <span aria-hidden className="block text-lg leading-4">×</span>
+          </DialogPrimitive.Close>
+          <DialogPrimitive.Title className={brand ? "sr-only" : "display text-base text-ink"}>{title}</DialogPrimitive.Title>
           <DialogPrimitive.Description className="sr-only">对话框</DialogPrimitive.Description>
-          <div className="mt-3">{children}</div>
+          <div className={brand ? "" : "mt-3"}>{children}</div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

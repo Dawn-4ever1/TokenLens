@@ -209,18 +209,6 @@ function Connection() {
   const thresholds = devices.data?.thresholds;
   const local = status.mode === "local";
   const connected = Boolean(status.server);
-  const signedIn = Boolean(status.accountEmail);
-  const signOut = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      set(await app.logoutAccount());
-    } catch (next) {
-      setError(errorMessage(next));
-    } finally {
-      setBusy(false);
-    }
-  };
   const disconnect = async () => {
     setBusy(true);
     setError(null);
@@ -240,27 +228,6 @@ function Connection() {
       </Row>
       <Row title="服务器" hint={connected ? "本机记录和服务器同步同时运行" : "未连接，数据保存在这台电脑上"}>
         <span className="selectable font-mono text-xs text-ink-2">{status.server ?? "未连接"}</span>
-      </Row>
-      <Row
-        title="账号"
-        hint={
-          signedIn
-            ? "登录后可以在多台电脑之间共用同一个空间，配对码也在这里查看"
-            : "用邮箱登录你的空间；第一次登录会自动创建"
-        }
-      >
-        {signedIn ? (
-          <span className="flex items-center gap-2">
-            <span className="selectable text-xs text-ink-2">{status.accountEmail}</span>
-            <Button size="sm" onClick={() => void signOut()} disabled={busy}>
-              退出登录
-            </Button>
-          </span>
-        ) : (
-          <Button size="sm" onClick={() => setConnecting(true)}>
-            登录
-          </Button>
-        )}
       </Row>
       <Row title="这台电脑的设备 ID" hint="看板页面拿不到读取数据用的凭据">
         <span className="selectable font-mono text-xs text-ink-2">{status.deviceId ? shortId(status.deviceId, 16) : "—"}</span>

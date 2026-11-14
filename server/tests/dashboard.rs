@@ -671,6 +671,60 @@ async fn devices_can_be_renamed_rotated_and_revoked() {
         .await;
     assert_eq!(s["byDevice"][0]["label"], "Office PC");
 
+    let form_factor = |form_factor: &'static str| {
+        serde_json::to_vec(&json!({"formFactor": form_factor})).unwrap()
+    };
+    let edit_form_factor = |token: String, body: Vec<u8>| {
+        let h = &w.h;
+        let path = format!("/api/dashboard/devices/{}/form-factor", w.b.id);
+        Box::pin(async move { h.post(&path, Some(&token), body, None).await })
+    };
+    for invalid in [
+        form_factor("desktop "),
+        form_factor("unknown"),
+        serde_json::to_vec(&json!({"formFactor": "laptop", "platform": "windows"})).unwrap(),
+        Vec::new(),
+    ] {
+        let (status, _) = edit_form_factor(w.a.read.clone(), invalid).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let (status, body) = edit_form_factor(w.a.read.clone(), form_factor("desktop")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["deviceId"], w.b.id);
+    assert_eq!(body["formFactor"], "desktop");
+    let (_, devices) = w.h.get("/api/dashboard/devices", Some(&w.a.read)).await;
+    let edited = devices["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|device| device["deviceId"] == w.b.id)
+        .unwrap();
+    assert_eq!(edited["formFactor"], "desktop");
+    assert_eq!(edited["displayName"], "Office PC");
+    assert_eq!(
+        w.h.count("SELECT COUNT(*) FROM usage_events"),
+        6,
+        "changing the form factor does not touch usage history"
+    );
+    assert_eq!(
+        w.h.count("SELECT COUNT(*) FROM device_tokens WHERE revoked_at IS NULL"),
+        4,
+        "both devices retain their existing credentials"
+    );
+    let (_, summary) = w.h.get("/api/dashboard/summary", Some(&w.a.read)).await;
+    assert_eq!(summary["totalTokens"], 2098);
+    let (status, _) = edit_form_factor(w.a.ingest.clone(), form_factor("laptop")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) =
+        w.h.post(
+            "/api/dashboard/devices/dev_missing/form-factor",
+            Some(&w.a.read),
+            form_factor("laptop"),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     assert_eq!(
         act(&w.h, &w.b.id, "rotate", &w.a.read).await,
         StatusCode::FORBIDDEN
@@ -826,7 +880,7 @@ async fn health_and_filter_options() {
     let (_, health) = w.h.get("/api/dashboard/health", Some(&w.a.read)).await;
     assert_eq!(health["eventCount"], 6);
     assert_eq!(health["deviceCount"], 2);
-    assert_eq!(health["schemaVersion"], 8);
+    assert_eq!(health["schemaVersion"], 9);
     assert_eq!(health["timeZone"], "Asia/Shanghai");
     assert!(
         health.get("databaseBytes").is_none(),

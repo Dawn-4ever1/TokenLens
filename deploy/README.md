@@ -1,8 +1,8 @@
 # Self-hosting the sync server
 
-You only need a server to see **several computers on one dashboard**. A single
-computer works without one: choose "只在这台电脑上" (only on this computer) when
-the app first opens.
+You only need a server to see **several computers on one dashboard**. The app
+starts with a local dashboard automatically; connect a server from Devices
+when you want to sync several computers.
 
 The server (`tokenlens-server`) is one Rust binary with an SQLite database. It
 receives usage numbers from the desktop apps, answers the dashboard, and
@@ -25,6 +25,14 @@ a TLS proxy (Caddy here; any proxy that terminates HTTPS works).
   plain `http://` except for `localhost`.
 - Outbound HTTPS to `raw.githubusercontent.com`, `openrouter.ai` and
   `models.dev` for the daily price catalogs (optional, see "Cost estimates").
+
+### Upgrading to 0.5.5
+
+Update the server from this release's source before updating connected desktop
+apps. This adds the device form-factor editing endpoint and schema v9 for
+optional public GitHub profile fields. Migration automatically backs up an
+existing database and preserves devices, pairing credentials, accounts and
+usage history. Back up and test restoration before replacing a running server.
 
 ## 1. Build and start
 

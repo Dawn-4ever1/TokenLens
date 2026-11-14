@@ -1,4 +1,4 @@
-import type { AppStatus, PairCode, SpaceCode, UpdateStatus } from "./types";
+import type { AppStatus, FormFactor, PairCode, SpaceCode, UpdateStatus } from "./types";
 import { ApiError, type ApiErrorKind } from "./types";
 import type { Query } from "./range";
 
@@ -61,6 +61,7 @@ export const app = {
   useLocal: (input: { formFactor: "laptop" | "desktop"; name: string; autostart: boolean }) =>
     call<AppStatus>("use_local_mode", input),
   unpair: () => call<AppStatus>("unpair_device"),
+  removeLocalDevice: () => call<AppStatus>("remove_local_device"),
   setDashboardMode: (mode: "local" | "server") => call<AppStatus>("set_dashboard_mode", { mode }),
   requestLoginCode: (server: string, email: string) =>
     call<void>("request_login_code", { server, email }),
@@ -91,6 +92,8 @@ export const app = {
   createPairCode: () => call<PairCode>("create_pair_code"),
   renameDevice: (deviceId: string, displayName: string) =>
     call<{ deviceId: string; displayName: string }>("rename_device", { deviceId, displayName }),
+  setDeviceFormFactor: (deviceId: string, formFactor: FormFactor) =>
+    call<{ deviceId: string; formFactor: FormFactor }>("set_device_form_factor", { deviceId, formFactor }),
   rotateCredentials: () => call<AppStatus>("rotate_credentials"),
   revokeDevice: (deviceId: string) => call<AppStatus>("revoke_device", { deviceId }),
   updateStatus: () => call<UpdateStatus>("update_status"),

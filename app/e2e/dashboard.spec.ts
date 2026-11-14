@@ -171,7 +171,7 @@ test("offline state explains the problem without crashing", async ({ page }) => 
 
 /** Signs in through the connect dialog with the browser mock backend. */
 async function signIn(dialog: import("@playwright/test").Locator, email = "user@example.com") {
-  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
   await dialog.getByLabel("邮箱").fill(email);
   await dialog.getByRole("button", { name: "获取验证码", exact: true }).click();
   await dialog.getByLabel("验证码").fill("123456");
@@ -202,36 +202,30 @@ test("signing in never leaves the code or a session in web storage or the URL", 
   expect(stored.cookies).toBe("");
 });
 
-for (const theme of ["light", "dark"] as const) {
-  test(`the selected login method stays highlighted in ${theme} mode`, async ({ page }) => {
-    await page.setViewportSize({ width: 1200, height: 900 });
-    await open(page, { view: "devices", theme, query: "" });
-    await settle(page, "设备");
-    await page.getByRole("button", { name: "添加设备", exact: true }).click();
-    const group = page.getByRole("radiogroup", { name: "登录方式" });
-    const selected = group.getByRole("radio", { name: "GitHub（推荐）" });
-    await expect(selected).toHaveAttribute("aria-checked", "true");
-    const { track, pill } = await page.evaluate(() => {
-      // Computed colours are OKLCH here; its first component is perceptual
-      // lightness, which is exactly what "raised above the track" means.
-      const lightness = (colour: string) => {
-        const oklch = colour.match(/oklch\(\s*([\d.]+)/);
-        if (oklch) return Number(oklch[1]);
-        const [r = 0, g = 0, b = 0] = (colour.match(/[\d.]+/g) ?? []).map(Number);
-        return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-      };
-      const group = document.querySelector('[role="radiogroup"][aria-label="登录方式"]');
-      const selected = group?.querySelector('[role="radio"][aria-checked="true"]');
-      return {
-        track: lightness(getComputedStyle(group as Element).backgroundColor),
-        pill: lightness(getComputedStyle(selected as Element).backgroundColor),
-      };
+
+test("a clipboard failure is visible and the login code stays selectable", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      value: { writeText: () => Promise.reject(new Error("clipboard denied")) },
+      configurable: true,
     });
-    // The selected pill must read as raised above the track in both themes;
-    // in dark mode it used to be darker than the track, so it looked unselected.
-    expect(pill).toBeGreaterThan(track + 0.03);
   });
-}
+  await page.reload();
+  await settle(page, "设备");
+  expect(await page.evaluate(() => typeof navigator.clipboard?.writeText)).toBe("function");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog.getByText("ABCD-1234", { exact: true })).toBeVisible();
+  const copy = dialog.getByRole("button", { name: "复制 GitHub 授权码", exact: true });
+  await copy.click();
+  await expect(dialog.getByRole("status")).toHaveText("复制失败，请选中上方的授权码手动复制。");
+  await expect(dialog.getByText("ABCD-1234", { exact: true })).toBeVisible();
+});
 
 test("the code input and the request button sit on the same aligned row", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -239,7 +233,7 @@ test("the code input and the request button sit on the same aligned row", async 
   await settle(page, "设备");
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
   const input = await dialog.getByLabel("验证码", { exact: true }).boundingBox();
   const button = await dialog.getByRole("button", { name: "获取验证码", exact: true }).boundingBox();
   if (!input || !button) throw new Error("code row missing");
@@ -260,17 +254,17 @@ test("a self-hosted server offers only the email code, never GitHub", async ({ p
   await settle(page, "设备");
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toBeVisible();
-  await expect(dialog.getByText("默认连接 https://tokenlens.online", { exact: true })).toBeVisible();
-  await dialog.getByRole("radio", { name: "自己的服务器" }).click();
-  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toHaveCount(0);
-  await expect(dialog.getByRole("button", { name: "用 GitHub 登录" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
+  await expect(dialog.getByText("默认连接 TokenLens 云服务，首次登录自动创建空间", { exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "使用自己的服务器", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "继续前往 GitHub" })).toHaveCount(0);
   await expect(dialog.getByLabel("服务器地址")).toBeVisible();
   await expect(dialog.getByLabel("邮箱")).toBeVisible();
   await expect(dialog.getByLabel("验证码")).toBeVisible();
   // Switching back restores the GitHub choice for the hosted service.
-  await dialog.getByRole("radio", { name: "TokenLens 云服务" }).click();
-  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toBeVisible();
+  await dialog.getByRole("button", { name: "返回登录方式", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
 });
 
@@ -280,14 +274,122 @@ test("GitHub sign-in shows a device code and finishes without any email", async 
   await settle(page, "设备");
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog.getByRole("radio", { name: "GitHub（推荐）" })).toHaveAttribute("aria-checked", "true");
-  await dialog.getByRole("button", { name: "用 GitHub 登录", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
   await expect(dialog.getByText("ABCD-1234", { exact: true })).toBeVisible();
   await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  if (test.info().project.name === "chrome") {
+    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+    await dialog.getByRole("button", { name: "复制 GitHub 授权码", exact: true }).click();
+    await expect(dialog.getByRole("status").filter({ hasText: "已复制，去 GitHub 粘贴。" })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("ABCD-1234");
+  }
   // The mock approves on the second poll, so the dialog closes by itself.
   await expect(dialog).toBeHidden({ timeout: 15_000 });
   await settle(page, "设备");
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("the sidebar shows one sign-in entry, then the GitHub username and avatar", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const avatar = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%232563eb'/%3E%3C/svg%3E";
+  await page.addInitScript((url) => {
+    const existing = localStorage.getItem("tokenlens.settings.v1");
+    sessionStorage.setItem("tokenlens.mock.avatar", url);
+    if (!existing) localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ theme: "light", direction: "editorial", refreshSeconds: 0 }));
+  }, avatar);
+  await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  const entry = page.getByRole("button", { name: "登录，同步多台设备", exact: true });
+  await expect(entry).toBeVisible();
+  // The sign-in entry belongs directly above Settings, not below the
+  // collector status at the very bottom of the sidebar.
+  const aboveSettings = await page.evaluate(() => {
+    const settings = document.querySelector('nav[aria-label="主导航"] button[aria-label="设置"]');
+    const login = document.querySelector('nav[aria-label="主导航"] button[aria-label="登录，同步多台设备"]');
+    if (!settings || !login) return false;
+    const a = login.getBoundingClientRect();
+    const b = settings.getBoundingClientRect();
+    return a.bottom <= b.top && b.top - a.bottom < 16;
+  });
+  expect(aboveSettings).toBe(true);
+  await entry.click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  const account = page.getByRole("button", { name: "GitHub 账号 octocat，退出登录", exact: true });
+  await expect(account).toBeVisible();
+  await expect(account.locator("img")).toHaveAttribute("src", avatar);
+  await expect(account).toContainText("octocat");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  await expect(page.getByText("用邮箱登录你的空间；第一次登录会自动创建", { exact: true })).toHaveCount(0);
+});
+
+test("email sign-in keeps an account entry and sign-out preserves device collection", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  const signIn = page.getByRole("button", { name: "登录，同步多台设备", exact: true });
+  await signIn.click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
+  await dialog.getByLabel("邮箱", { exact: true }).fill("member@example.com");
+  await dialog.getByLabel("验证码", { exact: true }).fill("123456");
+  await dialog.getByRole("button", { name: "登录并连接", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  const account = page.getByRole("button", { name: "账号 member@example.com，退出登录", exact: true });
+  await expect(account).toBeVisible();
+  await expect(account).toContainText("member@example.com");
+  await expect(signIn).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^GitHub 账号/ })).toHaveCount(0);
+  await account.click();
+  await expect(signIn).toBeVisible();
+  await expect(account).toHaveCount(0);
+  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
+  await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: /^Tokens ·/ })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("GitHub sign-in against an older server stays signed in without profile fields", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  // Model the Rust response from a v8 server: sign-in works, but its optional
+  // public profile fields are absent. Keep periodic status refreshes consistent.
+  await page.evaluate(async () => {
+    // Use the module URL already loaded by Vite, including its HMR version.
+    const modulePath = performance.getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((url) => new URL(url).pathname === "/src/lib/api.ts");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    const { app } = await import(modulePath);
+    const status = app.status;
+    const poll = app.pollGitHubLogin;
+    const withoutProfile = (value: Record<string, unknown>) => ({ ...value, accountDisplayName: null, accountAvatarUrl: null });
+    app.status = async () => withoutProfile(await status());
+    app.pollGitHubLogin = async (input: Record<string, unknown>) => {
+      const result = await poll(input);
+      return result.app ? { ...result, app: withoutProfile(result.app) } : result;
+    };
+  });
+  const signIn = page.getByRole("button", { name: "登录，同步多台设备", exact: true });
+  await signIn.click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  const account = page.getByRole("button", { name: "账号 octo@example.com，退出登录", exact: true });
+  await expect(account).toBeVisible();
+  await expect(signIn).toHaveCount(0);
+  // The collapsed sidebar still exposes a named, usable sign-out control.
+  await account.click();
+  await expect(signIn).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -316,13 +418,13 @@ test("a failed or cancelled sign-in keeps local collection and data available", 
   const dialog = page.getByRole("dialog");
   await signIn(dialog);
   await expect(dialog.getByRole("alert")).toContainText("连不上服务器");
-  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await dialog.getByRole("button", { name: "关闭对话框", exact: true }).click();
   await expect(dialog).toBeHidden();
   await expect(page.getByText("本机数据", { exact: true })).toBeVisible();
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
-  await dialog.getByRole("radio", { name: "邮箱验证码" }).click();
+  await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
   await expect(dialog.getByLabel("验证码")).toHaveValue("");
   await expect(dialog.getByLabel("邮箱")).toHaveValue("");
   await page.keyboard.press("Escape");
@@ -360,6 +462,64 @@ test("signing in from Devices allows local and all-device views, clears old filt
   await settle(page, "设备");
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("the device menu explains credentials and keeps removal in the cloud view", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?server" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await page.getByRole("button", { name: "更换这台电脑的凭据", exact: true }).click();
+  const credentials = page.getByRole("dialog");
+  await expect(credentials).toContainText("身份钥匙");
+  await expect(credentials).toContainText("不是账号密码");
+  await credentials.getByRole("button", { name: "取消", exact: true }).click();
+  await page.getByRole("button", { name: "Mac mini 的操作", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重命名", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "更改设备性质", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "更换这台电脑的凭据", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "移除设备", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("disconnecting from the local view preserves the local device and its history", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?server" });
+  await settle(page, "设备");
+  await page.getByRole("group", { name: "查看范围" }).getByRole("button", { name: "本机", exact: true }).click();
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重命名", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "更改设备性质", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "更换这台电脑的凭据", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "断开服务器", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("本机记录和服务器上的历史用量都保留");
+  await dialog.getByRole("button", { name: "断开服务器", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("group", { name: "查看范围" })).toHaveCount(0);
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await expect(page.getByRole("button", { name: "移除设备", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("an unconnected local device can be removed with an explicit reset warning", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await page.getByRole("button", { name: "移除设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("这台电脑及其记录将从本机看板移除，采集会暂停");
+  await expect(dialog).toContainText("重新开始并恢复采集后，会扫描现有日志，历史用量可能再次出现");
+  await expect(dialog).toContainText("已同步到其他设备或服务器的记录不受影响");
+  await dialog.getByRole("button", { name: "移除", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "准备本机数据" })).toBeVisible();
+  await page.getByRole("button", { name: "重新开始本机记录", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -448,6 +608,48 @@ test("clicking a token count switches every count to exact digits and remembers 
   }
 });
 
+test("device form factor can be corrected without changing the device or its history", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "devices" });
+  await settle(page, "设备");
+  const card = page.locator("section.card").filter({ has: page.getByRole("heading", { name: /MacBook Pro/ }) });
+  const total = card.locator(".display.text-2xl");
+  const originalTotal = await total.textContent();
+  await expect(card).toContainText("Mac 笔记本");
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await page.getByRole("button", { name: "更改设备性质", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "更改「MacBook Pro」的设备性质" })).toBeVisible();
+  const choices = dialog.getByRole("radiogroup", { name: "设备性质" });
+  await expect(choices.getByRole("radio", { name: "笔记本" })).toHaveAttribute("aria-checked", "true");
+  await choices.getByRole("radio", { name: "台式机" }).click();
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(card).toContainText("Mac 台式机");
+  await expect(card.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(total).toHaveText(originalTotal ?? "");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "总览", exact: true }).click();
+  await settle(page, "总览");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设备", exact: true }).click();
+  await settle(page, "设备");
+  await expect(card).toContainText("Mac 台式机");
+  await expect(total).toHaveText(originalTotal ?? "");
+  expect(errors).toEqual([]);
+});
+
+test("a local device's form factor can be edited without pairing", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  const card = page.locator("section.card").filter({ has: page.getByRole("heading", { name: /MacBook Pro/ }) });
+  await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
+  await page.getByRole("button", { name: "更改设备性质", exact: true }).click();
+  await page.getByRole("dialog").getByRole("radio", { name: "台式机" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "保存", exact: true }).click();
+  await expect(card).toContainText("Mac 台式机");
+  expect(errors).toEqual([]);
+});
+
 test("agent coverage lists agents in use before the rest", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page, { view: "devices" });
@@ -516,7 +718,7 @@ test("download progress is visible and cannot start a second installation", asyn
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("button", { name: "正在下载", exact: true })).toBeDisabled();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
-  await dialog.getByRole("button", { name: "关闭", exact: true }).click();
+  await dialog.getByRole("button", { name: "关闭对话框", exact: true }).click();
   await expect(dialog).toBeHidden();
   expect(errors).toEqual([]);
 });

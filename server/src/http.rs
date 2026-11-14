@@ -20,8 +20,8 @@ use rusqlite::Connection;
 use serde::Serialize;
 use usage_event::UsageEvent;
 use usage_event::envelope::{
-    self, Heartbeat, HeartbeatResponse, IngestEnvelope, IngestResponse, PairClaimRequest,
-    PairClaimResponse, PairCodeResponse, RejectReason, RejectedEvent,
+    self, FormFactor, Heartbeat, HeartbeatResponse, IngestEnvelope, IngestResponse,
+    PairClaimRequest, PairClaimResponse, PairCodeResponse, RejectReason, RejectedEvent,
 };
 
 use crate::clock::Clock;
@@ -295,6 +295,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/dashboard/sessions/{key}", get(dashboard_session))
         .route("/api/dashboard/devices", get(dashboard_devices))
         .route("/api/dashboard/devices/{id}/rename", post(device_rename))
+        .route(
+            "/api/dashboard/devices/{id}/form-factor",
+            post(device_form_factor),
+        )
         .route("/api/dashboard/devices/{id}/rotate", post(device_rotate))
         .route("/api/dashboard/devices/{id}/revoke", post(device_revoke))
         .route("/api/dashboard/filters", get(dashboard_filters))
@@ -1060,6 +1064,46 @@ async fn device_rename(
     Ok(axum::Json(RenameResponse {
         device_id: id,
         display_name: name,
+    })
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FormFactorRequest {
+    form_factor: FormFactor,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FormFactorResponse {
+    device_id: String,
+    form_factor: FormFactor,
+}
+
+async fn device_form_factor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let caller = authenticate(&state, &headers, TokenKind::Read).await?;
+    let id = device_id_param(&id)?;
+    let bytes = read_limited(body, SMALL_BODY_BYTES).await?;
+    let request =
+        serde_json::from_slice::<FormFactorRequest>(&bytes).map_err(|_| ApiError::BadRequest)?;
+    let form_factor = request.form_factor.as_str();
+    let (target, tenant) = (id.clone(), caller.tenant_id.clone());
+    let changed = state
+        .with_db(move |conn, _| db::set_device_form_factor(conn, &tenant, &target, form_factor))
+        .await?;
+    if !changed {
+        return Err(ApiError::NotFound);
+    }
+    tracing::info!(device = %caller.device_id, target = %id, tenant = %caller.tenant_id, "device form factor changed");
+    Ok(axum::Json(FormFactorResponse {
+        device_id: id,
+        form_factor: request.form_factor,
     })
     .into_response())
 }

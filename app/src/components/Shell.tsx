@@ -1,15 +1,17 @@
-import { LayoutDashboard, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, type LucideIcon } from "lucide-react";
-import { lazy, Suspense, type ReactNode } from "react";
+import { LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
+import { lazy, Suspense, useState, type ReactNode } from "react";
 import { relativeTime } from "@/lib/format";
 import { PAGES, useNav, type Page } from "@/lib/nav";
 import { useStatus } from "@/lib/status";
 import type { AppStatus } from "@/lib/types";
+import { app, errorMessage } from "@/lib/api";
 import { AppMark } from "./AppMark";
 import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
 import { Badge, StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
+import { ConnectServer } from "@/pages/Pairing";
 
 const Trends = lazy(() => import("@/pages/Trends").then((m) => ({ default: m.Trends })));
 const Sessions = lazy(() => import("@/pages/Sessions").then((m) => ({ default: m.Sessions })));
@@ -84,6 +86,10 @@ function PageView({ page }: { page: Page }): ReactNode {
 
 function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
   const { page, go } = useNav();
+  const { set } = useStatus();
+  const [connecting, setConnecting] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   return (
     <nav aria-label="主导航" className="flex w-16 shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-52">
       <div
@@ -101,6 +107,16 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
           const active = item.key === page;
           return (
             <li key={item.key} className={cn(index === PAGES.length - 1 && "mt-auto")}>
+              {item.key === "settings" && (
+                <div className="mb-2">
+                  <AccountEntry status={status} busy={busy} error={error} onSignIn={() => { setError(null); setConnecting(true); }} onSignOut={async () => {
+                    setBusy(true);
+                    setError(null);
+                    try { set(await app.logoutAccount()); } catch (next) { setError(errorMessage(next)); } finally { setBusy(false); }
+                  }} />
+                  <ConnectServer open={connecting} onOpenChange={setConnecting} />
+                </div>
+              )}
               <Tip content={item.label} side="right">
                 <button
                   type="button"
@@ -122,6 +138,54 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
       </ul>
       <CollectorStatus status={status} />
     </nav>
+  );
+}
+
+function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
+  status: AppStatus | null;
+  busy: boolean;
+  error: string | null;
+  onSignIn: () => void;
+  onSignOut: () => Promise<void>;
+}) {
+  const githubName = status?.accountDisplayName;
+  // Older servers and email sign-ins have no GitHub profile. They still have
+  // an account session, and must keep an identifiable sign-out entry.
+  const name = githubName || status?.accountEmail;
+  const accountLabel = githubName ? `GitHub 账号 ${name}` : `账号 ${name}`;
+  const [imageFailed, setImageFailed] = useState(false);
+  if (name) {
+    return (
+      <div className="px-1">
+        <Tip content={`${accountLabel}；点击退出登录，本机采集继续`} side="right">
+          <button
+            type="button"
+            aria-label={`${accountLabel}，退出登录`}
+            disabled={busy}
+            onClick={() => void onSignOut()}
+            className="group flex min-h-10 w-full items-center justify-center gap-2 rounded-lg px-2 text-left hover:bg-surface min-[1100px]:justify-start"
+          >
+            {status?.accountAvatarUrl && !imageFailed ? (
+              <img src={status.accountAvatarUrl} alt="" className="h-6 w-6 shrink-0 rounded-full" onError={() => setImageFailed(true)} />
+            ) : <UserRound className="h-5 w-5 shrink-0 text-ink-2" aria-hidden />}
+            <span className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+            <LogOut className="hidden h-3.5 w-3.5 shrink-0 text-ink-3 min-[1100px]:block" aria-hidden />
+          </button>
+        </Tip>
+        {error && <p role="alert" className="px-2 pt-1 text-[11px] leading-4 text-bad">{error}</p>}
+      </div>
+    );
+  }
+  return (
+    <div className="px-1">
+      <Tip content="登录后可在多台电脑之间同步用量" side="right">
+        <button type="button" aria-label="登录，同步多台设备" onClick={onSignIn} className="flex min-h-10 w-full items-center justify-center gap-2 rounded-lg bg-primary-soft px-2 text-xs font-medium text-primary hover:bg-primary-soft/80 min-[1100px]:justify-start">
+          <UserRound className="h-4 w-4 shrink-0" aria-hidden />
+          <span className="hidden min-[1100px]:inline">登录 / 同步多台设备</span>
+        </button>
+      </Tip>
+      {error && <p role="alert" className="px-2 pt-1 text-[11px] leading-4 text-bad">{error}</p>}
+    </div>
   );
 }
 

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { dashboardGet } from "./api";
-import { DEFAULT_FILTERS, DEFAULT_TIME_ZONE, filterQuery, type Filters, type Query } from "./range";
+import { DEFAULT_FILTERS, DEFAULT_TIME_ZONE, filterQuery, normalizeFilters, type Filters, type Query } from "./range";
 import { usePersistent } from "./store";
 import { useSettings } from "./settings";
 import type { FilterOptions } from "./types";
@@ -21,16 +21,15 @@ interface DataContext {
 
 const Context = createContext<DataContext | null>(null);
 
-function isFilters(value: unknown): value is Filters {
-  return Boolean(value) && typeof value === "object" && typeof (value as Filters).preset === "string";
-}
-
 /** Source IDs are non-secret. Keep dates, but never carry device/project filters between sources. */
 function initialFilters(sourceKey: string): Filters {
   try {
-    if (localStorage.getItem("tokenlens.source.v1") === sourceKey) return DEFAULT_FILTERS;
     const previous: unknown = JSON.parse(localStorage.getItem("tokenlens.filters.v1") ?? "null");
-    if (isFilters(previous)) return { ...previous, devices: [], clients: [], models: [], projects: [] };
+    const restored = normalizeFilters(previous);
+    // Do not carry another computer's device/project filters into this one.
+    // The previous provider may still be flushing its storage while unmounting.
+    if (localStorage.getItem("tokenlens.source.v1") === sourceKey && restored) return restored;
+    if (restored) return { ...restored, devices: [], clients: [], models: [], projects: [] };
   } catch {
     // Storage is optional.
   }
@@ -40,13 +39,10 @@ function initialFilters(sourceKey: string): Filters {
 export function DataProvider({ children, enabled, sourceKey }: { children: ReactNode; enabled: boolean; sourceKey: string }) {
   const { settings } = useSettings();
   const [initial] = useState(() => initialFilters(sourceKey));
-  const [filters, setFilters] = usePersistent<Filters>("tokenlens.filters.v1", initial, (value): value is Filters => {
-    try {
-      return localStorage.getItem("tokenlens.source.v1") === sourceKey && isFilters(value);
-    } catch {
-      return false;
-    }
-  });
+  // `initialFilters` has already read the previous source and removed its
+  // device/project filters. Reading the same storage again here would undo
+  // that reset when switching from all devices back to this computer.
+  const [filters, setFilters] = usePersistent<Filters>("tokenlens.filters.v1", initial, undefined, () => initial);
   useEffect(() => {
     try {
       localStorage.setItem("tokenlens.source.v1", sourceKey);

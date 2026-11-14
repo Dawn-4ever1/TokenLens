@@ -11,13 +11,16 @@ interface StatusContext {
 
 const Context = createContext<StatusContext | null>(null);
 
-/** Local app state (pairing, collector); reading it never touches the network. */
+/** Poll local state; restore the saved account separately once at startup. */
 export function StatusProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<AppStatus | null>(null);
   const [error, setError] = useState<unknown>(null);
   const revision = useRef(0);
+  const accountRevision = useRef(0);
+  const accountRestore = useRef<Promise<string | null> | null>(null);
   const set = useCallback((next: AppStatus) => {
     revision.current += 1;
+    accountRevision.current += 1;
     setStatus(next);
     setError(null);
   }, []);
@@ -34,6 +37,16 @@ export function StatusProvider({ children }: { children: ReactNode }) {
   }, []);
   useEffect(() => {
     void refresh();
+    let active = true;
+    const restoringRevision = accountRevision.current;
+    // Keep the same promise through StrictMode's effect replay. Local status
+    // and the dashboard stay available while this optional request is pending.
+    accountRestore.current ??= app.refreshAccount();
+    void accountRestore.current.then(() => {
+      if (active && accountRevision.current === restoringRevision) void refresh();
+    }, () => {
+      // Offline account recovery must not turn local collection into an error.
+    });
     const id = setInterval(() => {
       if (document.visibilityState === "visible") void refresh();
     }, 5000);
@@ -46,6 +59,7 @@ export function StatusProvider({ children }: { children: ReactNode }) {
       );
     }
     return () => {
+      active = false;
       clearInterval(id);
       unlisten?.();
     };
