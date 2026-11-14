@@ -361,6 +361,7 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -376,6 +377,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -800,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "collector"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "clap",
@@ -819,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5810,7 +5812,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokenlens-app"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "axum",
  "base64 0.22.1",

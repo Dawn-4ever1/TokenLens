@@ -41,11 +41,14 @@ pub struct AppState {
     /// WebView. Status polling reads the cached email without a request.
     account_session: Mutex<Option<String>>,
     account_email: Mutex<Option<String>>,
+    account_provider: Mutex<Option<String>>,
     account_display_name: Mutex<Option<String>>,
     account_avatar_url: Mutex<Option<String>>,
     account_space: Mutex<Option<String>>,
     /// A started GitHub device flow; the code stays in Rust (D049).
     github_device: Mutex<Option<String>>,
+    /// A started Google authorization-code flow; the id stays in Rust (D051).
+    google_flow: Mutex<Option<String>>,
     /// Serializes pairing, disconnects, credential rotation and account changes.
     connection: Mutex<()>,
 }
@@ -109,10 +112,12 @@ impl AppState {
             dashboard_mode: Mutex::new(dashboard_mode.to_owned()),
             account_session: Mutex::new(account_session),
             account_email: Mutex::new(None),
+            account_provider: Mutex::new(None),
             account_display_name: Mutex::new(None),
             account_avatar_url: Mutex::new(None),
             account_space: Mutex::new(None),
             github_device: Mutex::new(None),
+            google_flow: Mutex::new(None),
             connection: Mutex::new(()),
         }
     }
@@ -220,7 +225,9 @@ pub struct AppStatus {
     pub cloud_server: &'static str,
     /// Signed-in account, when this computer has one.
     pub account_email: Option<String>,
-    /// Public GitHub profile used for the sidebar, not a login credential.
+    /// Sign-in method ("github"/"google") when the server reports one (D051).
+    pub account_provider: Option<String>,
+    /// Public provider profile used for the sidebar, not a login credential.
     pub account_display_name: Option<String>,
     pub account_avatar_url: Option<String>,
     /// Name of the signed-in space, for the account row in the app.
@@ -288,6 +295,7 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
         platform: platform(),
         cloud_server: crate::account::CLOUD_URL,
         account_email: state.account_email(),
+        account_provider: lock(&state.account_provider).clone(),
         account_display_name: lock(&state.account_display_name).clone(),
         account_avatar_url: lock(&state.account_avatar_url).clone(),
         account_space: lock(&state.account_space).clone(),
@@ -665,6 +673,37 @@ pub async fn request_login_code(app: AppHandle, server: String, email: String) -
     .await
 }
 
+/// Finishes any sign-in (email, GitHub or Google): creates this computer's
+/// device in the account's space, adopts its credentials and caches the
+/// account for the sidebar. The session goes to the keychain, never the UI.
+fn complete_account_sign_in(
+    app: &AppHandle,
+    state: &AppState,
+    server: &str,
+    signed: crate::account::SignedIn,
+    form_factor: FormFactor,
+    name: &str,
+    autostart: bool,
+) -> CmdResult<AppStatus> {
+    let next = crate::account::create_device(server, &signed.session, form_factor, name)?;
+    adopt(app, next, false)?;
+    {
+        let _connection = lock(&state.connection);
+        crate::account::save_session(&state.paths.keychain_service, &signed.session)?;
+        *lock(&state.account_session) = Some(signed.session);
+        *lock(&state.account_email) = Some(signed.email.clone());
+        *lock(&state.account_provider) = signed.provider.clone();
+        *lock(&state.account_display_name) = signed.display_name.clone();
+        *lock(&state.account_avatar_url) = signed.avatar_url.clone();
+        *lock(&state.account_space) = Some(signed.space_name.clone());
+    }
+    if autostart {
+        let _ = write_autostart(app, true);
+    }
+    changed(app, Poke::Paired);
+    Ok(status(app))
+}
+
 /// Signs in, creates this computer's device in the account's space and starts
 /// syncing. A first sign-in creates the space on the server.
 #[tauri::command]
@@ -686,22 +725,7 @@ pub async fn login_account(
     blocking(app, move |app| {
         let state = app.state::<AppState>();
         let signed = crate::account::login(&server, &email, &code)?;
-        let next = crate::account::create_device(&server, &signed.session, form_factor, &name)?;
-        adopt(app, next, false)?;
-        {
-            let _connection = lock(&state.connection);
-            crate::account::save_session(&state.paths.keychain_service, &signed.session)?;
-            *lock(&state.account_session) = Some(signed.session);
-            *lock(&state.account_email) = Some(signed.email.clone());
-            *lock(&state.account_display_name) = signed.display_name.clone();
-            *lock(&state.account_avatar_url) = signed.avatar_url.clone();
-            *lock(&state.account_space) = Some(signed.space_name.clone());
-        }
-        if autostart {
-            let _ = write_autostart(app, true);
-        }
-        changed(app, Poke::Paired);
-        Ok(status(app))
+        complete_account_sign_in(app, &state, &server, signed, form_factor, &name, autostart)
     })
     .await
 }
@@ -711,15 +735,16 @@ pub async fn login_account(
 fn apply_account_refresh(
     state: &AppState,
     session: &str,
-    reply: CmdResult<(String, Option<String>, Option<String>)>,
+    reply: CmdResult<crate::account::AccountProfile>,
 ) -> Option<String> {
     let _connection = lock(&state.connection);
     if state.account_session().as_deref() != Some(session) {
         return state.account_email();
     }
     match reply {
-        Ok((email, display_name, avatar_url)) => {
+        Ok((email, provider, display_name, avatar_url)) => {
             *lock(&state.account_email) = Some(email.clone());
+            *lock(&state.account_provider) = provider;
             *lock(&state.account_display_name) = display_name;
             *lock(&state.account_avatar_url) = avatar_url;
             Some(email)
@@ -729,6 +754,7 @@ fn apply_account_refresh(
             crate::account::delete_session(&state.paths.keychain_service);
             lock(&state.account_session).take();
             lock(&state.account_email).take();
+            lock(&state.account_provider).take();
             lock(&state.account_display_name).take();
             lock(&state.account_avatar_url).take();
             lock(&state.account_space).take();
@@ -803,24 +829,17 @@ pub async fn poll_github_login(
             crate::account::GitHubPoll::Denied => Ok(json!({ "status": "denied" })),
             crate::account::GitHubPoll::Failed => Ok(json!({ "status": "failed" })),
             crate::account::GitHubPoll::SignedIn(signed) => {
-                let next =
-                    crate::account::create_device(&server, &signed.session, form_factor, &name)?;
-                adopt(app, next, false)?;
-                {
-                    let _connection = lock(&state.connection);
-                    crate::account::save_session(&state.paths.keychain_service, &signed.session)?;
-                    *lock(&state.account_session) = Some(signed.session);
-                    *lock(&state.account_email) = Some(signed.email.clone());
-                    *lock(&state.account_display_name) = signed.display_name.clone();
-                    *lock(&state.account_avatar_url) = signed.avatar_url.clone();
-                    *lock(&state.account_space) = Some(signed.space_name.clone());
-                }
+                let next = complete_account_sign_in(
+                    app,
+                    &state,
+                    &server,
+                    signed,
+                    form_factor,
+                    &name,
+                    autostart,
+                )?;
                 let _ = lock(&state.github_device).take();
-                if autostart {
-                    let _ = write_autostart(app, true);
-                }
-                changed(app, Poke::Paired);
-                Ok(json!({ "status": "ok", "app": status(app) }))
+                Ok(json!({ "status": "ok", "app": next }))
             }
         }
     })
@@ -832,6 +851,88 @@ pub async fn poll_github_login(
 #[tauri::command]
 pub async fn open_github_device_page(app: AppHandle, url: String) -> CmdResult<()> {
     if !url.starts_with("https://github.com/login/device") {
+        return Err(CommandError::new("bad_request"));
+    }
+    blocking(app, move |_app| {
+        #[cfg(target_os = "macos")]
+        let opened = std::process::Command::new("open").arg(&url).status();
+        #[cfg(target_os = "windows")]
+        let opened = std::process::Command::new("cmd")
+            .args(["/C", "start", ""])
+            .arg(&url)
+            .status();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let opened = std::process::Command::new("xdg-open").arg(&url).status();
+        opened.map_err(|_| CommandError::new("server"))?;
+        Ok(())
+    })
+    .await
+}
+
+/// Starts Google sign-in and returns only the consent page to open (D051).
+#[tauri::command]
+pub async fn start_google_login(app: AppHandle, server: String) -> CmdResult<Value> {
+    blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        let start = crate::account::google_start(&server)?;
+        *lock(&state.google_flow) = Some(start.flow_id.clone());
+        Ok(json!({ "authUrl": start.auth_url }))
+    })
+    .await
+}
+
+/// Polls the started Google flow. On approval this creates the space's device
+/// and switches the dashboard to the server, exactly like an email sign-in.
+#[tauri::command]
+pub async fn poll_google_login(
+    app: AppHandle,
+    server: String,
+    form_factor: FormFactor,
+    name: String,
+    autostart: bool,
+) -> CmdResult<Value> {
+    let name = clean_name(&name).ok_or(CommandError::new("bad_request"))?;
+    let name = if name.is_empty() {
+        default_display_name(this_platform(), form_factor)
+    } else {
+        name
+    };
+    blocking(app, move |app| {
+        let state = app.state::<AppState>();
+        let flow = lock(&state.google_flow)
+            .clone()
+            .ok_or(CommandError::new("bad_request"))?;
+        match crate::account::google_poll(&server, &flow)? {
+            crate::account::GooglePoll::Pending => Ok(json!({ "status": "pending" })),
+            crate::account::GooglePoll::Expired => {
+                let _ = lock(&state.google_flow).take();
+                Ok(json!({ "status": "expired" }))
+            }
+            crate::account::GooglePoll::Denied => Ok(json!({ "status": "denied" })),
+            crate::account::GooglePoll::Failed => Ok(json!({ "status": "failed" })),
+            crate::account::GooglePoll::SignedIn(signed) => {
+                let next = complete_account_sign_in(
+                    app,
+                    &state,
+                    &server,
+                    signed,
+                    form_factor,
+                    &name,
+                    autostart,
+                )?;
+                let _ = lock(&state.google_flow).take();
+                Ok(json!({ "status": "ok", "app": next }))
+            }
+        }
+    })
+    .await
+}
+
+/// Opens the Google consent page in the system browser. Only that one host is
+/// allowed, so this cannot become a general URL opener.
+#[tauri::command]
+pub async fn open_google_auth_page(app: AppHandle, url: String) -> CmdResult<()> {
+    if !url.starts_with("https://accounts.google.com/") {
         return Err(CommandError::new("bad_request"));
     }
     blocking(app, move |_app| {
@@ -876,6 +977,7 @@ pub async fn logout_account(app: AppHandle) -> CmdResult<AppStatus> {
         let signed_out = {
             let _connection = lock(&state.connection);
             lock(&state.account_email).take();
+            lock(&state.account_provider).take();
             lock(&state.account_display_name).take();
             lock(&state.account_avatar_url).take();
             lock(&state.account_space).take();
@@ -1145,12 +1247,14 @@ mod tests {
                 "tls_fixture_current",
                 Ok((
                     email.clone(),
+                    Some("google".into()),
                     Some("Current account".into()),
                     Some(avatar.clone())
                 ))
             ),
             Some(email.clone())
         );
+        assert_eq!(lock(&state.account_provider).as_deref(), Some("google"));
         assert_eq!(
             lock(&state.account_display_name).as_deref(),
             Some("Current account")
@@ -1195,7 +1299,12 @@ mod tests {
                         let reply = if unauthorized {
                             Err(CommandError::new("unauthorized"))
                         } else {
-                            Ok(("old@example.test".into(), Some("Old account".into()), None))
+                            Ok((
+                                "old@example.test".into(),
+                                Some("github".into()),
+                                Some("Old account".into()),
+                                None,
+                            ))
                         };
                         apply_account_refresh(pending_state, &session, reply)
                     });
@@ -1468,10 +1577,12 @@ mod tests {
                 dashboard_mode: Mutex::new("local".to_owned()),
                 account_session: Mutex::new(None),
                 account_email: Mutex::new(None),
+                account_provider: Mutex::new(None),
                 account_display_name: Mutex::new(None),
                 account_avatar_url: Mutex::new(None),
                 account_space: Mutex::new(None),
                 github_device: Mutex::new(None),
+                google_flow: Mutex::new(None),
                 connection: Mutex::new(()),
             })
             .build(tauri::test::mock_context(tauri::test::noop_assets()))

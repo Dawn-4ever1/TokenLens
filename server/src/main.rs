@@ -161,6 +161,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     Some(github) => state.with_github(github),
                     None => state,
                 };
+                let state = match tokenlens_server::google::Google::from_env() {
+                    Some(google) => state.with_google(google),
+                    None => state,
+                };
                 let state = match std::env::var("TOKENLENS_PAIRING_KEY") {
                     Ok(key) => state.with_pairing_cipher(
                         tokenlens_server::pairing_crypto::PairingCipher::from_base64(&key)

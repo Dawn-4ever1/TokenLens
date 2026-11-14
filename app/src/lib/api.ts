@@ -86,6 +86,16 @@ export const app = {
   }) =>
     call<{ status: string; retryAfterSeconds?: number; app?: AppStatus }>("poll_github_login", input),
   openGitHubDevicePage: (url: string) => call<void>("open_github_device_page", { url }),
+  startGoogleLogin: (server: string) =>
+    call<{ authUrl: string }>("start_google_login", { server }),
+  pollGoogleLogin: (input: {
+    server: string;
+    formFactor: "laptop" | "desktop";
+    name: string;
+    autostart: boolean;
+  }) =>
+    call<{ status: string; app?: AppStatus }>("poll_google_login", input),
+  openGoogleAuthPage: (url: string) => call<void>("open_google_auth_page", { url }),
   setPaused: (paused: boolean) => call<AppStatus>("set_paused", { paused }),
   syncNow: () => call<AppStatus>("sync_now"),
   setAutostart: (enabled: boolean) => call<AppStatus>("set_autostart", { enabled }),

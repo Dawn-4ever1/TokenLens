@@ -108,7 +108,7 @@ that person's own space, and later sign-ins return to it.
 
 Your own users reach this server through **Devices → 添加设备 → 自己的服务器**,
 which offers the email code (or the operator-issued pairing code). The app's
-GitHub button only appears for the hosted `tokenlens.online` service.
+GitHub and Google buttons only appear for the hosted `tokenlens.online` service.
 
 **GitHub (recommended, no cost).** Create a GitHub OAuth App (Settings →
 Developer settings → OAuth Apps), set its homepage to your domain, tick
@@ -117,6 +117,29 @@ needed and the app never stores one.
 
 ```sh
 TOKENLENS_GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx
+```
+
+**Google (optional).** Google has no device-code flow for desktop apps, so the
+server runs a standard web authorization-code flow with PKCE: the user signs in
+on `accounts.google.com` in their browser and Google redirects back to this
+server. In [Google Cloud Console](https://console.cloud.google.com/) create a
+project, configure the OAuth consent screen (External; the `openid`, `email`
+and `profile` scopes; add yourself as a test user while in "Testing"), then
+create an **OAuth client ID → Web application** and add this authorized
+redirect URI:
+
+```
+https://tokenlens.online/api/auth/google/callback
+```
+
+Put the client id and secret in `.env` (both stay on the server; the app never
+sees them). Self-hosters register their own redirect URI and set
+`TOKENLENS_GOOGLE_REDIRECT_URI` to match it exactly.
+
+```sh
+TOKENLENS_GOOGLE_CLIENT_ID=xxxxxxxx.apps.googleusercontent.com
+TOKENLENS_GOOGLE_CLIENT_SECRET=xxxxxxxx
+# TOKENLENS_GOOGLE_REDIRECT_URI=https://tokenlens.online/api/auth/google/callback
 ```
 
 **Email code (fallback).** Set `TOKENLENS_EMAIL_API_KEY` and

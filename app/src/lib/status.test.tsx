@@ -22,7 +22,8 @@ function localStatus(accountEmail: string | null = null): AppStatus {
       running: true, paused: false, lastScanAt: null, lastUploadAt: null,
       lastHeartbeatAt: null, backlog: 0, uploadState: null, backfillComplete: true, lastError: null,
     },
-    accountEmail, accountDisplayName: accountEmail ? "Restored account" : null,
+    accountEmail, accountProvider: null,
+    accountDisplayName: accountEmail ? "Restored account" : null,
     accountAvatarUrl: null, accountSpace: null,
   };
 }

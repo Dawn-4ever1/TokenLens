@@ -328,19 +328,21 @@ pub fn login_with_identity(
     Ok(Login { session, account })
 }
 
-pub type PublicProfile = (Option<String>, Option<String>);
+/// `(provider, display_name, avatar_url)` of an identity, all nullable.
+pub type PublicProfile = (Option<String>, Option<String>, Option<String>);
 
-/// Public profile fields of the account's GitHub identity, if it has one.
-pub fn github_profile(
+/// Public profile fields of the account's most recently used identity
+/// (GitHub or Google), if it has one. Email-only accounts have none.
+pub fn identity_profile(
     conn: &Connection,
     account_id: &str,
 ) -> Result<Option<PublicProfile>, AccountError> {
     Ok(conn
         .query_row(
-            "SELECT display_name, avatar_url FROM account_identities
-             WHERE account_id = ?1 AND provider = 'github'",
+            "SELECT provider, display_name, avatar_url FROM account_identities
+             WHERE account_id = ?1 ORDER BY last_login_at DESC LIMIT 1",
             params![account_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?)
 }

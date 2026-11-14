@@ -9,7 +9,7 @@ name = "tokenlens-server"
 path = "src/main.rs"
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "matched-path", "query"] }
 aes-gcm = "0.10"
 base64 = "0.22"
 chrono.workspace = true
@@ -32,5 +32,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 usage-event = { path = "../crates/usage-event" }
 
 [dev-dependencies]
+base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+sha2.workspace = true
 tempfile = "3"

@@ -634,6 +634,7 @@ const state: AppStatus = {
   server: startsLocal ? null : "https://dash.example.com",
   cloudServer: "https://tokenlens.online",
   accountEmail: params.has("server") || params.has("signed") ? "mock@example.com" : null,
+  accountProvider: params.has("server") || params.has("signed") ? "github" : null,
   accountDisplayName: params.has("server") || params.has("signed") ? "octocat" : null,
   accountAvatarUrl: null,
   accountSpace: params.has("server") || params.has("signed") ? "我的空间" : null,
@@ -647,6 +648,7 @@ const state: AppStatus = {
 };
 
 let pollCount = 0;
+let googlePollCount = 0;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -737,6 +739,7 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       pollCount += 1;
       if (pollCount % 2 === 1) return { status: "pending" };
       state.accountEmail = "octo@example.com";
+      state.accountProvider = "github";
       state.accountDisplayName = "octocat";
       state.accountAvatarUrl = sessionStorage.getItem("tokenlens.mock.avatar");
       state.accountSpace = "我的空间";
@@ -747,12 +750,31 @@ export async function command(name: string, args: Record<string, unknown>): Prom
     }
     case "open_github_device_page":
       return null;
+    case "start_google_login":
+      if (params.has("googlefail")) throw new ApiError("unavailable");
+      return { authUrl: "https://accounts.google.com/o/oauth2/v2/auth?stub" };
+    case "poll_google_login": {
+      googlePollCount += 1;
+      if (googlePollCount % 2 === 1) return { status: "pending" };
+      state.accountEmail = "guser@example.com";
+      state.accountProvider = "google";
+      state.accountDisplayName = "G User";
+      state.accountAvatarUrl = sessionStorage.getItem("tokenlens.mock.avatar");
+      state.accountSpace = "我的空间";
+      state.server = "https://tokenlens.online";
+      state.mode = "server";
+      state.paired = true;
+      return { status: "ok", app: { ...state, collector: { ...state.collector } } };
+    }
+    case "open_google_auth_page":
+      return null;
     case "request_login_code":
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(args.email))) throw new ApiError("bad_email");
       return null;
     case "login_account": {
       if (params.has("pairfail") || params.has("offline")) throw new ApiError("network");
       state.accountEmail = String(args.email);
+      state.accountProvider = null;
       state.accountDisplayName = null;
       state.accountAvatarUrl = null;
       state.accountSpace = "我的空间";
@@ -768,6 +790,7 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { code: args.rotate ? "NEWW-CODE-0002" : "K7QM-4XPR", replaceable: true };
     case "logout_account":
       state.accountEmail = null;
+      state.accountProvider = null;
       state.accountDisplayName = null;
       state.accountAvatarUrl = null;
       state.accountSpace = null;

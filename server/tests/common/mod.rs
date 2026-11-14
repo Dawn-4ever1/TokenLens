@@ -114,6 +114,92 @@ impl Harness {
         }
     }
 
+    /// A server wired to a stand-in Google for authorization-code flow tests.
+    /// The redirect URI points back at this harness, so the listener is bound
+    /// before the state is built.
+    pub async fn start_with_google(
+        client_id: &str,
+        client_secret: &str,
+        token_base: &str,
+        userinfo_base: &str,
+    ) -> Self {
+        Self::launch_google(None, client_id, client_secret, token_base, userinfo_base).await
+    }
+
+    /// Both providers on one server, for the verified-email merge test.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_with_github_and_google(
+        github_client_id: &str,
+        github_oauth_base: &str,
+        github_api_base: &str,
+        google_client_id: &str,
+        google_client_secret: &str,
+        google_token_base: &str,
+        google_userinfo_base: &str,
+    ) -> Self {
+        Self::launch_google(
+            Some((github_client_id, github_oauth_base, github_api_base)),
+            google_client_id,
+            google_client_secret,
+            google_token_base,
+            google_userinfo_base,
+        )
+        .await
+    }
+
+    async fn launch_google(
+        github: Option<(&str, &str, &str)>,
+        google_client_id: &str,
+        google_client_secret: &str,
+        google_token_base: &str,
+        google_userinfo_base: &str,
+    ) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("server.sqlite");
+        let opened = db::open(&db_path).expect("open database");
+        let clock = ManualClock::new(START_MS);
+        let reader = db::open_reader(&db_path).expect("reader");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        let mut state = AppState::new(opened.conn, Arc::new(clock.clone()))
+            .with_reader(reader)
+            .with_time_zone(tokenlens_server::DEFAULT_TIME_ZONE)
+            .with_google(tokenlens_server::google::Google::with_bases(
+                google_client_id,
+                google_client_secret,
+                &format!("{base}/api/auth/google/callback"),
+                "https://accounts.google.com",
+                google_token_base,
+                google_userinfo_base,
+            ))
+            .with_pairing_cipher(
+                tokenlens_server::pairing_crypto::PairingCipher::from_base64(
+                    &tokenlens_server::pairing_crypto::PairingCipher::generate(),
+                )
+                .expect("test pairing key"),
+            );
+        if let Some((client_id, oauth_base, api_base)) = github {
+            state = state.with_github(tokenlens_server::github::GitHub::with_bases(
+                client_id, oauth_base, api_base,
+            ));
+        }
+        tokio::spawn(tokenlens_server::serve(
+            listener,
+            state.clone(),
+            std::future::pending(),
+        ));
+        Self {
+            base,
+            clock,
+            db_path,
+            http: reqwest::Client::new(),
+            state,
+            _dir: dir,
+        }
+    }
+
     async fn serve(
         dir: tempfile::TempDir,
         db_path: PathBuf,

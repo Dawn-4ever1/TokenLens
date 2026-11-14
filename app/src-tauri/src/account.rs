@@ -19,10 +19,15 @@ const SESSION_ACCOUNT: &str = "account";
 const MAX_EMAIL_CHARS: usize = 254;
 const MAX_AVATAR_BYTES: u64 = 256 * 1024;
 
-/// The WebView only receives a bounded raster data URL. Fetch public GitHub
+/// The WebView only receives a bounded raster data URL. Fetch public provider
 /// avatars here, with a separate anonymous client, never the session transport.
-fn avatar_data_url(value: &Value) -> Option<String> {
-    let avatar = github_avatar_url(value.as_str()?)?;
+fn avatar_data_url(value: &Value, provider: Option<&str>) -> Option<String> {
+    let input = value.as_str()?;
+    let avatar = if provider == Some("google") {
+        google_avatar_url(input)?
+    } else {
+        github_avatar_url(input)?
+    };
     let agent = ureq::Agent::new_with_config(avatar_config(true));
     download_avatar(&agent, &avatar)
 }
@@ -52,6 +57,47 @@ fn github_avatar_url(input: &str) -> Option<String> {
     // Keep the provider's numeric avatar id only; do not forward an arbitrary
     // server-provided query string or allow it to request an oversized image.
     Some(format!("https://avatars.githubusercontent.com/u/{id}?s=64"))
+}
+
+/// Google profile pictures live on `lhN.googleusercontent.com` with the size
+/// encoded in the last path segment (`=s96-c`). Keep the picture id only and
+/// ask for the same fixed small size as GitHub (D051).
+fn google_avatar_url(input: &str) -> Option<String> {
+    if input.len() > 2048
+        || input
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch.is_control() || ch == '\\')
+    {
+        return None;
+    }
+    let url = url::Url::parse(input).ok()?;
+    let host = url.host_str()?;
+    let digits = host
+        .strip_suffix(".googleusercontent.com")?
+        .strip_prefix("lh")?;
+    let path = url.path();
+    let id = path
+        .strip_prefix("/a/")
+        .or_else(|| path.strip_prefix("/a-/"))?;
+    if url.scheme() != "https"
+        || digits.is_empty()
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+        || url.port_or_known_default() != Some(443)
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.fragment().is_some()
+        || id.is_empty()
+        || id.len() > 512
+    {
+        return None;
+    }
+    let base = id.split('=').next()?;
+    let prefix = if path.starts_with("/a-/") {
+        "/a-/"
+    } else {
+        "/a/"
+    };
+    Some(format!("https://{host}{prefix}{base}=s64"))
 }
 
 fn avatar_config(https_only: bool) -> ureq::config::Config {
@@ -193,6 +239,9 @@ pub struct SignedIn {
     pub session: String,
     pub email: String,
     pub space_name: String,
+    /// Which sign-in method produced this session ("github"/"google"), when
+    /// the server reports one; older servers and email sign-ins report none.
+    pub provider: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
 }
@@ -216,12 +265,14 @@ pub fn login(server: &str, email: &str, code: &str) -> CmdResult<SignedIn> {
         .filter(|value| value.starts_with("tls_"))
         .ok_or(CommandError::new("server"))?
         .to_owned();
+    let provider = body["provider"].as_str().map(str::to_owned);
     Ok(SignedIn {
         session,
         email: body["email"].as_str().unwrap_or(&email).to_owned(),
         space_name: body["spaceName"].as_str().unwrap_or("我的空间").to_owned(),
+        avatar_url: avatar_data_url(&body["avatarUrl"], provider.as_deref()),
+        provider,
         display_name: body["displayName"].as_str().map(str::to_owned),
-        avatar_url: avatar_data_url(&body["avatarUrl"]),
     })
 }
 
@@ -246,19 +297,21 @@ fn session_post(server: &str, session: &str, path: &str, body: &Value) -> CmdRes
     body_json(&response)
 }
 
-pub fn account_info(
-    server: &str,
-    session: &str,
-) -> CmdResult<(String, Option<String>, Option<String>)> {
+/// `(email, provider, display_name, avatar_data_url)` from `/api/auth/me`.
+pub type AccountProfile = (String, Option<String>, Option<String>, Option<String>);
+
+pub fn account_info(server: &str, session: &str) -> CmdResult<AccountProfile> {
     let body = session_get(server, session, "/api/auth/me")?;
     let email = body["email"]
         .as_str()
         .map(str::to_owned)
         .ok_or(CommandError::new("server"))?;
+    let provider = body["provider"].as_str().map(str::to_owned);
     Ok((
         email,
+        provider.clone(),
         body["displayName"].as_str().map(str::to_owned),
-        avatar_data_url(&body["avatarUrl"]),
+        avatar_data_url(&body["avatarUrl"], provider.as_deref()),
     ))
 }
 
@@ -373,18 +426,86 @@ pub fn github_poll(server: &str, device_code: &str) -> CmdResult<GitHubPoll> {
         "slow_down" => GitHubPoll::SlowDown(body["retryAfterSeconds"].as_u64().unwrap_or(5)),
         "expired" => GitHubPoll::Expired,
         "denied" => GitHubPoll::Denied,
-        "ok" => GitHubPoll::SignedIn(SignedIn {
-            session: body["session"]
-                .as_str()
-                .filter(|value| value.starts_with("tls_"))
-                .ok_or(CommandError::new("server"))?
-                .to_owned(),
-            email: body["email"].as_str().unwrap_or_default().to_owned(),
-            space_name: body["spaceName"].as_str().unwrap_or("我的空间").to_owned(),
-            display_name: body["displayName"].as_str().map(str::to_owned),
-            avatar_url: avatar_data_url(&body["avatarUrl"]),
-        }),
+        "ok" => GitHubPoll::SignedIn(signed_in_from(&body)?),
         _ => GitHubPoll::Failed,
+    })
+}
+
+/// Parses a successful provider sign-in reply (GitHub or Google).
+fn signed_in_from(body: &Value) -> CmdResult<SignedIn> {
+    let provider = body["provider"].as_str().map(str::to_owned);
+    Ok(SignedIn {
+        session: body["session"]
+            .as_str()
+            .filter(|value| value.starts_with("tls_"))
+            .ok_or(CommandError::new("server"))?
+            .to_owned(),
+        email: body["email"].as_str().unwrap_or_default().to_owned(),
+        space_name: body["spaceName"].as_str().unwrap_or("我的空间").to_owned(),
+        avatar_url: avatar_data_url(&body["avatarUrl"], provider.as_deref()),
+        provider,
+        display_name: body["displayName"].as_str().map(str::to_owned),
+    })
+}
+
+/// Starts Google's authorization-code flow (D051). The flow id stays in Rust;
+/// the WebView only receives the consent page to open.
+pub struct GoogleStart {
+    pub flow_id: String,
+    pub auth_url: String,
+}
+
+pub enum GooglePoll {
+    Pending,
+    Expired,
+    Denied,
+    Failed,
+    SignedIn(SignedIn),
+}
+
+pub fn google_start(server: &str) -> CmdResult<GoogleStart> {
+    let server = server_url(server)?;
+    let response = UreqTransport::new()
+        .post(
+            &format!("{server}/api/auth/google/start"),
+            None,
+            false,
+            b"{}",
+        )
+        .map_err(|_| CommandError::new("network"))?;
+    if response.status != 200 {
+        return Err(status_error(response.status, &response.body));
+    }
+    let body = body_json(&response)?;
+    let text = |name: &str| body[name].as_str().map(str::to_owned);
+    Ok(GoogleStart {
+        flow_id: text("flowId").ok_or(CommandError::new("server"))?,
+        auth_url: text("authUrl").ok_or(CommandError::new("server"))?,
+    })
+}
+
+pub fn google_poll(server: &str, flow_id: &str) -> CmdResult<GooglePoll> {
+    let server = server_url(server)?;
+    let payload = serde_json::to_vec(&json!({ "flowId": flow_id }))
+        .map_err(|_| CommandError::new("bad_request"))?;
+    let response = UreqTransport::new()
+        .post(
+            &format!("{server}/api/auth/google/poll"),
+            None,
+            false,
+            &payload,
+        )
+        .map_err(|_| CommandError::new("network"))?;
+    if response.status != 200 {
+        return Err(status_error(response.status, &response.body));
+    }
+    let body = body_json(&response)?;
+    Ok(match body["status"].as_str().unwrap_or("failed") {
+        "pending" => GooglePoll::Pending,
+        "expired" => GooglePoll::Expired,
+        "denied" => GooglePoll::Denied,
+        "ok" => GooglePoll::SignedIn(signed_in_from(&body)?),
+        _ => GooglePoll::Failed,
     })
 }
 
@@ -477,8 +598,45 @@ mod tests {
         ] {
             assert!(github_avatar_url(input).is_none(), "{input}");
         }
-        assert!(avatar_data_url(&Value::Null).is_none());
-        assert!(avatar_data_url(&json!("https://example.com/u/123")).is_none());
+        assert!(avatar_data_url(&Value::Null, None).is_none());
+        assert!(avatar_data_url(&json!("https://example.com/u/123"), None).is_none());
+    }
+
+    #[test]
+    fn google_avatar_urls_keep_only_the_picture_id_and_fixed_small_size() {
+        assert_eq!(
+            google_avatar_url("https://lh3.googleusercontent.com/a/ACg8ocJx=s96-c"),
+            Some("https://lh3.googleusercontent.com/a/ACg8ocJx=s64".to_owned())
+        );
+        assert_eq!(
+            google_avatar_url("https://lh6.googleusercontent.com/a-/ABC123?sz=200"),
+            Some("https://lh6.googleusercontent.com/a-/ABC123=s64".to_owned())
+        );
+        for input in [
+            "http://lh3.googleusercontent.com/a/x",
+            "https://lh3.googleusercontent.com.evil.example/a/x",
+            "https://example.com/lh3.googleusercontent.com/a/x",
+            "https://lh.googleusercontent.com/a/x",
+            "https://lh3x.googleusercontent.com/a/x",
+            "https://user:password@lh3.googleusercontent.com/a/x",
+            "https://lh3.googleusercontent.com:444/a/x",
+            "https://lh3.googleusercontent.com/a/x#fragment",
+            "https://lh3.googleusercontent.com/a/",
+            "https://lh3.googleusercontent.com/arbitrary/path",
+            "data:image/png;base64,placeholder",
+            "https://lh3.googleusercontent.com\\@example.com/a/x",
+        ] {
+            assert!(google_avatar_url(input).is_none(), "{input}");
+        }
+        assert!(avatar_data_url(&Value::Null, Some("google")).is_none());
+        assert!(
+            avatar_data_url(
+                &json!("https://avatars.githubusercontent.com/u/123"),
+                Some("google")
+            )
+            .is_none(),
+            "a GitHub avatar must not pass the Google allowlist"
+        );
     }
 
     #[test]

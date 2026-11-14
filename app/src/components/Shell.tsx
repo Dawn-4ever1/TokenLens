@@ -148,11 +148,16 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
   onSignIn: () => void;
   onSignOut: () => Promise<void>;
 }) {
-  const githubName = status?.accountDisplayName;
-  // Older servers and email sign-ins have no GitHub profile. They still have
-  // an account session, and must keep an identifiable sign-out entry.
-  const name = githubName || status?.accountEmail;
-  const accountLabel = githubName ? `GitHub 账号 ${name}` : `账号 ${name}`;
+  const providerName = status?.accountDisplayName;
+  // Older servers and email sign-ins have no provider profile. They still
+  // have an account session, and must keep an identifiable sign-out entry.
+  const name = providerName || status?.accountEmail;
+  const provider = status?.accountProvider
+    // Older servers report no provider; a display name still means GitHub.
+    ?? (providerName ? "github" : null);
+  const accountLabel = provider === "google" ? `Google 账号 ${name}`
+    : provider === "github" ? `GitHub 账号 ${name}`
+    : `账号 ${name}`;
   const [imageFailed, setImageFailed] = useState(false);
   if (name) {
     return (

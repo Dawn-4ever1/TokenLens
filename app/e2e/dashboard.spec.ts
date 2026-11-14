@@ -248,23 +248,27 @@ test("the code input and the request button sit on the same aligned row", async 
   expect(hint.y).toBeGreaterThan(input.y + input.height);
 });
 
-test("a self-hosted server offers only the email code, never GitHub", async ({ page }) => {
+test("a self-hosted server offers only the email code, never GitHub or Google", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page, { view: "devices", query: "" });
   await settle(page, "设备");
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toBeVisible();
   await expect(dialog.getByText("默认连接 TokenLens 云服务，首次登录自动创建空间", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "使用自己的服务器", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "继续前往 GitHub" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "继续前往 Google" })).toHaveCount(0);
   await expect(dialog.getByLabel("服务器地址")).toBeVisible();
   await expect(dialog.getByLabel("邮箱")).toBeVisible();
   await expect(dialog.getByLabel("验证码")).toBeVisible();
-  // Switching back restores the GitHub choice for the hosted service.
+  // Switching back restores both provider choices for the hosted service.
   await dialog.getByRole("button", { name: "返回登录方式", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
 });
 
@@ -289,6 +293,32 @@ test("GitHub sign-in shows a device code and finishes without any email", async 
   await expect(dialog).toBeHidden({ timeout: 15_000 });
   await settle(page, "设备");
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Google sign-in finishes in the browser without any code or email", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  // Unlike GitHub there is no human code: the browser does the whole consent.
+  await expect(dialog.getByText("在打开的 Google 页面完成登录，授权后这里会自动继续。", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "重新打开授权页", exact: true })).toBeVisible();
+  // The mock approves on the second poll, so the dialog closes by itself.
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  await settle(page, "设备");
+  const account = page.getByRole("button", { name: "Google 账号 G User，退出登录", exact: true });
+  await expect(account).toBeVisible();
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  // The session and profile never reach web storage or the URL.
+  const stored = await page.evaluate(() => JSON.stringify({
+    local: { ...localStorage }, session: { ...sessionStorage }, url: location.href, cookies: document.cookie,
+  }));
+  expect(stored).not.toMatch(/tls_|bearer|tdi_|tdr_/i);
   expect(errors).toEqual([]);
 });
 
@@ -370,7 +400,7 @@ test("GitHub sign-in against an older server stays signed in without profile fie
     const { app } = await import(modulePath);
     const status = app.status;
     const poll = app.pollGitHubLogin;
-    const withoutProfile = (value: Record<string, unknown>) => ({ ...value, accountDisplayName: null, accountAvatarUrl: null });
+    const withoutProfile = (value: Record<string, unknown>) => ({ ...value, accountProvider: null, accountDisplayName: null, accountAvatarUrl: null });
     app.status = async () => withoutProfile(await status());
     app.pollGitHubLogin = async (input: Record<string, unknown>) => {
       const result = await poll(input);

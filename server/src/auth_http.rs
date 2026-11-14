@@ -55,12 +55,14 @@ fn json<T: serde::Serialize>(value: &T) -> Response {
 
 fn profile_json(state: &AppState, account: &Account) -> serde_json::Value {
     let profile = state.db_handle().ok().and_then(|db| {
-        db.lock()
-            .ok()
-            .and_then(|conn| accounts::github_profile(&conn, &account.id).ok().flatten())
+        db.lock().ok().and_then(|conn| {
+            accounts::identity_profile(&conn, &account.id)
+                .ok()
+                .flatten()
+        })
     });
-    let (name, avatar) = profile.unwrap_or((None, None));
-    serde_json::json!({ "displayName": name, "avatarUrl": avatar })
+    let (provider, name, avatar) = profile.unwrap_or((None, None, None));
+    serde_json::json!({ "provider": provider, "displayName": name, "avatarUrl": avatar })
 }
 
 fn account_reply(state: &AppState, account: Account) -> Response {
@@ -68,6 +70,7 @@ fn account_reply(state: &AppState, account: Account) -> Response {
     json(&serde_json::json!({
         "email": account.email,
         "spaceName": "我的空间",
+        "provider": profile["provider"],
         "displayName": profile["displayName"],
         "avatarUrl": profile["avatarUrl"],
     }))
@@ -218,6 +221,7 @@ pub async fn login(State(state): State<AppState>, body: Body) -> Response {
                 "email": login.account.email,
                 "spaceName": "我的空间",
                 "session": login.session.expose(),
+                "provider": serde_json::Value::Null,
             }));
             if let Ok(cookie) =
                 header::HeaderValue::from_str(&session_cookie(login.session.expose()))
@@ -417,11 +421,224 @@ pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response 
                     "spaceName": "我的空间",
                     "session": login.session.expose(),
                     "via": "github",
+                    "provider": "github",
                     "displayName": display_name,
                     "avatarUrl": avatar_url,
                 })),
                 Err(error) => account_error(error),
             }
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GooglePollRequest {
+    flow_id: String,
+}
+
+/// A minimal static page for the browser that Google redirects back to.
+/// No scripts, no external resources, and no request data is interpolated.
+fn html_page(status: StatusCode, title: &str, message: &str) -> Response {
+    let body = format!(
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\">\
+         <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+         <title>{title}</title><style>\
+         body{{font-family:system-ui,sans-serif;display:flex;min-height:100vh;\
+         align-items:center;justify-content:center;margin:0;background:#faf7f2;color:#2b2620}}\
+         main{{text-align:center;padding:2rem}}h1{{font-size:1.25rem}}p{{color:#6b6257}}\
+         </style></head><body><main><h1>{title}</h1><p>{message}</p></main></body></html>"
+    );
+    let mut response = (
+        status,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+/// Starts a Google authorization-code flow (D051). The client secret stays
+/// here; the app only receives the poll id and the consent page to open.
+pub async fn google_start(State(state): State<AppState>) -> Response {
+    let Some(google) = state.google() else {
+        return account_error(AccountError::Unavailable);
+    };
+    if !state.allow_auth("google-start") {
+        return account_error(AccountError::TooManyRequests);
+    }
+    let Some(started) = state.google_flows().start(state.now_ms()) else {
+        return account_error(AccountError::TooManyRequests);
+    };
+    json(&serde_json::json!({
+        "flowId": started.flow_id,
+        "authUrl": google.auth_url(&started.state, &started.challenge),
+        "intervalSeconds": crate::google::FLOW_INTERVAL_SECONDS,
+        "expiresInSeconds": crate::google::FLOW_TTL_MS / 1000,
+    }))
+}
+
+/// Google redirects the browser here after consent. The exchange and profile
+/// lookup run outside the database lock, exactly like the GitHub poll.
+pub async fn google_callback(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if state.google().is_none() {
+        return html_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "登录不可用",
+            "服务器还没有配置 Google 登录。",
+        );
+    }
+    let flow_state = params.get("state").map(String::as_str).unwrap_or_default();
+    if flow_state.is_empty() || flow_state.len() > 256 {
+        return html_page(
+            StatusCode::BAD_REQUEST,
+            "登录没有完成",
+            "授权信息不对，请回到 TokenLens 重新开始。",
+        );
+    }
+    if let Some(error) = params.get("error") {
+        let (outcome, message) = if error == "access_denied" {
+            (
+                crate::google::Outcome::Denied,
+                "你取消了授权。请回到 TokenLens 重新开始。",
+            )
+        } else {
+            (
+                crate::google::Outcome::Failed,
+                "Google 授权没有成功，请回到 TokenLens 重试。",
+            )
+        };
+        state
+            .google_flows()
+            .complete(flow_state, outcome, state.now_ms());
+        return html_page(StatusCode::OK, "登录没有完成", message);
+    }
+    let Some(code) = params
+        .get("code")
+        .filter(|code| !code.is_empty() && code.len() <= 2048)
+    else {
+        return html_page(
+            StatusCode::BAD_REQUEST,
+            "登录没有完成",
+            "授权信息不对，请回到 TokenLens 重新开始。",
+        );
+    };
+    let Some(verifier) = state.google_flows().verifier(flow_state, state.now_ms()) else {
+        return html_page(
+            StatusCode::BAD_REQUEST,
+            "登录没有完成",
+            "授权已过期或不存在，请回到 TokenLens 重新开始。",
+        );
+    };
+    let Some(google) = state.google() else {
+        return html_page(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "登录不可用",
+            "服务器还没有配置 Google 登录。",
+        );
+    };
+    let identity = google
+        .exchange(code, &verifier)
+        .and_then(|token| google.identity(&token));
+    let Ok(identity) = identity else {
+        state
+            .google_flows()
+            .complete(flow_state, crate::google::Outcome::Failed, state.now_ms());
+        return html_page(
+            StatusCode::OK,
+            "登录没有完成",
+            "Google 授权没有成功，请回到 TokenLens 重试。",
+        );
+    };
+    let outcome = {
+        let Ok(db) = state.db_handle() else {
+            return ApiError::Internal.into_response();
+        };
+        let Ok(mut conn) = db.lock() else {
+            return ApiError::Internal.into_response();
+        };
+        accounts::login_with_identity(
+            &mut conn,
+            "google",
+            &identity.subject,
+            &identity.email,
+            identity.display_name.as_deref(),
+            identity.avatar_url.as_deref(),
+            state.now_ms(),
+        )
+    };
+    match outcome {
+        Ok(login) => {
+            state.google_flows().complete(
+                flow_state,
+                crate::google::Outcome::Ready {
+                    session: login.session,
+                    email: login.account.email,
+                    display_name: identity.display_name,
+                    avatar_url: identity.avatar_url,
+                },
+                state.now_ms(),
+            );
+            html_page(
+                StatusCode::OK,
+                "登录成功",
+                "请回到 TokenLens 应用，登录会自动完成。",
+            )
+        }
+        Err(_) => {
+            state.google_flows().complete(
+                flow_state,
+                crate::google::Outcome::Failed,
+                state.now_ms(),
+            );
+            html_page(
+                StatusCode::OK,
+                "登录没有完成",
+                "Google 授权没有成功，请回到 TokenLens 重试。",
+            )
+        }
+    }
+}
+
+/// One poll of a started Google flow. The session is delivered once.
+pub async fn google_poll(State(state): State<AppState>, body: Body) -> Response {
+    if state.google().is_none() {
+        return account_error(AccountError::Unavailable);
+    }
+    let Ok(bytes) = read_body(body).await else {
+        return ApiError::BadRequest.into_response();
+    };
+    let Ok(request) = serde_json::from_slice::<GooglePollRequest>(&bytes) else {
+        return ApiError::BadRequest.into_response();
+    };
+    if request.flow_id.is_empty() || request.flow_id.len() > 256 {
+        return ApiError::BadRequest.into_response();
+    }
+    match state.google_flows().poll(&request.flow_id, state.now_ms()) {
+        crate::google::FlowPoll::Pending => json(&serde_json::json!({ "status": "pending" })),
+        crate::google::FlowPoll::Denied => json(&serde_json::json!({ "status": "denied" })),
+        crate::google::FlowPoll::Failed => json(&serde_json::json!({ "status": "failed" })),
+        crate::google::FlowPoll::Expired => json(&serde_json::json!({ "status": "expired" })),
+        crate::google::FlowPoll::Ready {
+            session,
+            email,
+            display_name,
+            avatar_url,
+        } => json(&serde_json::json!({
+            "status": "ok",
+            "email": email,
+            "spaceName": "我的空间",
+            "session": session.expose(),
+            "provider": "google",
+            "displayName": display_name,
+            "avatarUrl": avatar_url,
+        })),
     }
 }

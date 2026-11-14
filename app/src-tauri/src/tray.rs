@@ -361,6 +361,7 @@ mod tests {
             platform: "macos",
             cloud_server: crate::account::CLOUD_URL,
             account_email: None,
+            account_provider: None,
             account_display_name: None,
             account_avatar_url: None,
             account_space: None,

@@ -277,6 +277,8 @@ export interface AppStatus {
   cloudServer: string;
   /** Signed-in account email, or null when this computer is not signed in. */
   accountEmail: string | null;
+  /** Sign-in method ("github"/"google") when the server reports one (D051). */
+  accountProvider: string | null;
   accountDisplayName: string | null;
   accountAvatarUrl: string | null;
   /** Name of the signed-in space. */

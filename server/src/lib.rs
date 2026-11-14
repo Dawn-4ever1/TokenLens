@@ -6,6 +6,7 @@ pub mod clock;
 pub mod dashboard;
 pub mod db;
 pub mod github;
+pub mod google;
 pub mod http;
 pub mod limiter;
 pub mod mailer;

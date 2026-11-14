@@ -52,6 +52,8 @@ pub struct AppState {
     pricer: Arc<RwLock<Option<Arc<Pricer>>>>,
     pairing_cipher: Option<Result<crate::pairing_crypto::PairingCipher, &'static str>>,
     github: Option<std::sync::Arc<crate::github::GitHub>>,
+    google: Option<std::sync::Arc<crate::google::Google>>,
+    google_flows: Arc<crate::google::GoogleFlows>,
     auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
 }
 
@@ -67,6 +69,8 @@ impl AppState {
             pricer: Arc::new(RwLock::new(None)),
             pairing_cipher: None,
             github: None,
+            google: None,
+            google_flows: Arc::new(crate::google::GoogleFlows::default()),
             auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
         }
     }
@@ -91,6 +95,20 @@ impl AppState {
 
     pub fn github(&self) -> Option<std::sync::Arc<crate::github::GitHub>> {
         self.github.clone()
+    }
+
+    #[must_use]
+    pub fn with_google(mut self, google: crate::google::Google) -> Self {
+        self.google = Some(std::sync::Arc::new(google));
+        self
+    }
+
+    pub fn google(&self) -> Option<std::sync::Arc<crate::google::Google>> {
+        self.google.clone()
+    }
+
+    pub fn google_flows(&self) -> Arc<crate::google::GoogleFlows> {
+        Arc::clone(&self.google_flows)
     }
 
     pub fn db_handle(&self) -> Result<Arc<Mutex<Connection>>, ApiError> {
@@ -279,6 +297,15 @@ pub fn router(state: AppState) -> Router {
             post(crate::auth_http::github_start),
         )
         .route("/api/auth/github/poll", post(crate::auth_http::github_poll))
+        .route(
+            "/api/auth/google/start",
+            post(crate::auth_http::google_start),
+        )
+        .route("/api/auth/google/poll", post(crate::auth_http::google_poll))
+        .route(
+            "/api/auth/google/callback",
+            get(crate::auth_http::google_callback),
+        )
         .route(
             "/api/account/pair-code",
             get(crate::auth_http::pairing_code).post(crate::auth_http::pairing_code),
