@@ -846,24 +846,47 @@ pub async fn poll_github_login(
     .await
 }
 
+/// The GitHub device page is the only GitHub address this app opens.
+fn github_device_url_allowed(url: &str) -> bool {
+    url == "https://github.com/login/device" || url.starts_with("https://github.com/login/device?")
+}
+
+/// The Google consent page is the only Google address this app opens.
+fn google_auth_url_allowed(url: &str) -> bool {
+    url.starts_with("https://accounts.google.com/")
+}
+
+/// Opens an allowlisted address in the system browser. Windows must not go
+/// through `cmd /C start`: cmd splits its command line at `&`, which silently
+/// truncates OAuth URLs at their first query separator (D051 hotfix). The
+/// `explorer` helper takes the address as one argument and hands it to the
+/// default browser without any shell parsing.
+#[cfg(target_os = "macos")]
+fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("open").arg(url).status()
+}
+
+#[cfg(target_os = "windows")]
+fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
+    // explorer may report a non-zero exit code even when the browser opens;
+    // only the spawn result matters here.
+    std::process::Command::new("explorer").arg(url).status()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("xdg-open").arg(url).status()
+}
+
 /// Opens the GitHub verification page in the system browser. Only that one
 /// address is allowed, so this cannot become a general URL opener.
 #[tauri::command]
 pub async fn open_github_device_page(app: AppHandle, url: String) -> CmdResult<()> {
-    if !url.starts_with("https://github.com/login/device") {
+    if !github_device_url_allowed(&url) {
         return Err(CommandError::new("bad_request"));
     }
     blocking(app, move |_app| {
-        #[cfg(target_os = "macos")]
-        let opened = std::process::Command::new("open").arg(&url).status();
-        #[cfg(target_os = "windows")]
-        let opened = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&url)
-            .status();
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let opened = std::process::Command::new("xdg-open").arg(&url).status();
-        opened.map_err(|_| CommandError::new("server"))?;
+        browser_command(&url).map_err(|_| CommandError::new("server"))?;
         Ok(())
     })
     .await
@@ -932,20 +955,11 @@ pub async fn poll_google_login(
 /// allowed, so this cannot become a general URL opener.
 #[tauri::command]
 pub async fn open_google_auth_page(app: AppHandle, url: String) -> CmdResult<()> {
-    if !url.starts_with("https://accounts.google.com/") {
+    if !google_auth_url_allowed(&url) {
         return Err(CommandError::new("bad_request"));
     }
     blocking(app, move |_app| {
-        #[cfg(target_os = "macos")]
-        let opened = std::process::Command::new("open").arg(&url).status();
-        #[cfg(target_os = "windows")]
-        let opened = std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(&url)
-            .status();
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        let opened = std::process::Command::new("xdg-open").arg(&url).status();
-        opened.map_err(|_| CommandError::new("server"))?;
+        browser_command(&url).map_err(|_| CommandError::new("server"))?;
         Ok(())
     })
     .await
@@ -1610,6 +1624,30 @@ mod tests {
         assert!(state.server_credentials().is_none());
         assert_eq!(status(&app).mode, Some("local"));
         assert_eq!(status(&app).device_id, Some(local.device_id));
+    }
+
+    #[test]
+    fn oauth_urls_keep_their_query_parameters_and_pass_the_allowlist() {
+        // The server builds these addresses. The Windows opener once went
+        // through cmd.exe, which split the query at the first `&` and dropped
+        // `response_type` (D051 hotfix); pin the full shape and the allowlist.
+        let google = "https://accounts.google.com/o/oauth2/v2/auth?client_id=abc\
+            &redirect_uri=https%3A%2F%2Ftokenlens.online%2Fapi%2Fauth%2Fgoogle%2Fcallback\
+            &response_type=code&scope=openid+email+profile&state=xyz\
+            &code_challenge=abc&code_challenge_method=S256&prompt=select_account";
+        assert!(google_auth_url_allowed(google));
+        assert!(google.contains("response_type=code"));
+        assert!(github_device_url_allowed("https://github.com/login/device"));
+        for bad in [
+            "https://accounts.google.com.evil.example/o/oauth2/v2/auth",
+            "https://example.com/https://accounts.google.com/",
+            "http://accounts.google.com/o/oauth2/v2/auth",
+            "https://github.com/login/device.evil.example",
+            "https://github.com.evil.example/login/device",
+        ] {
+            assert!(!google_auth_url_allowed(bad), "{bad}");
+            assert!(!github_device_url_allowed(bad), "{bad}");
+        }
     }
 
     #[test]
