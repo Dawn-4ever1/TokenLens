@@ -54,6 +54,7 @@ pub struct AppState {
     github: Option<std::sync::Arc<crate::github::GitHub>>,
     google: Option<std::sync::Arc<crate::google::Google>>,
     google_flows: Arc<crate::google::GoogleFlows>,
+    avatar_data: Arc<crate::avatar_data::AvatarData>,
     auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
 }
 
@@ -71,6 +72,7 @@ impl AppState {
             github: None,
             google: None,
             google_flows: Arc::new(crate::google::GoogleFlows::default()),
+            avatar_data: Arc::new(crate::avatar_data::AvatarData::new()),
             auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
         }
     }
@@ -109,6 +111,10 @@ impl AppState {
 
     pub fn google_flows(&self) -> Arc<crate::google::GoogleFlows> {
         Arc::clone(&self.google_flows)
+    }
+
+    pub fn avatar_data(&self) -> Arc<crate::avatar_data::AvatarData> {
+        Arc::clone(&self.avatar_data)
     }
 
     pub fn db_handle(&self) -> Result<Arc<Mutex<Connection>>, ApiError> {
@@ -311,6 +317,7 @@ pub fn router(state: AppState) -> Router {
             get(crate::auth_http::pairing_code).post(crate::auth_http::pairing_code),
         )
         .route("/api/account/devices", post(crate::auth_http::pair_device))
+        .route("/api/account/avatar", get(crate::auth_http::account_avatar))
         .route("/api/pair/claim", post(pair_claim))
         .route("/api/pair/codes", post(pair_codes))
         .route("/api/ingest/events", post(ingest_events))

@@ -311,8 +311,9 @@ test("Google sign-in finishes in the browser without any code or email", async (
   // The mock approves on the second poll, so the dialog closes by itself.
   await expect(dialog).toBeHidden({ timeout: 15_000 });
   await settle(page, "设备");
-  const account = page.getByRole("button", { name: "Google 账号 G User，退出登录", exact: true });
+  const account = page.getByRole("group", { name: "Google 账号 G User", exact: true });
   await expect(account).toBeVisible();
+  await expect(account).toContainText("G User");
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
   // The session and profile never reach web storage or the URL.
   const stored = await page.evaluate(() => JSON.stringify({
@@ -350,7 +351,7 @@ test("the sidebar shows one sign-in entry, then the GitHub username and avatar",
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
   await expect(dialog).toBeHidden({ timeout: 15_000 });
-  const account = page.getByRole("button", { name: "GitHub 账号 octocat，退出登录", exact: true });
+  const account = page.getByRole("group", { name: "GitHub 账号 octocat", exact: true });
   await expect(account).toBeVisible();
   await expect(account.locator("img")).toHaveAttribute("src", avatar);
   await expect(account).toContainText("octocat");
@@ -371,17 +372,49 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   await dialog.getByLabel("验证码", { exact: true }).fill("123456");
   await dialog.getByRole("button", { name: "登录并连接", exact: true }).click();
   await expect(dialog).toBeHidden();
-  const account = page.getByRole("button", { name: "账号 member@example.com，退出登录", exact: true });
+  const account = page.getByRole("group", { name: "账号 member@example.com", exact: true });
   await expect(account).toBeVisible();
   await expect(account).toContainText("member@example.com");
   await expect(signIn).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /^GitHub 账号/ })).toHaveCount(0);
-  await account.click();
+  await expect(page.getByText(/^GitHub 账号/)).toHaveCount(0);
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
   await expect(account).toHaveCount(0);
   await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: /^Tokens ·/ })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("clicking the account name never signs out; log-out asks for confirmation", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 800 });
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  const account = page.getByRole("group", { name: "账号 user@example.com", exact: true });
+  await expect(account).toBeVisible();
+  // Clicking the avatar or the name must neither sign out nor open a dialog.
+  await account.getByText("user@example.com", { exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(account).toBeVisible();
+  // Only the small log-out button starts the flow, and it asks first.
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  const confirm = page.getByRole("dialog");
+  await expect(confirm).toBeVisible();
+  await expect(confirm).toContainText("退出后，这台电脑会继续采集用量");
+  await confirm.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(confirm).toBeHidden();
+  await expect(account).toBeVisible();
+  // Confirming signs out; collection keeps running.
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "登录，同步多台设备", exact: true })).toBeVisible();
+  await expect(account).toHaveCount(0);
+  await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -413,11 +446,12 @@ test("GitHub sign-in against an older server stays signed in without profile fie
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
   await expect(dialog).toBeHidden({ timeout: 15_000 });
-  const account = page.getByRole("button", { name: "账号 octo@example.com，退出登录", exact: true });
+  const account = page.getByRole("group", { name: "账号 octo@example.com", exact: true });
   await expect(account).toBeVisible();
   await expect(signIn).toHaveCount(0);
   // The collapsed sidebar still exposes a named, usable sign-out control.
-  await account.click();
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
   await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
   expect(errors).toEqual([]);

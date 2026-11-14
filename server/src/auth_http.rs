@@ -341,6 +341,40 @@ pub async fn pair_device(
     }
 }
 
+/// The signed-in account's public avatar, fetched server-side (T31 follow-up):
+/// some networks cannot reach Google's picture hosts directly, while the app
+/// always reaches this server. Only the stored, validated provider URL is
+/// fetched, bounded and cached in memory.
+pub async fn account_avatar(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let account = match authorized_account(&state, &headers) {
+        Ok(account) => account,
+        Err(error) => return error.into_response(),
+    };
+    let profile = {
+        let Ok(db) = state.db_handle() else {
+            return ApiError::Internal.into_response();
+        };
+        let Ok(conn) = db.lock() else {
+            return ApiError::Internal.into_response();
+        };
+        accounts::identity_profile(&conn, &account.id)
+            .ok()
+            .flatten()
+    };
+    let Some((_, _, Some(url))) = profile else {
+        return ApiError::NotFound.into_response();
+    };
+    let Some((bytes, mime)) = state.avatar_data().image(&url, state.now_ms()) else {
+        return ApiError::NotFound.into_response();
+    };
+    let mut response = (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, max-age=3600"),
+    );
+    response
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct GitHubPollRequest {

@@ -119,6 +119,25 @@ fn avatar_config(https_only: bool) -> ureq::config::Config {
         .build()
 }
 
+/// Turns validated image bytes into the inline data URL the WebView may show.
+fn avatar_body_data_url(body: &[u8]) -> Option<String> {
+    if body.len() > MAX_AVATAR_BYTES as usize {
+        return None;
+    }
+    let mime = if body.starts_with(b"\x89PNG\r\n\x1a\n") {
+        "image/png"
+    } else if body.starts_with(b"\xff\xd8\xff") {
+        "image/jpeg"
+    } else if body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a") {
+        "image/gif"
+    } else if body.starts_with(b"RIFF") && body.get(8..12) == Some(b"WEBP") {
+        "image/webp"
+    } else {
+        return None;
+    };
+    Some(format!("data:{mime};base64,{}", STANDARD.encode(body)))
+}
+
 fn download_avatar(agent: &ureq::Agent, url: &str) -> Option<String> {
     let mut response = agent
         .get(url)
@@ -149,14 +168,22 @@ fn download_avatar(agent: &ureq::Agent, url: &str) -> Option<String> {
         .limit(MAX_AVATAR_BYTES)
         .read_to_vec()
         .ok()?;
-    let raster = match mime.as_str() {
-        "image/png" => body.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => body.starts_with(b"\xff\xd8\xff"),
-        "image/gif" => body.starts_with(b"GIF87a") || body.starts_with(b"GIF89a"),
-        "image/webp" => body.starts_with(b"RIFF") && body.get(8..12) == Some(b"WEBP"),
-        _ => false,
-    };
-    raster.then(|| format!("data:{mime};base64,{}", STANDARD.encode(body)))
+    avatar_body_data_url(&body)
+}
+
+/// Downloads the signed-in account's avatar from our own server, which can
+/// reach the provider even when this computer cannot (T31 follow-up: Google's
+/// picture hosts are unreachable on some networks while the browser can use a
+/// proxy). Older servers answer 404 and the caller falls back to a direct
+/// download.
+fn remote_avatar_data_url(server: &str, session: &str) -> Option<String> {
+    let response = UreqTransport::new()
+        .get(&format!("{server}/api/account/avatar"), Some(session))
+        .ok()?;
+    if response.status != 200 {
+        return None;
+    }
+    avatar_body_data_url(&response.body)
 }
 
 fn keyring_entry(service: &str) -> Result<keyring::Entry, CommandError> {
@@ -266,14 +293,28 @@ pub fn login(server: &str, email: &str, code: &str) -> CmdResult<SignedIn> {
         .ok_or(CommandError::new("server"))?
         .to_owned();
     let provider = body["provider"].as_str().map(str::to_owned);
+    let avatar_url = preferred_avatar(&server, &session, &body, provider.as_deref());
     Ok(SignedIn {
         session,
         email: body["email"].as_str().unwrap_or(&email).to_owned(),
         space_name: body["spaceName"].as_str().unwrap_or("我的空间").to_owned(),
-        avatar_url: avatar_data_url(&body["avatarUrl"], provider.as_deref()),
+        avatar_url,
         provider,
         display_name: body["displayName"].as_str().map(str::to_owned),
     })
+}
+
+/// Avatar preference: our own server first (reachable even when the provider
+/// is not), then a direct provider download for servers without the endpoint.
+fn preferred_avatar(
+    server: &str,
+    session: &str,
+    body: &Value,
+    provider: Option<&str>,
+) -> Option<String> {
+    body["avatarUrl"].as_str()?;
+    remote_avatar_data_url(server, session)
+        .or_else(|| avatar_data_url(&body["avatarUrl"], provider))
 }
 
 fn session_get(server: &str, session: &str, path: &str) -> CmdResult<Value> {
@@ -307,11 +348,12 @@ pub fn account_info(server: &str, session: &str) -> CmdResult<AccountProfile> {
         .map(str::to_owned)
         .ok_or(CommandError::new("server"))?;
     let provider = body["provider"].as_str().map(str::to_owned);
+    let avatar_url = preferred_avatar(server, session, &body, provider.as_deref());
     Ok((
         email,
-        provider.clone(),
+        provider,
         body["displayName"].as_str().map(str::to_owned),
-        avatar_data_url(&body["avatarUrl"], provider.as_deref()),
+        avatar_url,
     ))
 }
 
@@ -426,23 +468,25 @@ pub fn github_poll(server: &str, device_code: &str) -> CmdResult<GitHubPoll> {
         "slow_down" => GitHubPoll::SlowDown(body["retryAfterSeconds"].as_u64().unwrap_or(5)),
         "expired" => GitHubPoll::Expired,
         "denied" => GitHubPoll::Denied,
-        "ok" => GitHubPoll::SignedIn(signed_in_from(&body)?),
+        "ok" => GitHubPoll::SignedIn(signed_in_from(&server, &body)?),
         _ => GitHubPoll::Failed,
     })
 }
 
 /// Parses a successful provider sign-in reply (GitHub or Google).
-fn signed_in_from(body: &Value) -> CmdResult<SignedIn> {
+fn signed_in_from(server: &str, body: &Value) -> CmdResult<SignedIn> {
+    let session = body["session"]
+        .as_str()
+        .filter(|value| value.starts_with("tls_"))
+        .ok_or(CommandError::new("server"))?
+        .to_owned();
     let provider = body["provider"].as_str().map(str::to_owned);
+    let avatar_url = preferred_avatar(server, &session, body, provider.as_deref());
     Ok(SignedIn {
-        session: body["session"]
-            .as_str()
-            .filter(|value| value.starts_with("tls_"))
-            .ok_or(CommandError::new("server"))?
-            .to_owned(),
+        session,
         email: body["email"].as_str().unwrap_or_default().to_owned(),
         space_name: body["spaceName"].as_str().unwrap_or("我的空间").to_owned(),
-        avatar_url: avatar_data_url(&body["avatarUrl"], provider.as_deref()),
+        avatar_url,
         provider,
         display_name: body["displayName"].as_str().map(str::to_owned),
     })
@@ -504,7 +548,7 @@ pub fn google_poll(server: &str, flow_id: &str) -> CmdResult<GooglePoll> {
         "pending" => GooglePoll::Pending,
         "expired" => GooglePoll::Expired,
         "denied" => GooglePoll::Denied,
-        "ok" => GooglePoll::SignedIn(signed_in_from(&body)?),
+        "ok" => GooglePoll::SignedIn(signed_in_from(&server, &body)?),
         _ => GooglePoll::Failed,
     })
 }
@@ -637,6 +681,28 @@ mod tests {
             .is_none(),
             "a GitHub avatar must not pass the Google allowlist"
         );
+    }
+
+    #[test]
+    fn server_avatar_bytes_become_a_bounded_raster_data_url() {
+        let png = STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aPa0AAAAASUVORK5CYII=")
+            .expect("PNG fixture");
+        assert_eq!(
+            avatar_body_data_url(&png),
+            Some(format!("data:image/png;base64,{}", STANDARD.encode(&png)))
+        );
+        assert!(
+            avatar_body_data_url(b"\xff\xd8\xff\xe0fixture")
+                .is_some_and(|url| url.starts_with("data:image/jpeg;base64,"))
+        );
+        for body in [b"<svg/>".to_vec(), b"<script>".to_vec(), {
+            let mut bytes = png.clone();
+            bytes.resize(MAX_AVATAR_BYTES as usize + 1, 0);
+            bytes
+        }] {
+            assert!(avatar_body_data_url(&body).is_none());
+        }
     }
 
     #[test]

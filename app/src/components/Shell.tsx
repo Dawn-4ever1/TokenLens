@@ -9,7 +9,7 @@ import { AppMark } from "./AppMark";
 import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
-import { Badge, StatusDot, Tip, cn } from "./ui";
+import { Badge, Button, Dialog, StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
 import { ConnectServer } from "@/pages/Pairing";
 
@@ -159,25 +159,62 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
     : provider === "github" ? `GitHub 账号 ${name}`
     : `账号 ${name}`;
   const [imageFailed, setImageFailed] = useState(false);
+  const [confirming, setConfirming] = useState(false);
   if (name) {
     return (
       <div className="px-1">
-        <Tip content={`${accountLabel}；点击退出登录，本机采集继续`} side="right">
-          <button
-            type="button"
-            aria-label={`${accountLabel}，退出登录`}
-            disabled={busy}
-            onClick={() => void onSignOut()}
-            className="group flex min-h-10 w-full items-center justify-center gap-2 rounded-lg px-2 text-left hover:bg-surface min-[1100px]:justify-start"
-          >
-            {status?.accountAvatarUrl && !imageFailed ? (
-              <img src={status.accountAvatarUrl} alt="" className="h-6 w-6 shrink-0 rounded-full" onError={() => setImageFailed(true)} />
-            ) : <UserRound className="h-5 w-5 shrink-0 text-ink-2" aria-hidden />}
-            <span className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
-            <LogOut className="hidden h-3.5 w-3.5 shrink-0 text-ink-3 min-[1100px]:block" aria-hidden />
-          </button>
-        </Tip>
+        {/* The avatar and name are display-only: only the small log-out
+            button can sign out, and it always asks for confirmation. */}
+        <div
+          role="group"
+          aria-label={accountLabel}
+          className="group flex min-h-10 w-full items-center justify-center gap-0 rounded-lg px-1 min-[1100px]:justify-start min-[1100px]:gap-2 min-[1100px]:px-2"
+        >
+          <Tip content={accountLabel} side="right">
+            <span className="flex min-w-0 items-center min-[1100px]:gap-2">
+              {status?.accountAvatarUrl && !imageFailed ? (
+                <img
+                  src={status.accountAvatarUrl}
+                  alt=""
+                  className="h-5 w-5 shrink-0 rounded-full min-[1100px]:h-6 min-[1100px]:w-6"
+                  onError={() => setImageFailed(true)}
+                />
+              ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
+              <span className="hidden min-w-0 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+            </span>
+          </Tip>
+          <Tip content="退出登录" side="right">
+            <button
+              type="button"
+              aria-label="退出登录"
+              disabled={busy}
+              onClick={() => setConfirming(true)}
+              className="shrink-0 rounded-md p-0.5 text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:opacity-50 min-[1100px]:p-1"
+            >
+              <LogOut className="h-3 w-3 min-[1100px]:h-3.5 min-[1100px]:w-3.5" aria-hidden />
+            </button>
+          </Tip>
+        </div>
         {error && <p role="alert" className="px-2 pt-1 text-[11px] leading-4 text-bad">{error}</p>}
+        <Dialog
+          open={confirming}
+          onOpenChange={(next) => { if (!busy) setConfirming(next); }}
+          title="退出登录"
+        >
+          <div className="space-y-4">
+            <p className="text-sm leading-6 text-ink-2">退出后，这台电脑会继续采集用量；同步、配对码等账号功能需要重新登录才能使用。</p>
+            <div className="flex justify-end gap-2">
+              <Button variant="ghost" onClick={() => setConfirming(false)}>取消</Button>
+              <Button
+                variant="danger"
+                disabled={busy}
+                onClick={() => { setConfirming(false); void onSignOut(); }}
+              >
+                退出登录
+              </Button>
+            </div>
+          </div>
+        </Dialog>
       </div>
     );
   }

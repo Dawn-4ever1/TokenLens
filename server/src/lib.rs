@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod auth_http;
+pub mod avatar_data;
 pub mod clock;
 pub mod dashboard;
 pub mod db;
