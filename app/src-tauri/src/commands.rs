@@ -36,7 +36,6 @@ pub struct AppState {
     server_credentials: Mutex<Option<Credentials>>,
     #[cfg(test)]
     credential_override: Option<std::sync::Arc<collector_core::credentials::MemoryStore>>,
-    dashboard_mode: Mutex<String>,
     /// Account session and its email (D049); keychain-only, never reaches the
     /// WebView. Status polling reads the cached email without a request.
     account_session: Mutex<Option<String>>,
@@ -98,8 +97,6 @@ impl AppState {
                 }
             };
         let account_session = crate::account::load_session(&paths.keychain_service);
-        // Preserve the view of existing server users; new installs start locally.
-        let dashboard_mode = dashboard_mode(&paths.state_dir, server_credentials.is_some());
         Self {
             paths,
             collector,
@@ -110,7 +107,6 @@ impl AppState {
             server_credentials: Mutex::new(server_credentials),
             #[cfg(test)]
             credential_override,
-            dashboard_mode: Mutex::new(dashboard_mode.to_owned()),
             account_session: Mutex::new(account_session),
             account_email: Mutex::new(None),
             account_provider: Mutex::new(None),
@@ -124,13 +120,11 @@ impl AppState {
     }
 
     pub fn credentials(&self) -> Option<Credentials> {
-        if *lock(&self.dashboard_mode) == "server" {
-            // Server reads never fall back to a local credential. Otherwise a
-            // damaged remote queue could silently masquerade as local data.
-            self.server_credentials()
-        } else {
-            lock(&self.local_credentials).clone()
-        }
+        // The server is the complete view whenever connected; the local server
+        // is the complete view otherwise. Never fall back from a failing server
+        // to local credentials, which could silently masquerade as the same data.
+        self.server_credentials()
+            .or_else(|| lock(&self.local_credentials).clone())
     }
 
     fn server_credentials(&self) -> Option<Credentials> {
@@ -154,20 +148,6 @@ impl AppState {
     fn require_server(&self) -> CmdResult<Credentials> {
         self.server_credentials()
             .ok_or(CommandError::new("not_paired"))
-    }
-
-    fn select_dashboard(&self, mode: &str) -> CmdResult<()> {
-        if !matches!(mode, "local" | "server") {
-            return Err(CommandError::new("bad_request"));
-        }
-        if mode == "server" && self.server_credentials().is_none() {
-            return Err(CommandError::new("not_paired"));
-        }
-        std::fs::create_dir_all(&self.paths.state_dir)
-            .and_then(|()| std::fs::write(self.paths.state_dir.join("dashboard-mode"), mode))
-            .map_err(|_| CommandError::new("server"))?;
-        *lock(&self.dashboard_mode) = mode.to_owned();
-        Ok(())
     }
 
     fn save_server_credentials(
@@ -213,10 +193,11 @@ pub struct CollectorStatus {
 #[serde(rename_all = "camelCase")]
 pub struct AppStatus {
     pub paired: bool,
-    /// Selected dashboard source; collection always keeps a local copy (D048).
+    /// Active data source: the connected server includes all its devices,
+    /// while an unconnected app reads the local device (D053).
     pub mode: Option<&'static str>,
     pub device_id: Option<String>,
-    /// Connected server address, also present while viewing local data.
+    /// Connected server address, independent of dashboard read failures.
     pub server: Option<String>,
     pub app_version: String,
     pub collector: CollectorStatus,
@@ -399,11 +380,10 @@ fn forget_pairing<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<()> {
     if let Some(previous) = lock(&state.server_credentials).take() {
         remove_server_queue(&state.paths, &previous.device_id);
     }
-    let selected = state.select_dashboard("local");
     state.collector.reset();
     start_collector(app);
     changed(app, Poke::Paired);
-    selected
+    Ok(())
 }
 
 fn adopt<R: tauri::Runtime>(
@@ -424,17 +404,12 @@ fn adopt<R: tauri::Runtime>(
     state.collector.stop();
     state.collector.reset();
     *lock(&state.server_credentials) = Some(next);
-    let selected = if rotating {
-        Ok(())
-    } else {
-        state.select_dashboard("server")
-    };
     if saved.is_err() {
         state.collector.set_error(Some(KEYCHAIN_ERROR));
     }
     start_collector(app);
     changed(app, Poke::Paired);
-    saved.and(selected)
+    saved
 }
 
 fn legacy_queue_required(state_dir: &std::path::Path) -> bool {
@@ -498,17 +473,6 @@ fn initialize_local(
         return Err(CommandError::new("server"));
     }
     Ok(next)
-}
-
-fn dashboard_mode(state_dir: &std::path::Path, has_server: bool) -> &'static str {
-    match std::fs::read_to_string(state_dir.join("dashboard-mode"))
-        .ok()
-        .as_deref()
-    {
-        Some("local") => "local",
-        _ if has_server => "server",
-        _ => "local",
-    }
 }
 
 pub fn apply_paused(app: &AppHandle, paused: bool) -> CmdResult<AppStatus> {
@@ -1143,7 +1107,6 @@ pub async fn use_local_mode(
             *lock(&state.local_credentials) = Some(next);
             state.collector.set_error(None);
         }
-        state.select_dashboard("local")?;
         start_collector(app);
         if autostart {
             let _ = write_autostart(app, true);
@@ -1173,12 +1136,6 @@ fn remove_local_device_impl<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<
     local::delete_credentials(&state.paths.state_dir).map_err(|_| CommandError::new("server"))?;
     lock(&state.local_credentials).take();
     state.collector.stop();
-    match std::fs::remove_file(state.paths.state_dir.join("dashboard-mode")) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(_) => return Err(CommandError::new("server")),
-    }
-    *lock(&state.dashboard_mode) = String::new();
     std::fs::write(state.paths.paused_marker(), b"").map_err(|_| CommandError::new("server"))?;
     changed(app, Poke::Paired);
     Ok(status(app))
@@ -1187,18 +1144,6 @@ fn remove_local_device_impl<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<
 #[tauri::command]
 pub async fn remove_local_device(app: AppHandle) -> CmdResult<AppStatus> {
     blocking(app, remove_local_device_impl).await
-}
-
-#[tauri::command]
-pub async fn set_dashboard_mode(app: AppHandle, mode: String) -> CmdResult<AppStatus> {
-    blocking(app, move |app| {
-        let state = app.state::<AppState>();
-        let _connection = lock(&state.connection);
-        state.select_dashboard(&mode)?;
-        changed(app, Poke::Paired);
-        Ok(status(app))
-    })
-    .await
 }
 
 #[tauri::command]
@@ -1662,14 +1607,39 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_defaults_preserve_existing_server_users() {
+    fn dashboard_always_reads_the_complete_view() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(dashboard_mode(dir.path(), false), "local");
-        assert_eq!(dashboard_mode(dir.path(), true), "server");
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+        let local = state.require_credentials().unwrap();
+        let server = state
+            .remote
+            .local()
+            .unwrap()
+            .pair(FormFactor::Laptop, "Cloud")
+            .unwrap();
+        let server = Credentials {
+            server_url: "https://dash.example.com".into(),
+            ..server
+        };
+        *lock(&state.server_credentials) = Some(server.clone());
+        // A preference written by an older release must not revive a local-only
+        // view: the cloud view already includes this computer.
         std::fs::write(dir.path().join("dashboard-mode"), "local").unwrap();
-        assert_eq!(dashboard_mode(dir.path(), true), "local");
-        std::fs::write(dir.path().join("dashboard-mode"), "server").unwrap();
-        assert_eq!(dashboard_mode(dir.path(), false), "local");
+        assert_eq!(state.credentials().unwrap().device_id, server.device_id);
+        assert_eq!(status(&app).mode, Some("server"));
+        assert!(!local::is_local(&state.credentials().unwrap()));
+        *lock(&state.server_credentials) = None;
+        assert_eq!(state.credentials().unwrap().device_id, local.device_id);
+        assert_eq!(status(&app).mode, Some("local"));
     }
 
     #[test]
@@ -1747,7 +1717,6 @@ mod tests {
                 credential_override: Some(std::sync::Arc::new(
                     collector_core::credentials::MemoryStore::default(),
                 )),
-                dashboard_mode: Mutex::new("local".to_owned()),
                 account_session: Mutex::new(None),
                 account_email: Mutex::new(None),
                 account_provider: Mutex::new(None),

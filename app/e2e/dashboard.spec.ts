@@ -107,11 +107,33 @@ test("sidebar buttons are reachable by name when labels are collapsed", async ({
   expect(errors).toEqual([]);
 });
 
+test("overview prioritizes concise KPIs and a full-width trend", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const errors = await open(page);
+  await settle(page, "总览");
+  const kpis = page.getByTestId("overview-kpis");
+  await expect(kpis.locator("h2")).toHaveText(["Tokens", "成本", "缓存命中率", "会话"]);
+  await expect(page.getByText("成本为 API 等价估算", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("部分未定价", { exact: true })).toHaveCount(0);
+  await expect(kpis.getByText(/API 等价估算|不是账单|非缓存|今日|轮 ·/)).toHaveCount(0);
+  const bounds = async (title: string) => page.locator("section.card").filter({ has: page.getByRole("heading", { name: title, exact: true }) }).boundingBox();
+  const [tools, models, trend, composition, recent, devices] = await Promise.all(["工具", "模型", "趋势", "Token 构成", "最近会话", "设备"].map(bounds));
+  expect(tools!.y).toBe(models!.y);
+  expect(trend!.y).toBeGreaterThan(tools!.y + tools!.height);
+  expect(trend!.width).toBeGreaterThan(tools!.width * 1.8);
+  expect(composition!.y).toBeGreaterThan(trend!.y + trend!.height);
+  expect(recent!.y).toBe(devices!.y);
+  expect(recent!.y).toBeGreaterThan(composition!.y + composition!.height);
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
 test("overview marks Qoder numbers as estimated", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page);
   await settle(page, "总览");
-  await expect(page.getByText("含 Qoder 估算").first()).toBeVisible();
+  const qoder = page.getByRole("button", { name: /Qoder/ }).first();
+  await expect(qoder.getByText("估算", { exact: true })).toBeVisible();
 });
 
 for (const direction of ["editorial", "graphite", "paper"] as const) {
@@ -298,7 +320,7 @@ test("GitHub sign-in shows a device code and finishes without any email", async 
   // The mock approves on the second poll, so the dialog closes by itself.
   await expect(dialog).toBeHidden({ timeout: 15_000 });
   await settle(page, "设备");
-  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -320,7 +342,7 @@ test("Google sign-in finishes in the browser without any code or email", async (
   const account = page.getByRole("group", { name: "Google 账号 G User", exact: true });
   await expect(account).toBeVisible();
   await expect(account).toContainText("G User");
-  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
   // The session and profile never reach web storage or the URL.
   const stored = await page.evaluate(() => JSON.stringify({
     local: { ...localStorage }, session: { ...sessionStorage }, url: location.href, cookies: document.cookie,
@@ -535,9 +557,9 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
   await expect(account).toHaveCount(0);
-  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: /^Tokens ·/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -574,7 +596,7 @@ test("signing out and back in keeps the same cloud device and collection", async
   });
   expect(again).toBe(deviceId);
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
-  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -644,7 +666,7 @@ test("GitHub sign-in against an older server stays signed in without profile fie
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
-  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
@@ -652,7 +674,7 @@ test("first run opens local data directly without asking for a server or a mode"
   await page.setViewportSize({ width: 900, height: 800 });
   const errors = await open(page, { query: "" });
   await settle(page, "总览");
-  await expect(page.getByText("本机数据", { exact: true })).toBeVisible();
+  await expect(page.getByText("本机数据", { exact: true })).toHaveCount(0);
   await expect(page.getByLabel("服务器地址")).toHaveCount(0);
   await expect(page.getByLabel("配对码")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "开始使用 TokenLens" })).toHaveCount(0);
@@ -675,7 +697,7 @@ test("a failed or cancelled sign-in keeps local collection and data available", 
   await expect(dialog.getByRole("alert")).toContainText("连不上服务器");
   await dialog.getByRole("button", { name: "关闭对话框", exact: true }).click();
   await expect(dialog).toBeHidden();
-  await expect(page.getByText("本机数据", { exact: true })).toBeVisible();
+  await expect(page.getByText("本机数据", { exact: true })).toHaveCount(0);
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
@@ -688,7 +710,7 @@ test("a failed or cancelled sign-in keeps local collection and data available", 
   expect(errors).toEqual([]);
 });
 
-test("signing in from Devices allows local and all-device views, clears old filters and keeps both connected", async ({ page }) => {
+test("signing in from Devices shows every device without a redundant source switch", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 900 });
   const errors = await open(page, { view: "devices", query: "" });
   await settle(page, "设备");
@@ -697,25 +719,18 @@ test("signing in from Devices allows local and all-device views, clears old filt
   await signIn(dialog);
   await expect(dialog).toBeHidden();
   await settle(page, "设备");
-  const source = page.getByRole("group", { name: "查看范围", exact: true });
-  await expect(source.getByRole("button", { name: "全部设备", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Windows 台式机/ }).click();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
-  await source.getByRole("button", { name: "本机", exact: true }).click();
-  await settle(page, "设备");
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "复制配对码" })).toBeVisible();
   await expect(dialog.getByText("K7QM-4XPR", { exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
-  await source.getByRole("button", { name: "全部设备", exact: true }).click();
-  await settle(page, "设备");
-  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });
@@ -738,22 +753,23 @@ test("the device menu explains credentials and keeps removal in the cloud view",
   expect(errors).toEqual([]);
 });
 
-test("disconnecting from the local view preserves the local device and its history", async ({ page }) => {
+test("removing the current cloud device preserves the local device and its history", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page, { view: "devices", query: "?server" });
-  await settle(page, "设备");
-  await page.getByRole("group", { name: "查看范围" }).getByRole("button", { name: "本机", exact: true }).click();
   await settle(page, "设备");
   await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
   await expect(page.getByRole("button", { name: "重命名", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "更改设备性质", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "更换这台电脑的凭据", exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "断开服务器", exact: true }).click();
+  await expect(page.getByRole("button", { name: "更换这台电脑的凭据", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "移除设备", exact: true })).toBeVisible();
+  // Removing the current cloud device preserves the old explicit local fallback.
+  await page.getByRole("button", { name: "移除设备", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("本机记录和服务器上的历史用量都保留");
-  await dialog.getByRole("button", { name: "断开服务器", exact: true }).click();
+  await expect(dialog).toContainText("本机记录继续运行，已上传的历史用量保留");
+  await dialog.getByRole("button", { name: "移除", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
   await expect(page.getByRole("group", { name: "查看范围" })).toHaveCount(0);
   await page.getByRole("button", { name: "MacBook Pro 的操作", exact: true }).click();
   await expect(page.getByRole("button", { name: "移除设备", exact: true })).toBeVisible();
@@ -785,27 +801,35 @@ test("disconnecting a server returns to local data without stopping collection",
   await page.getByRole("button", { name: "断开服务器", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "断开服务器", exact: true }).click();
   await settle(page, "设置");
-  await expect(page.getByRole("main").getByText("本机数据", { exact: true })).toBeVisible();
-  await expect(page.getByText("后台采集中", { exact: true }).first()).toBeVisible();
   await expect(page.getByRole("button", { name: "连接服务器", exact: true })).toBeVisible();
+  await expect(page.getByText("本机数据", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("后台采集中", { exact: true }).first()).toBeVisible();
   expect(errors).toEqual([]);
 });
 
-test("server read failures leave Devices controls available so the user can view local data", async ({ page }) => {
+test("server read failures keep Devices controls available without a misleading local fallback", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 });
   const errors = await open(page, { view: "devices", query: "?offline" });
   await expect(page.getByText("连不上服务器").first()).toBeVisible();
   await expect(page.getByRole("button", { name: "添加设备", exact: true })).toBeVisible();
-  await page.getByRole("group", { name: "查看范围", exact: true }).getByRole("button", { name: "本机", exact: true }).click();
+  await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "重试", exact: true })).toBeVisible();
+  // An offline cloud view must never silently substitute a different local
+  // dashboard. Disconnecting explicitly returns to the preserved local copy.
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  await page.getByRole("button", { name: "断开服务器", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "断开服务器", exact: true }).click();
+  await page.getByRole("button", { name: "设备", exact: true }).click();
   await settle(page, "设备");
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
   await expect(page.getByText("连不上服务器")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "添加设备", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
-/** The headline token card; cost comes first on the overview. */
-const tokensKpi = (page: Page) => page.locator("section.card").filter({ hasText: "Tokens ·" });
+/** The first KPI shows tokens, without range labels or secondary notes. */
+const tokensKpi = (page: Page) => page.getByTestId("overview-kpis").locator("section.card").first();
 
 test("a drill-down shows its filter as a chip and is undone on the way back", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -819,7 +843,7 @@ test("a drill-down shows its filter as a chip and is undone on the way back", as
   await expect(page.getByRole("heading", { name: "会话", level: 1 })).toBeVisible();
   await expect(chips).toContainText("Claude Code");
   // Going back restores the unfiltered numbers.
-  await page.getByRole("button", { name: "总览" }).click();
+  await page.getByRole("button", { name: "总览", exact: true }).click();
   await expect(chips).toHaveCount(0);
   await expect(headline).toHaveText(whole);
   // A filter the user picks stays, is visible on every page, and one click removes it.
@@ -827,7 +851,7 @@ test("a drill-down shows its filter as a chip and is undone on the way back", as
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Codex/ }).click();
   await page.keyboard.press("Escape");
-  await page.getByRole("button", { name: "总览" }).click();
+  await page.getByRole("button", { name: "总览", exact: true }).click();
   await expect(chips).toContainText("Codex");
   await expect(headline).not.toHaveText(whole);
   await chips.getByRole("button", { name: "清除筛选" }).click();
@@ -847,7 +871,7 @@ test("clicking a token count switches every count to exact digits and remembers 
     await kpi.click();
     const exactKpi = tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true });
     await expect(exactKpi).toHaveText(/^\d{1,3}(,\d{3})+$/);
-    // Every other count follows, e.g. today's tokens under the headline.
+    // The headline follows the shared exact-number preference.
     await expect(tokensKpi(page).getByRole("button", { pressed: false })).toHaveCount(0);
     // Long exact counts must still fit their card.
     expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });

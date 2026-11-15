@@ -9,7 +9,7 @@ import { AppMark } from "./AppMark";
 import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
-import { Badge, Button, Dialog, StatusDot, Tip, cn } from "./ui";
+import { Button, Dialog, StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
 import { ConnectServer } from "@/pages/Pairing";
 
@@ -45,7 +45,6 @@ export function Shell() {
           <h1 data-tauri-drag-region className="display mr-auto text-xl text-ink">
             {title}
           </h1>
-          <Badge tone="neutral">{status?.mode === "server" ? "全部设备" : "本机数据"}</Badge>
           {FILTERED.includes(page) && (
             <div className="flex flex-wrap items-center gap-2">
               <RangePicker />

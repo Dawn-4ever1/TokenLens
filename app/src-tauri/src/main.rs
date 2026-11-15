@@ -103,7 +103,6 @@ fn main() {
             commands::poll_google_login,
             commands::open_google_auth_page,
             commands::logout_account,
-            commands::set_dashboard_mode,
             commands::use_local_mode,
             commands::unpair_device,
             commands::remove_local_device,

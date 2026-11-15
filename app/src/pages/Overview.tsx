@@ -2,15 +2,14 @@ import { ChevronRight } from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Chart, baseOption, type ChartOption } from "@/components/Chart";
 import { Composition } from "@/components/Composition";
-import { CaveatList, ClientName, Delta, LoadError, ModelName, Num, PrecisionBadge, ShareBar } from "@/components/common";
+import { ClientName, LoadError, ModelName, Num, PrecisionBadge, ShareBar } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, StatusDot, Tip, cn } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
-import { bucketLabel, compact, credits, exact, percent, relativeTime, share, usd } from "@/lib/format";
+import { bucketLabel, compact, exact, percent, relativeTime, share, usd } from "@/lib/format";
 import { clientColor, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
-import { useStatus } from "@/lib/status";
-import { daysBetween, previousSpan, rangeLabel, resolveRange, todayIn, type DateSpan } from "@/lib/range";
+import { daysBetween, resolveRange, todayIn, type DateSpan } from "@/lib/range";
 import type { Bucket, DeviceStatus, Devices, Point, SessionPage, Summary, Timeseries } from "@/lib/types";
 
 export function autoBucket(span: DateSpan, firstEventDate: string | undefined, today: string): Bucket {
@@ -26,11 +25,8 @@ export function autoBucket(span: DateSpan, firstEventDate: string | undefined, t
 export function Overview() {
   const { filters, timeZone, query, options } = useData();
   const span = resolveRange(filters, timeZone);
-  const prev = previousSpan(span);
   const q = query();
   const summary = useDashboard<Summary>("summary", q);
-  const previous = useDashboard<Summary>(prev ? "summary" : null, prev ? { ...q, from: prev.from, to: prev.to } : {});
-  const today = useDashboard<Summary>(filters.preset === "today" ? null : "summary", query({ preset: "today" }));
   const bucket = autoBucket(span, options?.firstEventDate, todayIn(timeZone));
   const trend = useDashboard<Timeseries>("timeseries", { ...q, bucket, groupBy: "none" });
   const recent = useDashboard<SessionPage>("sessions", { ...q, sort: "recent", limit: "5" });
@@ -41,74 +37,17 @@ export function Overview() {
     return <OverviewSkeleton />;
   }
   const s = summary.data;
-  const p = previous.data;
   const empty = s.messageCount === 0;
-  const label = rangeLabel(filters, span);
-  const todayTokens = filters.preset === "today" ? s.totalTokens : today.data?.totalTokens;
-  const nonCache = s.inputTokens + s.outputTokens + s.reasoningTokens;
 
   return (
     <div className="space-y-5">
       {summary.error ? <LoadError error={summary.error} onRetry={summary.reload} compact /> : null}
-      <CaveatList caveats={s.caveats} />
-      <div className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
-        <Kpi
-          label="成本"
-          value={<span className="num">{usd(s.costUsd)}</span>}
-          badge={
-            <Tip content={s.pricing ? `按 ${s.pricing.asOf} 的公开 API 价格折算，不是订阅或中转站账单` : "按公开 API 价格折算，不是订阅或中转站账单"}>
-              <span>
-                <Badge tone="accent">API 等价估算</Badge>
-              </span>
-            </Tip>
-          }
-          delta={<Delta current={s.costUsd} previous={p?.costUsd} />}
-          sub={
-            s.unpricedTokens > 0 ? (
-              <><Num value={s.unpricedTokens} className="text-ink-2" /> tokens 未定价，成本偏低</>
-            ) : s.credits !== null ? (
-              <>另有 Qoder {credits(s.credits)} credits，不折算美元</>
-            ) : (
-              "不是账单"
-            )
-          }
-        />
-        <Kpi
-          label={`Tokens · ${label}`}
-          value={<Num value={s.totalTokens} />}
-          badge={<PrecisionBadge precision={s.precision} />}
-          delta={<Delta current={s.totalTokens} previous={p?.totalTokens} />}
-          sub={
-            <>
-              {/* Fixed lines: toggling exact/compact changes digits in place
-                  instead of reflowing this row (the count used to wrap or slide
-                  across the card when the exact digits got longer). */}
-              <span className="block">非缓存 <Num value={nonCache} className="text-ink-2" /></span>
-              {todayTokens !== undefined && filters.preset !== "today" ? (
-                <span className="block">今日 <Num value={todayTokens} className="text-ink-2" /></span>
-              ) : null}
-            </>
-          }
-          hint="五类 token 相加，缓存读取通常占九成以上，不等于计费 token。「非缓存」= 输入 + 输出 + 推理"
-        />
-        <Kpi
-          label="缓存命中率"
-          value={<span className="num">{percent(s.cacheHitRate)}</span>}
-          delta={<Delta current={s.cacheHitRate} previous={p?.cacheHitRate} points />}
-          sub={<>缓存读取 <Num value={s.cacheReadTokens} className="text-ink-2" /></>}
-          hint="缓存读取 ÷（输入 + 缓存读取 + 缓存写入）"
-        />
-        <Kpi
-          label="会话"
-          value={<span className="num">{exact(s.sessionCount)}</span>}
-          delta={<Delta current={s.sessionCount} previous={p?.sessionCount} />}
-          sub={`${exact(s.turnCount)} 轮 · ${s.activeDays} 天有使用`}
-        />
+      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
+        <Kpi label="Tokens" value={<Num value={s.totalTokens} />} />
+        <Kpi label="成本" value={<span className="num">{usd(s.costUsd)}</span>} />
+        <Kpi label="缓存命中率" value={<span className="num">{percent(s.cacheHitRate)}</span>} />
+        <Kpi label="会话" value={<span className="num">{exact(s.sessionCount)}</span>} />
       </div>
-
-      <Card title="Token 构成" subtitle="五类互斥相加等于总量；缓存读取单独一条，其余四类放大显示" action={<PrecisionBadge precision={s.precision} />}>
-        <Composition value={s} />
-      </Card>
 
       {empty ? (
         <Card>
@@ -116,35 +55,29 @@ export function Overview() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-12 gap-4">
-            <TrendCard className="col-span-12 min-[1100px]:col-span-8" data={trend.data} error={trend.error} reload={trend.reload} bucket={bucket} />
-            <ToolCard className="col-span-12 min-[1100px]:col-span-4" summary={s} />
+          <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+            <ToolCard summary={s} />
+            <ModelCard summary={s} />
           </div>
-          <div className="grid grid-cols-12 gap-4">
-            <ModelCard className="col-span-12 min-[1100px]:col-span-7" summary={s} />
-            <RecentCard className="col-span-12 min-[1100px]:col-span-5" page={recent.data} error={recent.error} reload={recent.reload} />
-          </div>
+          <TrendCard data={trend.data} error={trend.error} reload={trend.reload} bucket={bucket} />
         </>
       )}
-      <DeviceStrip data={devices.data} error={devices.error} reload={devices.reload} />
+      <Card title="Token 构成" action={<PrecisionBadge precision={s.precision} />}>
+        <Composition value={s} />
+      </Card>
+      <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+        <RecentCard page={recent.data} error={recent.error} reload={recent.reload} />
+        <DeviceStrip data={devices.data} error={devices.error} reload={devices.reload} />
+      </div>
     </div>
   );
 }
 
-function Kpi({ label, value, sub, delta, badge, hint }: { label: string; value: ReactNode; sub?: ReactNode; delta?: ReactNode; badge?: ReactNode; hint?: string }) {
+function Kpi({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <section className="card min-w-0 px-5 py-4">
-      <div className="flex items-center justify-between gap-2">
-        <Tip content={hint}>
-          <h2 className="truncate text-xs font-medium text-ink-3">{label}</h2>
-        </Tip>
-        {badge}
-      </div>
-      <div className="display num-fit mt-2 text-[30px] leading-9 text-ink min-[1300px]:text-[34px]">{value}</div>
-      <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-ink-3">
-        {delta}
-        {sub && <span className="min-w-0">{sub}</span>}
-      </div>
+    <section className="card min-w-0 px-5 py-5">
+      <h2 className="truncate text-sm font-semibold text-ink">{label}</h2>
+      <div className="display num-fit mt-3 text-[32px] leading-10 text-ink min-[1300px]:text-[36px]">{value}</div>
     </section>
   );
 }
@@ -162,7 +95,7 @@ function pointValue(point: Point, mode: TrendMode): number {
   }
 }
 
-function TrendCard({ data, error, reload, bucket, className }: { data: Timeseries | null; error: unknown; reload: () => void; bucket: Bucket; className?: string }) {
+function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; error: unknown; reload: () => void; bucket: Bucket }) {
   const [mode, setMode] = useState<TrendMode>("total");
   const values = useMemo(() => {
     if (!data) return [];
@@ -222,7 +155,6 @@ function TrendCard({ data, error, reload, bucket, className }: { data: Timeserie
   const unit = { hour: "每小时", day: "每天", week: "每周", month: "每月" }[data?.bucket ?? bucket];
   return (
     <Card
-      className={className}
       bodyClassName="flex flex-col"
       title="趋势"
       subtitle={`${unit}${mode === "cost" ? "成本（API 等价估算）" : mode === "nonCache" ? "非缓存 tokens（输入 + 输出 + 推理）" : "总 tokens"}`}
@@ -253,16 +185,16 @@ function TrendCard({ data, error, reload, bucket, className }: { data: Timeserie
   );
 }
 
-function ToolCard({ summary, className }: { summary: Summary; className?: string }) {
+function ToolCard({ summary }: { summary: Summary }) {
   const { go } = useNav();
   const rows = summary.byClient.slice(0, 8);
   const max = Math.max(0, ...rows.map((row) => row.totalTokens));
   return (
-    <Card className={className} title="工具" subtitle="点击查看该工具的会话">
+    <Card title="工具" subtitle="点击查看该工具的会话">
       {rows.length === 0 ? (
         <EmptyState title="没有工具数据" />
       ) : (
-        <ul className="-mx-2 grid grid-cols-1 gap-x-6 gap-y-0.5 min-[700px]:grid-cols-2 min-[1100px]:grid-cols-1">
+        <ul className="-mx-2 grid grid-cols-1 gap-x-6 gap-y-0.5 min-[700px]:grid-cols-2">
           {rows.map((row) => {
             const clickable = row.key !== OTHER_KEY;
             return (
@@ -295,11 +227,11 @@ function ToolCard({ summary, className }: { summary: Summary; className?: string
   );
 }
 
-function ModelCard({ summary, className }: { summary: Summary; className?: string }) {
+function ModelCard({ summary }: { summary: Summary }) {
   const rows = summary.byModel.slice(0, 8);
   const max = Math.max(0, ...rows.map((row) => row.totalTokens));
   return (
-    <Card className={className} title="模型" subtitle={`前 ${rows.length} 个模型`} bodyClassName="px-0 pb-2">
+    <Card title="模型" subtitle={`前 ${rows.length} 个模型`} bodyClassName="px-0 pb-2">
       {rows.length === 0 ? (
         <EmptyState title="没有模型数据" />
       ) : (
@@ -340,11 +272,10 @@ function ModelCard({ summary, className }: { summary: Summary; className?: strin
   );
 }
 
-function RecentCard({ page, error, reload, className }: { page: SessionPage | null; error: unknown; reload: () => void; className?: string }) {
+function RecentCard({ page, error, reload }: { page: SessionPage | null; error: unknown; reload: () => void }) {
   const { go, openSession } = useNav();
   return (
     <Card
-      className={className}
       title="最近会话"
       action={
         <Button variant="ghost" size="sm" onClick={() => go("sessions")}>
@@ -399,11 +330,10 @@ export function deviceTone(device: DeviceStatus): { tone: "good" | "neutral" | "
 
 function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unknown; reload: () => void }) {
   const { go } = useNav();
-  const local = useStatus().status?.mode === "local";
   return (
     <Card
       title="设备"
-      subtitle={local ? "正在查看这台电脑的本机记录" : "台式机关机、笔记本合盖时显示离线是正常的，开机后会自动补传"}
+      subtitle="台式机关机、笔记本合盖时显示离线是正常的，开机后会自动补传"
       action={
         <Button variant="ghost" size="sm" onClick={() => go("devices")}>
           管理 <ChevronRight className="h-3.5 w-3.5" aria-hidden />
@@ -413,13 +343,13 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
       {!data && error ? (
         <LoadError error={error} onRetry={reload} compact />
       ) : !data ? (
-        <div className="grid grid-cols-2 gap-3 min-[1100px]:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 min-[650px]:grid-cols-2">
           {[0, 1, 2, 3].map((i) => (
             <Skeleton key={i} className="h-24" />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 min-[1100px]:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 min-[650px]:grid-cols-2">
           {data.devices.map((device) => {
             const usage = data.usage.find((item) => item.deviceId === device.deviceId);
             const tone = deviceTone(device);
@@ -444,7 +374,7 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
                   <span className={cn("text-[11px]", device.backfillComplete ? "text-ink-3" : "text-[color-mix(in_oklch,var(--warn)_60%,var(--ink))]")}>
                     {device.backfillComplete
                       ? "历史已补齐"
-                      : `${local ? "历史整理中" : "历史上传中"}${device.outboxBacklog ? `（${compact(device.outboxBacklog)}）` : ""}`}
+                      : `历史上传中${device.outboxBacklog ? `（${compact(device.outboxBacklog)}）` : ""}`}
                   </span>
                 </div>
               </button>
@@ -461,13 +391,12 @@ function OverviewSkeleton() {
     <div className="space-y-5" aria-busy>
       <div className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
-          <Skeleton key={i} className="h-[118px] rounded-[var(--radius-card)]" />
+          <Skeleton key={i} className="h-[110px] rounded-[var(--radius-card)]" />
         ))}
       </div>
-      <Skeleton className="h-[132px] rounded-[var(--radius-card)]" />
-      <div className="grid grid-cols-12 gap-4">
-        <Skeleton className="col-span-12 h-[340px] rounded-[var(--radius-card)] min-[1100px]:col-span-8" />
-        <Skeleton className="col-span-12 h-[340px] rounded-[var(--radius-card)] min-[1100px]:col-span-4" />
+      <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+        <Skeleton className="h-[340px] rounded-[var(--radius-card)]" />
+        <Skeleton className="h-[340px] rounded-[var(--radius-card)]" />
       </div>
     </div>
   );

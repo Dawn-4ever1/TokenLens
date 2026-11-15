@@ -62,7 +62,6 @@ export const app = {
     call<AppStatus>("use_local_mode", input),
   unpair: () => call<AppStatus>("unpair_device"),
   removeLocalDevice: () => call<AppStatus>("remove_local_device"),
-  setDashboardMode: (mode: "local" | "server") => call<AppStatus>("set_dashboard_mode", { mode }),
   requestLoginCode: (server: string, email: string) =>
     call<void>("request_login_code", { server, email }),
   loginAccount: (input: {

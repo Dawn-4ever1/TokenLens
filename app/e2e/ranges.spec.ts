@@ -15,7 +15,7 @@ async function openOverview(page: import("@playwright/test").Page, width = 1200)
 }
 
 function summaryCard(page: import("@playwright/test").Page) {
-  return page.locator("section").filter({ has: page.getByRole("heading", { name: /^Tokens ·/ }) }).first();
+  return page.locator("section").filter({ has: page.getByRole("heading", { name: "Tokens", exact: true }) }).first();
 }
 
 test("five calendar ranges update the figures, including custom dates", async ({ page }) => {
@@ -29,19 +29,15 @@ test("five calendar ranges update the figures, including custom dates", async ({
   await expect(summary.locator(".num-fit .num")).toHaveCount(1);
   await expect.poll(() => summary.getByRole("button").first().evaluate((element) => getComputedStyle(element).animationName)).toBe("none");
 
-  await picker.getByRole("radio", { name: "日", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Tokens · 日", exact: true })).toBeVisible();
-  await picker.getByRole("radio", { name: "周", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Tokens · 周", exact: true })).toBeVisible();
-  await picker.getByRole("radio", { name: "月", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Tokens · 月", exact: true })).toBeVisible();
-  await picker.getByRole("radio", { name: "总计", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Tokens · 总计", exact: true })).toBeVisible();
+  for (const range of ["日", "周", "月", "总计"]) {
+    await picker.getByRole("radio", { name: range, exact: true }).click();
+    await expect(summary.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
+  }
   await picker.getByRole("radio", { name: "自定义", exact: true }).click();
   await expect(page.getByRole("button", { name: "修改日期", exact: true })).toBeVisible();
   await page.getByLabel("开始", { exact: true }).fill("2026-11-03");
   await page.getByLabel("结束", { exact: true }).fill("2026-11-05");
-  await expect(page.getByRole("heading", { name: "Tokens · 2026-11-03 – 2026-11-05", exact: true })).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("tokenlens.filters.v1") ?? "{}"));
   expect(stored).toMatchObject({ preset: "custom", customFrom: "2026-11-03", customTo: "2026-11-05" });
   expect(errors).toEqual([]);

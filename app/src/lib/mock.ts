@@ -656,7 +656,7 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export async function command(name: string, args: Record<string, unknown>): Promise<unknown> {
   await delay(params.has("slow") ? 1500 : 120);
-  if (name === "dashboard_get" && state.mode === "server" && (params.has("offline") || (params.has("devices-error") && args.path === "devices"))) throw new ApiError("network");
+  if (name === "dashboard_get" && state.server && (params.has("offline") || (params.has("devices-error") && args.path === "devices"))) throw new ApiError("network");
   switch (name) {
     case "dashboard_get":
       if (!state.paired) throw new ApiError("not_paired");
@@ -719,10 +719,6 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       state.collector.running = false;
       state.collector.paused = true;
       revoked.add("dev_mock_mbp");
-      return { ...state, collector: { ...state.collector } };
-    case "set_dashboard_mode":
-      if (!["local", "server"].includes(String(args.mode)) || (args.mode === "server" && !state.server)) throw new ApiError("bad_request", 400);
-      state.mode = args.mode as "local" | "server";
       return { ...state, collector: { ...state.collector } };
     case "set_paused":
       state.collector.paused = Boolean(args.paused);

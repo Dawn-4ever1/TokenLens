@@ -1,4 +1,4 @@
-import { Check, Copy, KeyRound, Laptop, MoreHorizontal, Pencil, Plus, ShieldOff, Unplug } from "lucide-react";
+import { Check, Copy, KeyRound, Laptop, MoreHorizontal, Pencil, Plus, ShieldOff } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { CaveatList, ClientName, LoadError, Num, ShareBar } from "@/components/common";
 import { Badge, Button, Card, Dialog, EmptyState, Field, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, StatusDot, Tip, cn, inputClass } from "@/components/ui";
@@ -14,24 +14,10 @@ import { ConnectServer } from "./Pairing";
 
 export function Devices() {
   const { query, timeZone } = useData();
-  const { status, set } = useStatus();
-  const local = status?.mode === "local";
+  const { status } = useStatus();
   const connected = Boolean(status?.server);
   const devices = useDashboard<DevicesData>("devices", query());
   const [adding, setAdding] = useState(false);
-  const [switching, setSwitching] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const switchSource = async (mode: "local" | "server") => {
-    setSwitching(true);
-    setError(null);
-    try {
-      set(await app.setDashboardMode(mode));
-    } catch (next) {
-      setError(errorMessage(next));
-    } finally {
-      setSwitching(false);
-    }
-  };
   const data = devices.data;
   const max = Math.max(0, ...(data?.usage ?? []).map((usage) => usage.totalTokens));
   return (
@@ -39,20 +25,13 @@ export function Devices() {
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-[200px] flex-1 text-xs leading-5 text-ink-3">
           {connected
-            ? "本机持续记录，服务器同步多台设备。切换查看范围不影响采集和同步。"
+            ? "这里汇总本机与同一空间的其他设备，本机记录和服务器同步会继续运行。"
             : "正在记录这台电脑的用量。想合并查看其他电脑，点击「添加设备」连接服务器，本机记录会继续运行。"}
         </p>
-        {connected && (
-          <div role="group" aria-label="查看范围" className="flex gap-1 rounded-lg border border-line p-1">
-            <Button size="sm" variant={local ? "primary" : "ghost"} aria-pressed={local} disabled={switching} onClick={() => void switchSource("local")}>本机</Button>
-            <Button size="sm" variant={local ? "ghost" : "primary"} aria-pressed={!local} disabled={switching} onClick={() => void switchSource("server")}>全部设备</Button>
-          </div>
-        )}
         <Button variant="primary" onClick={() => setAdding(true)}>
           <Plus className="h-4 w-4" aria-hidden /> 添加设备
         </Button>
       </div>
-      {error && <p role="alert" className="text-xs text-bad">{error}</p>}
       {devices.error ? <LoadError error={devices.error} onRetry={devices.reload} compact /> : null}
       {!data ? (
         !devices.error && <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
@@ -74,7 +53,6 @@ export function Devices() {
                   minCollectorVersion={data.minCollectorVersion}
                   timeZone={timeZone}
                   connected={connected}
-                  local={local}
                   onChanged={devices.reload}
                 />
               ))}
@@ -97,7 +75,6 @@ function DeviceCard({
   minCollectorVersion,
   timeZone,
   connected,
-  local,
   onChanged,
 }: {
   device: DeviceStatus;
@@ -105,8 +82,8 @@ function DeviceCard({
   max: number;
   minCollectorVersion: string;
   timeZone: string;
+  /** Controls cloud credentials; never selects which dashboard is shown. */
   connected: boolean;
-  local: boolean;
   onChanged: () => void;
 }) {
   const tone = deviceTone(device);
@@ -132,7 +109,7 @@ function DeviceCard({
         </span>
       }
       subtitle={[kind, os, tone.label].filter(Boolean).join(" · ")}
-      action={<DeviceMenu device={device} connected={connected} local={local} onPick={setDialog} />}
+      action={<DeviceMenu device={device} connected={connected} onPick={setDialog} />}
     >
       <div className="flex items-end justify-between gap-3">
         <div>
@@ -143,7 +120,7 @@ function DeviceCard({
         <span className={cn("text-xs", device.backfillComplete ? "text-ink-3" : "text-[color-mix(in_oklch,var(--warn)_60%,var(--ink))]")}>
           {device.backfillComplete
             ? "历史已补齐"
-            : `${local ? "历史整理中" : "历史上传中"}${device.outboxBacklog ? `，还剩 ${compact(device.outboxBacklog)} 条` : ""}`}
+            : `${!connected && device.isCurrent ? "历史整理中" : "历史上传中"}${device.outboxBacklog ? `，还剩 ${compact(device.outboxBacklog)} 条` : ""}`}
         </span>
       </div>
       <ShareBar value={total} max={max} color="var(--primary)" className="mt-2" />
@@ -160,7 +137,7 @@ function DeviceCard({
       )}
       <dl className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 border-t border-line/70 pt-3 text-xs min-[1300px]:grid-cols-3">
         <Info label="最后在线" value={relativeTime(device.lastSeenAt)} title={dateTime(device.lastSeenAt, timeZone)} />
-        <Info label={local ? "最后写入" : "最后上传"} value={relativeTime(device.lastUploadAt)} title={dateTime(device.lastUploadAt, timeZone)} />
+        <Info label={!connected && device.isCurrent ? "最后写入" : "最后上传"} value={relativeTime(device.lastUploadAt)} title={dateTime(device.lastUploadAt, timeZone)} />
         <Info label="最后扫描" value={relativeTime(device.lastScanAt)} title={device.lastScanDurationMs !== null ? `用时 ${duration(device.lastScanDurationMs)}` : undefined} />
         <Info label="采集端版本" value={device.collectorVersion ?? "—"} />
         <Info label="解析库版本" value={device.tokscaleRev ? device.tokscaleRev.slice(0, 8) : "—"} title={device.tokscaleRev ?? undefined} mono />
@@ -169,8 +146,8 @@ function DeviceCard({
       <RenameDialog open={dialog === "rename"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
       <FormFactorDialog open={dialog === "form-factor"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
       <RotateDialog open={dialog === "rotate"} onClose={() => setDialog(null)} onDone={onChanged} />
-      {local ? (
-        <LocalDeviceDialog open={dialog === "revoke"} connected={connected} onClose={() => setDialog(null)} onChanged={onChanged} />
+      {!connected && device.isCurrent ? (
+        <LocalDeviceDialog open={dialog === "revoke"} onClose={() => setDialog(null)} onChanged={onChanged} />
       ) : (
         <RevokeDialog open={dialog === "revoke"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
       )}
@@ -192,13 +169,10 @@ function Info({ label, value, title, mono }: { label: string; value: string; tit
 function DeviceMenu({
   device,
   connected,
-  local,
   onPick,
 }: {
   device: DeviceStatus;
   connected: boolean;
-  /** Local data has no network credentials; it must never revoke its only device. */
-  local: boolean;
   onPick: (action: "rename" | "form-factor" | "rotate" | "revoke") => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -221,36 +195,29 @@ function DeviceMenu({
         <button type="button" className={item} onClick={() => pick("form-factor")}>
           <Laptop className="h-3.5 w-3.5 text-ink-3" aria-hidden /> 更改设备性质
         </button>
-        {device.isCurrent && !local && (
+        {device.isCurrent && connected && (
           <button type="button" className={item} onClick={() => pick("rotate")}>
             <KeyRound className="h-3.5 w-3.5 text-ink-3" aria-hidden /> 更换这台电脑的凭据
           </button>
         )}
-        {local ? (
-          <button type="button" className={cn(item, "text-bad")} onClick={() => pick("revoke")}>
-            {connected ? <Unplug className="h-3.5 w-3.5" aria-hidden /> : <ShieldOff className="h-3.5 w-3.5" aria-hidden />}
-            {connected ? "断开服务器" : "移除设备"}
-          </button>
-        ) : (
-          <button type="button" className={cn(item, "text-bad")} onClick={() => pick("revoke")}>
-            <ShieldOff className="h-3.5 w-3.5" aria-hidden /> 移除设备
-          </button>
-        )}
+        <button type="button" className={cn(item, "text-bad")} onClick={() => pick("revoke")}>
+          <ShieldOff className="h-3.5 w-3.5" aria-hidden />
+          移除设备
+        </button>
       </PopoverContent>
     </Popover>
   );
 }
 
-function LocalDeviceDialog({ open, connected, onClose, onChanged }: { open: boolean; connected: boolean; onClose: () => void; onChanged: () => void }) {
+function LocalDeviceDialog({ open, onClose, onChanged }: { open: boolean; onClose: () => void; onChanged: () => void }) {
   const { set } = useStatus();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const title = connected ? "断开服务器？" : "移除本机设备？";
   const confirm = async () => {
     setBusy(true);
     setError(null);
     try {
-      set(await (connected ? app.unpair() : app.removeLocalDevice()));
+      set(await app.removeLocalDevice());
       onChanged();
       onClose();
     } catch (reason) {
@@ -260,25 +227,16 @@ function LocalDeviceDialog({ open, connected, onClose, onChanged }: { open: bool
     }
   };
   return (
-    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title={title}>
+    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title="移除本机设备？">
       <div className="space-y-2 text-[13px] leading-6 text-ink-2">
-        {connected ? (
-          <>
-            <p>停止向服务器同步，并回到只查看这台电脑的本机数据。</p>
-            <p>本机采集继续运行，本机记录和服务器上的历史用量都保留。以后可以重新连接服务器。</p>
-          </>
-        ) : (
-          <>
-            <p>这台电脑及其记录将从本机看板移除，采集会暂停。</p>
-            <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">重新开始并恢复采集后，会扫描现有日志，历史用量可能再次出现。已同步到其他设备或服务器的记录不受影响。</p>
-          </>
-        )}
+        <p>这台电脑及其记录将从本机看板移除，采集会暂停。</p>
+        <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">重新开始并恢复采集后，会扫描现有日志，历史用量可能再次出现。已同步到其他设备或服务器的记录不受影响。</p>
       </div>
       {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
         <Button onClick={onClose} disabled={busy}>取消</Button>
         <Button variant="danger" onClick={() => void confirm()} disabled={busy}>
-          {busy ? connected ? "正在断开…" : "移除中…" : connected ? "断开服务器" : "移除"}
+          {busy ? "移除中…" : "移除"}
         </Button>
       </div>
     </Dialog>

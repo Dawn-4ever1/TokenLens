@@ -223,9 +223,6 @@ function Connection() {
   };
   return (
     <Card title="连接" bodyClassName="pt-1">
-      <Row title="当前查看" hint="本机持续记录，可在「设备」页面切换查看本机或全部设备">
-        <span className="text-xs text-ink-2">{local ? "本机数据" : "全部设备"}</span>
-      </Row>
       <Row title="服务器" hint={connected ? "本机记录和服务器同步同时运行" : "未连接，数据保存在这台电脑上"}>
         <span className="selectable font-mono text-xs text-ink-2">{status.server ?? "未连接"}</span>
       </Row>
@@ -246,7 +243,7 @@ function Connection() {
         </Row>
       )}
       {connected ? (
-        <Row title="断开服务器" hint="停止服务器同步并查看本机数据；本机采集继续，服务器历史保留">
+        <Row title="断开服务器" hint="停止服务器同步，之后只显示这台电脑；本机采集继续，服务器历史保留">
           <Button variant="danger" size="sm" onClick={() => setConfirm(true)}>断开服务器</Button>
         </Row>
       ) : (
@@ -257,7 +254,7 @@ function Connection() {
       {error && !confirm && <p role="alert" className="pb-2 text-xs text-bad">{error}</p>}
       <ConnectServer open={connecting} onOpenChange={setConnecting} />
       <Dialog open={confirm} onOpenChange={setConfirm} title="断开服务器？">
-        <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，自动查看本机数据。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「设备 → 添加设备」重新连接。</p>
+        <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，之后只显示这台电脑。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「设备 → 添加设备」重新连接。</p>
         {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
           <Button onClick={() => setConfirm(false)} disabled={busy}>取消</Button>
@@ -282,7 +279,7 @@ function Definitions() {
         <Definition term="隐私">
           {!status?.server
             ? "未连接服务器时数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取 GitHub 公开版本信息；这两项请求都不携带用量或账号信息。"
-            : "本机保留数据，同时向已连接的服务器同步数字统计。即使正在查看本机数据，服务器同步也会继续；提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
+            : "本机保留数据，同时向已连接的服务器同步数字统计；看板显示本机与同一空间的其他设备。提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
         </Definition>
       </dl>
       <p className="mt-3 text-xs text-ink-3">
