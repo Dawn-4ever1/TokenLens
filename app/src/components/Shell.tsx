@@ -90,16 +90,35 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
   const [connecting, setConnecting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const signedIn = Boolean(status?.accountEmail || status?.accountDisplayName);
+  const brand = (
+    <>
+      <AppMark className="pointer-events-none h-5 w-5 shrink-0" />
+      <span className="display hidden truncate text-[13px] leading-5 text-ink-2 min-[1100px]:inline">
+        TokenLens
+      </span>
+    </>
+  );
   return (
     <nav aria-label="主导航" className="flex w-16 shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-52">
       <div
         data-tauri-drag-region
-        className={cn("flex shrink-0 items-end justify-center gap-2 px-4 pb-3 min-[1100px]:justify-start", mac ? "h-[72px]" : "h-14")}
+        className={cn("flex shrink-0 items-end justify-center px-2 pb-3 min-[1100px]:justify-start min-[1100px]:px-3", mac ? "h-[72px]" : "h-14")}
       >
-        <AppMark className="pointer-events-none h-5 w-5" />
-        <span data-tauri-drag-region className="display hidden truncate text-[13px] leading-5 text-ink-2 min-[1100px]:inline">
-          TokenLens
-        </span>
+        {signedIn ? (
+          <div data-tauri-drag-region className="flex items-center gap-2.5">{brand}</div>
+        ) : (
+          <Tip content="登录 TokenLens" side="right">
+            <button
+              type="button"
+              aria-label="登录 TokenLens"
+              onClick={() => { setError(null); setConnecting(true); }}
+              className="flex min-h-8 items-center gap-2.5 rounded-lg px-2 text-left transition-colors hover:bg-surface/70"
+            >
+              {brand}
+            </button>
+          </Tip>
+        )}
       </div>
       <ul className="flex flex-1 flex-col gap-0.5 px-2.5">
         {PAGES.map((item, index) => {
@@ -168,10 +187,10 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
         <div
           role="group"
           aria-label={accountLabel}
-          className="group flex min-h-10 w-full items-center justify-center gap-0 rounded-lg px-1 min-[1100px]:justify-start min-[1100px]:gap-2 min-[1100px]:px-2"
+          className="group flex min-h-11 w-full items-center justify-center gap-3 rounded-lg px-1 min-[1100px]:justify-start min-[1100px]:px-2"
         >
           <Tip content={accountLabel} side="right">
-            <span className="flex min-w-0 items-center min-[1100px]:gap-2">
+            <span data-account-identity className="flex min-w-0 flex-1 items-center gap-2.5 min-[1100px]:gap-3">
               {status?.accountAvatarUrl && !imageFailed ? (
                 <img
                   src={status.accountAvatarUrl}
@@ -180,7 +199,7 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
                   onError={() => setImageFailed(true)}
                 />
               ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
-              <span className="hidden min-w-0 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+              <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
             </span>
           </Tip>
           <Tip content="退出登录" side="right">
@@ -189,7 +208,7 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
               aria-label="退出登录"
               disabled={busy}
               onClick={() => setConfirming(true)}
-              className="shrink-0 rounded-md p-0.5 text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:opacity-50 min-[1100px]:p-1"
+              className="-mr-1 ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:opacity-50"
             >
               <LogOut className="h-3 w-3 min-[1100px]:h-3.5 min-[1100px]:w-3.5" aria-hidden />
             </button>

@@ -119,8 +119,9 @@
   --chart-grid: oklch(0.89 0.016 85);
   --radius-card: 4px;
   --shadow-card: none;
-  --font-display: "Songti SC", "Noto Serif SC", "Source Han Serif SC", "SimSun", Georgia, serif;
-  --display-weight: 700;
+  /* Keep the paper palette without switching glyph families between screens. */
+  --font-display: inherit;
+  --display-weight: 650;
 }
 .dark[data-direction="paper"] {
   --bg: oklch(0.19 0.01 70);

@@ -122,6 +122,12 @@ for (const direction of ["editorial", "graphite", "paper"] as const) {
     const root = page.locator("html");
     await expect(root).toHaveClass(/\bdark\b/);
     await expect(root).toHaveAttribute("data-direction", direction);
+    const fontFamilies = await page.evaluate(() => {
+      const title = document.querySelector("h1");
+      if (!title) throw new Error("The page title is missing");
+      return { title: getComputedStyle(title).fontFamily, body: getComputedStyle(document.body).fontFamily };
+    });
+    expect(fontFamilies.title).toBe(fontFamilies.body);
     const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
     expect(luminance(background)).toBeLessThan(0.25);
     expect(errors).toEqual([]);
@@ -438,6 +444,36 @@ test("Google ignores a slow clipboard result after cancelling and starting a new
   await page.waitForTimeout(1800);
   await expect(failure).toBeVisible();
   await expect(dialog.getByText("已复制授权链接，请粘贴到浏览器打开。", { exact: true })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("the signed-out brand opens login and the signed-in account row has breathing room", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  await page.getByRole("button", { name: "登录 TokenLens", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("button", { name: "登录 TokenLens", exact: true })).toHaveCount(0);
+  const spacing = await page.getByRole("group", { name: "账号 user@example.com", exact: true }).evaluate((row) => {
+    const avatar = row.querySelector("[data-account-identity] > img, [data-account-identity] > svg");
+    const name = row.querySelector("[data-account-name]");
+    const logout = row.querySelector("button[aria-label='退出登录']");
+    if (!avatar || !name || !logout) throw new Error("Account row pieces are missing");
+    const a = avatar.getBoundingClientRect();
+    const n = name.getBoundingClientRect();
+    const b = logout.getBoundingClientRect();
+    const r = row.getBoundingClientRect();
+    const nav = row.closest("nav")?.getBoundingClientRect();
+    if (!nav) throw new Error("Sidebar is missing");
+    return { avatarToName: n.left - a.right, nameToLogout: b.left - n.right, rightEdge: nav.right - b.right, width: n.width };
+  });
+  expect(spacing.avatarToName).toBeGreaterThanOrEqual(11);
+  expect(spacing.nameToLogout).toBeGreaterThanOrEqual(11);
+  expect(spacing.width).toBeGreaterThan(80);
+  expect(spacing.rightEdge).toBeLessThanOrEqual(22);
   expect(errors).toEqual([]);
 });
 

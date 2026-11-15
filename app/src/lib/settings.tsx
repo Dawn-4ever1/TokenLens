@@ -7,7 +7,7 @@ export type Direction = "editorial" | "graphite" | "paper";
 export const DIRECTIONS: { key: Direction; label: string; description: string }[] = [
   { key: "editorial", label: "暖白", description: "暖米色背景、墨蓝主色，安静耐看（推荐）" },
   { key: "graphite", label: "石墨", description: "冷灰背景、亮蓝主色，偏工具感" },
-  { key: "paper", label: "墨纸", description: "纸张底色、宋体标题、细线分隔，偏杂志感" },
+  { key: "paper", label: "墨纸", description: "纸张底色、统一字体、细线分隔，偏杂志感" },
 ];
 
 export interface Settings {
