@@ -271,6 +271,18 @@ async fn pairing_code_and_device_endpoints_need_a_login() {
 }
 
 #[tokio::test]
+async fn the_avatar_endpoint_needs_a_login_and_an_identity() {
+    let h = Harness::start().await;
+    let (status, _) = h.get("/api/account/avatar", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // An email-only account has no provider identity to draw a picture from.
+    let (session, status, body) = h.login("avatar@example.com").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) = h.get("/api/account/avatar", Some(&session)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
 async fn a_retired_session_no_longer_opens_the_space() {
     let h = Harness::start().await;
     let (session, status, body) = h.login("expire@example.com").await;

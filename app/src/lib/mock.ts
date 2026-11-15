@@ -649,6 +649,7 @@ const state: AppStatus = {
 
 let pollCount = 0;
 let googlePollCount = 0;
+let googleOpenCount = 0;
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -752,9 +753,11 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return null;
     case "start_google_login":
       if (params.has("googlefail")) throw new ApiError("unavailable");
-      return { authUrl: "https://accounts.google.com/o/oauth2/v2/auth?stub" };
+      googleOpenCount = 0;
+      return { authUrl: "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&response_type=code&scope=openid+email+profile&state=fixture%26state" };
     case "poll_google_login": {
       googlePollCount += 1;
+      if (import.meta.env.DEV && params.has("google-pending")) return { status: "pending" };
       if (googlePollCount % 2 === 1) return { status: "pending" };
       state.accountEmail = "guser@example.com";
       state.accountProvider = "google";
@@ -766,8 +769,15 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       state.paired = true;
       return { status: "ok", app: { ...state, collector: { ...state.collector } } };
     }
-    case "open_google_auth_page":
+    case "open_google_auth_page": {
+      const attempt = ++googleOpenCount;
+      if (import.meta.env.DEV && attempt === Number(params.get("google-open-slow"))) {
+        await delay(1500);
+        throw new ApiError("server");
+      }
+      if (import.meta.env.DEV && attempt <= Number(params.get("google-open-fail") ?? 0)) throw new ApiError("server");
       return null;
+    }
     case "request_login_code":
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(args.email))) throw new ApiError("bad_email");
       return null;

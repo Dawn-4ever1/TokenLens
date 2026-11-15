@@ -323,6 +323,124 @@ test("Google sign-in finishes in the browser without any code or email", async (
   expect(errors).toEqual([]);
 });
 
+test("Google browser failures stay visible and retry preserves the sign-in flow", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?google-open-fail=2" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  const failure = dialog.getByRole("alert").filter({ hasText: "未能打开浏览器，请重试或复制链接到浏览器打开。" });
+  await expect(failure).toBeVisible();
+  await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "复制授权链接", exact: true })).toBeVisible();
+  const retry = dialog.getByRole("button", { name: "重新打开授权页", exact: true });
+  await retry.click();
+  await expect(failure).toBeVisible();
+  await retry.click();
+  await expect(retry).toBeEnabled();
+  await expect(failure).toHaveCount(0);
+  // The original flow still polls and approves; opening again did not restart it.
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByRole("group", { name: "Google 账号 G User", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Google authorization links show copy failures and copy the complete URL on retry", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.addInitScript(() => {
+    let attempts = 0;
+    let copied = "";
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      value: {
+        writeText: (text: string) => {
+          if (++attempts === 1) return Promise.reject(new Error("clipboard denied"));
+          copied = text;
+          return Promise.resolve();
+        },
+        readText: () => Promise.resolve(copied),
+      },
+      configurable: true,
+    });
+  });
+  const errors = await open(page, { view: "devices", query: "?google-open-fail=1&google-pending" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  const copy = dialog.getByRole("button", { name: "复制授权链接", exact: true });
+  await copy.click();
+  await expect(dialog.getByRole("status").filter({ hasText: "复制失败，请重试。" })).toBeVisible();
+  await copy.click();
+  await expect(dialog.getByRole("status").filter({ hasText: "已复制授权链接，请粘贴到浏览器打开。" })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture&response_type=code&scope=openid+email+profile&state=fixture%26state",
+  );
+  const stored = await page.evaluate(() => JSON.stringify({
+    local: { ...localStorage }, session: { ...sessionStorage }, url: location.href,
+  }));
+  expect(stored).not.toContain("accounts.google.com");
+  await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Google ignores a slow browser failure after cancelling and starting a new sign-in", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?google-pending&google-open-slow=2" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  await dialog.getByRole("button", { name: "重新打开授权页", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "正在打开…", exact: true })).toBeDisabled();
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  const retry = dialog.getByRole("button", { name: "重新打开授权页", exact: true });
+  await expect(retry).toBeEnabled();
+  // The cancelled opener rejects after 1.5 seconds; its result belongs to the old flow.
+  await page.waitForTimeout(1800);
+  await expect(dialog.getByRole("alert")).toHaveCount(0);
+  await expect(retry).toBeEnabled();
+  await expect(dialog.getByText("等待授权…", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("Google ignores a slow clipboard result after cancelling and starting a new sign-in", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.addInitScript(() => {
+    let attempts = 0;
+    Object.defineProperty(Navigator.prototype, "clipboard", {
+      value: {
+        writeText: () => ++attempts === 1
+          ? new Promise<void>((resolve) => setTimeout(resolve, 1500))
+          : Promise.reject(new Error("clipboard denied")),
+      },
+      configurable: true,
+    });
+  });
+  const errors = await open(page, { view: "devices", query: "?google-pending" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  const copy = dialog.getByRole("button", { name: "复制授权链接", exact: true });
+  await copy.click();
+  await expect(copy).toBeDisabled();
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
+  await copy.click();
+  const failure = dialog.getByRole("status").filter({ hasText: "复制失败，请重试。" });
+  await expect(failure).toBeVisible();
+  await page.waitForTimeout(1800);
+  await expect(failure).toBeVisible();
+  await expect(dialog.getByText("已复制授权链接，请粘贴到浏览器打开。", { exact: true })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 test("the sidebar shows one sign-in entry, then the GitHub username and avatar", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const avatar = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%232563eb'/%3E%3C/svg%3E";

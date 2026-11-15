@@ -92,12 +92,25 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [ghState, setGhState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
   const [gg, setGg] = useState<{ authUrl: string } | null>(null);
   const [ggState, setGgState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
+  const [ggOpening, setGgOpening] = useState(false);
+  const [ggOpenError, setGgOpenError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "busy" | "copied" | "failed">("idle");
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const googleGeneration = useRef(0);
+  const googleStartOwner = useRef<number | null>(null);
+  const invalidateGoogle = () => {
+    const generation = ++googleGeneration.current;
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    setGgOpening(false);
+    setGgOpenError(null);
+    setCopyState("idle");
+    return generation;
+  };
   // A self-hosted server has no TokenLens GitHub or Google app, so both are
   // offered only for the hosted service; "own" falls back to the email code.
   useEffect(() => {
     if (where === "own") {
+      invalidateGoogle();
       setMethod("email");
       setGh(null);
       setGhState("idle");
@@ -108,6 +121,8 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     }
   }, [where]);
   useEffect(() => () => {
+    googleGeneration.current += 1;
+    googleStartOwner.current = null;
     if (copyTimer.current) clearTimeout(copyTimer.current);
   }, []);
   const [ownServer, setOwnServer] = useState("");
@@ -233,25 +248,66 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gh]);
 
+  const openGoogle = async (authUrl: string, generation = googleGeneration.current) => {
+    if (generation !== googleGeneration.current) return;
+    setGgOpening(true);
+    setGgOpenError(null);
+    try {
+      await app.openGoogleAuthPage(authUrl);
+    } catch {
+      if (generation === googleGeneration.current) setGgOpenError("未能打开浏览器，请重试或复制链接到浏览器打开。");
+    } finally {
+      if (generation === googleGeneration.current) setGgOpening(false);
+    }
+  };
+
+  const copyGoogleLink = async (authUrl: string) => {
+    const generation = googleGeneration.current;
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    setCopyState("busy");
+    try {
+      await copyText(authUrl);
+      if (generation !== googleGeneration.current) return;
+      setCopyState("copied");
+      copyTimer.current = setTimeout(() => {
+        if (generation === googleGeneration.current) setCopyState("idle");
+      }, 2000);
+    } catch {
+      if (generation === googleGeneration.current) setCopyState("failed");
+    }
+  };
+
   const startGoogle = async () => {
     if (!serverOk || busy || where !== "cloud") return;
+    const generation = invalidateGoogle();
+    googleStartOwner.current = generation;
     setBusy(true);
     setError(null);
     setGgState("idle");
+    setGgOpenError(null);
+    setCopyState("idle");
     try {
-      const next = await app.startGoogleLogin(server);
+      let next: { authUrl: string };
+      try {
+        next = await app.startGoogleLogin(server);
+      } finally {
+        if (googleStartOwner.current === generation) {
+          googleStartOwner.current = null;
+          setBusy(false);
+        }
+      }
+      if (generation !== googleGeneration.current) return;
       setGg(next);
       setGgState("pending");
-      await app.openGoogleAuthPage(next.authUrl).catch(() => undefined);
+      await openGoogle(next.authUrl, generation);
     } catch (next) {
-      setError(loginError(next));
-    } finally {
-      setBusy(false);
+      if (generation === googleGeneration.current) setError(loginError(next));
     }
   };
 
   useEffect(() => {
     if (!gg) return;
+    const generation = googleGeneration.current;
     let alive = true;
     const tick = async () => {
       try {
@@ -261,18 +317,20 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           name: displayName,
           autostart: status?.autostart === true,
         });
-        if (!alive) return;
+        if (!alive || generation !== googleGeneration.current) return;
         if (next.status === "ok" && next.app) {
           set(next.app);
           onClose();
           return;
         }
         if (next.status === "expired" || next.status === "denied" || next.status === "failed") {
+          invalidateGoogle();
+          setBusy(false);
           setGgState(next.status);
           setGg(null);
         }
       } catch (next) {
-        if (alive) setError(loginError(next));
+        if (alive && generation === googleGeneration.current) setError(loginError(next));
       }
     };
     void tick();
@@ -377,17 +435,23 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           <Button type="button" variant="primary" className="h-11 w-full justify-center gap-2.5" disabled={!serverOk || busy} onClick={() => void startGoogle()}>
             <GoogleIcon className="h-5 w-5" /> {busy ? "正在打开…" : "继续前往 Google"}
           </Button>
-          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => setChooser(true)}>返回登录方式</button>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { invalidateGoogle(); setChooser(true); }}>返回登录方式</button>
         </div>
       ) : method === "google" ? (
         <div className="space-y-4">
           <p className="text-[13px] leading-6 text-ink-2">在打开的 Google 页面完成登录，授权后这里会自动继续。</p>
+          {ggOpenError && <p role="alert" className="text-[13px] leading-5 text-bad">{ggOpenError}</p>}
+          {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           {gg && (
             <>
               <div className="flex flex-wrap justify-center gap-2">
-                <Button type="button" size="sm" onClick={() => void app.openGoogleAuthPage(gg.authUrl)}>重新打开授权页</Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => { setGg(null); setGgState("idle"); }}>取消</Button>
+                <Button type="button" size="sm" disabled={ggOpening} onClick={() => void openGoogle(gg.authUrl)}>{ggOpening ? "正在打开…" : "重新打开授权页"}</Button>
+                <Button type="button" size="sm" disabled={copyState === "busy"} onClick={() => void copyGoogleLink(gg.authUrl)}>复制授权链接</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { invalidateGoogle(); setGg(null); setGgState("idle"); setBusy(false); }}>取消</Button>
               </div>
+              <p role="status" aria-live="polite" className={cn("min-h-5 text-center text-xs", copyState === "failed" ? "text-bad" : "text-good")}>
+                {copyState === "failed" ? "复制失败，请重试。" : copyState === "copied" ? "已复制授权链接，请粘贴到浏览器打开。" : ""}
+              </p>
               <p role="status" aria-live="polite" className="text-center text-xs text-ink-3">等待授权…</p>
             </>
           )}

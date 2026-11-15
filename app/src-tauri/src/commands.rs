@@ -856,26 +856,85 @@ fn google_auth_url_allowed(url: &str) -> bool {
     url.starts_with("https://accounts.google.com/")
 }
 
-/// Opens an allowlisted address in the system browser. Windows must not go
-/// through `cmd /C start`: cmd splits its command line at `&`, which silently
-/// truncates OAuth URLs at their first query separator (D051 hotfix). The
-/// `explorer` helper takes the address as one argument and hands it to the
-/// default browser without any shell parsing.
+/// Opens an allowlisted address in the system browser. Pass the complete URL
+/// directly to Windows' registered handler: cmd truncates OAuth queries at `&`,
+/// and explorer can exit without opening the browser (T32).
 #[cfg(target_os = "macos")]
-fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new("open").arg(url).status()
+fn browser_command(url: &str) -> std::io::Result<()> {
+    if std::process::Command::new("open")
+        .arg(url)
+        .status()?
+        .success()
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("browser opener failed"))
+    }
 }
 
 #[cfg(target_os = "windows")]
-fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
-    // explorer may report a non-zero exit code even when the browser opens;
-    // only the spawn result matters here.
-    std::process::Command::new("explorer").arg(url).status()
+fn browser_command(url: &str) -> std::io::Result<()> {
+    windows_browser_command(url, |address| {
+        #[link(name = "shell32")]
+        unsafe extern "system" {
+            fn ShellExecuteW(
+                window: *mut std::ffi::c_void,
+                operation: *const u16,
+                file: *const u16,
+                parameters: *const u16,
+                directory: *const u16,
+                show: i32,
+            ) -> isize;
+        }
+        // SAFETY: address is a live, NUL-terminated UTF-16 buffer for the whole
+        // call. Null selects the default "open" operation and no extra args.
+        unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                address,
+                std::ptr::null(),
+                std::ptr::null(),
+                1, // SW_SHOWNORMAL
+            )
+        }
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_browser_command(
+    url: &str,
+    open: impl FnOnce(*const u16) -> isize,
+) -> std::io::Result<()> {
+    if url.contains('\0') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "browser address contains NUL",
+        ));
+    }
+    let address: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    let result = open(address.as_ptr());
+    // ShellExecuteW reports errors in its return value, not GetLastError.
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "Windows browser opener failed ({result})"
+        )))
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn browser_command(url: &str) -> std::io::Result<std::process::ExitStatus> {
-    std::process::Command::new("xdg-open").arg(url).status()
+fn browser_command(url: &str) -> std::io::Result<()> {
+    if std::process::Command::new("xdg-open")
+        .arg(url)
+        .status()?
+        .success()
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::other("browser opener failed"))
+    }
 }
 
 /// Opens the GitHub verification page in the system browser. Only that one
@@ -1624,6 +1683,39 @@ mod tests {
         assert!(state.server_credentials().is_none());
         assert_eq!(status(&app).mode, Some("local"));
         assert_eq!(status(&app).device_id, Some(local.device_id));
+    }
+
+    #[test]
+    fn windows_browser_receives_the_complete_utf16_url() {
+        let url = "https://accounts.google.com/o/oauth2/v2/auth?client_id=fixture\
+            &redirect_uri=https%3A%2F%2Ftokenlens.online%2Fcallback\
+            &response_type=code&scope=openid+email+profile&state=fixture&label=测试🦀";
+        let expected: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+        windows_browser_command(url, |address| {
+            // SAFETY: the injected call runs while the known-length URL buffer
+            // is alive, exactly as ShellExecuteW does.
+            let received = unsafe { std::slice::from_raw_parts(address, expected.len()) };
+            assert_eq!(received, expected);
+            33
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn windows_browser_propagates_every_shell_failure() {
+        for result in 0..=32 {
+            assert!(windows_browser_command("https://accounts.google.com/", |_| result).is_err());
+        }
+        assert!(windows_browser_command("https://accounts.google.com/", |_| 33).is_ok());
+    }
+
+    #[test]
+    fn windows_browser_rejects_nul_before_calling_the_shell() {
+        let error = windows_browser_command("https://accounts.google.com/\0ignored", |_| {
+            panic!("an address containing NUL must not reach the shell")
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
     }
 
     #[test]
