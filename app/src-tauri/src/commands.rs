@@ -87,15 +87,16 @@ impl AppState {
             && server_credentials.is_none()
             && !paths.state_dir.join("local-device.json").exists()
             && !paths.state_dir.join("app-initialized").exists();
-        let local_credentials = match initialize_local(&paths, &remote, FormFactor::Laptop, "") {
-            Ok(credentials) => Some(credentials),
-            Err(_error) => {
-                #[cfg(test)]
-                eprintln!("test local initialization failed: {_error:?}");
-                collector.set_error(Some(LOCAL_ERROR));
-                None
-            }
-        };
+        let local_credentials =
+            match initialize_local(&paths, &remote, crate::device::detected_form_factor(), "") {
+                Ok(credentials) => Some(credentials),
+                Err(_error) => {
+                    #[cfg(test)]
+                    eprintln!("test local initialization failed: {_error:?}");
+                    collector.set_error(Some(LOCAL_ERROR));
+                    None
+                }
+            };
         let account_session = crate::account::load_session(&paths.keychain_service);
         // Preserve the view of existing server users; new installs start locally.
         let dashboard_mode = dashboard_mode(&paths.state_dir, server_credentials.is_some());
@@ -221,6 +222,8 @@ pub struct AppStatus {
     pub collector: CollectorStatus,
     pub autostart: Option<bool>,
     pub platform: &'static str,
+    /// Best-effort product-family detection; users can always correct it.
+    pub form_factor: FormFactor,
     /// Default hosted service, so the app can pre-select it (D049).
     pub cloud_server: &'static str,
     /// Signed-in account, when this computer has one.
@@ -293,6 +296,7 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
         },
         autostart: autostart_enabled(app),
         platform: platform(),
+        form_factor: crate::device::detected_form_factor(),
         cloud_server: crate::account::CLOUD_URL,
         account_email: state.account_email(),
         account_provider: lock(&state.account_provider).clone(),
@@ -673,9 +677,29 @@ pub async fn request_login_code(app: AppHandle, server: String, email: String) -
     .await
 }
 
-/// Finishes any sign-in (email, GitHub or Google): creates this computer's
-/// device in the account's space, adopts its credentials and caches the
-/// account for the sidebar. The session goes to the keychain, never the UI.
+/// Existing cloud credentials already identify this computer. Account login
+/// and device pairing are deliberately separate: refreshing a session must not
+/// create another device, change its tenant or replace its queue.
+fn reusable_server_credentials(state: &AppState, server: &str) -> CmdResult<Option<Credentials>> {
+    let Some(existing) = state.server_credentials() else {
+        return Ok(None);
+    };
+    if existing.server_url.trim_end_matches('/') != server.trim_end_matches('/') {
+        return Ok(None);
+    }
+    // A normal re-login keeps the connection without any network writes. Only
+    // an actually revoked server device is explicitly rebound, so both sides
+    // cannot keep different ideas of the current device after an outage.
+    match state.remote.get(&existing, "dashboard/health") {
+        Ok(_) => Ok(Some(existing)),
+        Err(error) if error.kind == "unauthorized" => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Finishes any sign-in: reuses this computer's existing cloud connection, or
+/// pairs exactly once for a new server. The account session never selects a
+/// tenant, and only Rust sees either credential.
 fn complete_account_sign_in(
     app: &AppHandle,
     state: &AppState,
@@ -685,8 +709,37 @@ fn complete_account_sign_in(
     name: &str,
     autostart: bool,
 ) -> CmdResult<AppStatus> {
-    let next = crate::account::create_device(server, &signed.session, form_factor, name)?;
-    adopt(app, next, false)?;
+    let next = if let Some(existing) = reusable_server_credentials(state, server)? {
+        // A previous session belongs to this exact device. If the account has
+        // changed, do not silently retain another account's space.
+        let bound = state.account_email();
+        if bound.as_deref().is_some_and(|old| old != signed.email) {
+            // Do not silently connect a different account to this space. Keep
+            // the working device and session untouched until explicitly reset.
+            return Err(CommandError::new("account_mismatch"));
+        }
+        existing
+    } else {
+        // Revoke only after the replacement has been obtained and saved. A
+        // network/keychain failure must never lose the existing connection.
+        let replaced = state.server_credentials();
+        // Persist the random id before asking for a device. A crash or a lost
+        // response can then safely retry without creating a second identity.
+        let binding = crate::device::client_binding_id(&state.paths.state_dir)
+            .map_err(|_| CommandError::new("server"))?;
+        let next =
+            crate::account::create_device(server, &signed.session, form_factor, name, &binding)?;
+        adopt(app, next.clone(), false)?;
+        if let Some(previous) = replaced.filter(|old| old.device_id != next.device_id) {
+            let path = format!("dashboard/devices/{}/revoke", previous.device_id);
+            let _ = state.remote.post(&previous, &path, &json!({}));
+        }
+        next
+    };
+    debug_assert_eq!(
+        next.server_url.trim_end_matches('/'),
+        server.trim_end_matches('/')
+    );
     {
         let _connection = lock(&state.connection);
         crate::account::save_session(&state.paths.keychain_service, &signed.session)?;
@@ -1406,6 +1459,53 @@ mod tests {
                 });
             }
         }
+    }
+
+    #[test]
+    fn an_existing_cloud_device_is_reused_for_repeated_account_sign_ins() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+        let credentials = state
+            .remote
+            .local()
+            .unwrap()
+            .pair(FormFactor::Desktop, "Mac mini")
+            .unwrap();
+        adopt(&app, credentials.clone(), false).unwrap();
+        assert!(
+            reusable_server_credentials(&state, &credentials.server_url)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            state.server_credentials().unwrap().device_id,
+            credentials.device_id
+        );
+        let devices = state.remote.get(&credentials, "dashboard/devices").unwrap();
+        assert_eq!(
+            devices["devices"].as_array().unwrap().len(),
+            1 + usize::from(lock(&state.local_credentials).is_some())
+        );
+        assert!(
+            reusable_server_credentials(&state, "https://another.example")
+                .unwrap()
+                .is_none()
+        );
+        state.remote.local().unwrap().revoke(&credentials.device_id);
+        assert!(
+            reusable_server_credentials(&state, &credentials.server_url)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

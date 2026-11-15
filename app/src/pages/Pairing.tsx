@@ -45,14 +45,14 @@ function loginError(error: unknown): string {
 
 /** Shown only if automatic local setup failed; normal launches go straight to the dashboard. */
 export function Pairing() {
-  const { set } = useStatus();
+  const { status, set } = useStatus();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const retry = async () => {
     setBusy(true);
     setError(null);
     try {
-      set(await app.useLocal({ formFactor: "laptop", name: "", autostart: true }));
+      set(await app.useLocal({ formFactor: status?.formFactor ?? "laptop", name: "", autostart: true }));
     } catch {
       setError("无法打开这台电脑上的本机数据库，请稍后重试。");
     } finally {
@@ -128,7 +128,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [ownServer, setOwnServer] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
-  const [formFactor, setFormFactor] = useState<FormFactor>("laptop");
+  const [formFactor, setFormFactor] = useState<FormFactor>(status?.formFactor ?? "laptop");
   const [name, setName] = useState<string | null>(null);
   const [deviceOpen, setDeviceOpen] = useState(false);
   const [chooser, setChooser] = useState(true);

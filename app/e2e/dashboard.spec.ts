@@ -505,6 +505,43 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   expect(errors).toEqual([]);
 });
 
+test("signing out and back in keeps the same cloud device and collection", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { query: "" });
+  await settle(page, "总览");
+  await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
+  let dialog = page.getByRole("dialog");
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  const deviceId = await page.evaluate(async () => {
+    const modulePath = performance.getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((url) => new URL(url).pathname === "/src/lib/api.ts");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    const { app } = await import(modulePath);
+    return (await app.status()).deviceId;
+  });
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  const again = await page.evaluate(async () => {
+    const modulePath = performance.getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((url) => new URL(url).pathname === "/src/lib/api.ts");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    const { app } = await import(modulePath);
+    return (await app.status()).deviceId;
+  });
+  expect(again).toBe(deviceId);
+  await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
+  await expect(page.getByText("全部设备", { exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("clicking the account name never signs out; log-out asks for confirmation", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 });
   const errors = await open(page, { query: "" });

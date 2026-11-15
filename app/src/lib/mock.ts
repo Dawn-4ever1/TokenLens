@@ -645,6 +645,7 @@ const state: AppStatus = {
   },
   autostart: true,
   platform: "macos",
+  formFactor: "laptop",
 };
 
 let pollCount = 0;

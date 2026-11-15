@@ -17,7 +17,7 @@ function deferred<T>() {
 function localStatus(accountEmail: string | null = null): AppStatus {
   return {
     paired: true, mode: "local", deviceId: "dev_fixture", server: null,
-    appVersion: "0.0.0", autostart: false, platform: "macos", cloudServer: "https://example.test",
+    appVersion: "0.0.0", autostart: false, platform: "macos", formFactor: "laptop", cloudServer: "https://example.test",
     collector: {
       running: true, paused: false, lastScanAt: null, lastUploadAt: null,
       lastHeartbeatAt: null, backlog: 0, uploadState: null, backfillComplete: true, lastError: null,

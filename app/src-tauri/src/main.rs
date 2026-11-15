@@ -4,6 +4,7 @@ mod account;
 mod collector;
 mod commands;
 mod config;
+mod device;
 mod format;
 mod local;
 mod menu;

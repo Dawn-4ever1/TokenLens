@@ -42,6 +42,17 @@ struct NewDeviceRequest {
     platform: usage_event::envelope::Platform,
     form_factor: usage_event::envelope::FormFactor,
     display_name: String,
+    /// Random per-installation request id. It is not a device secret or a
+    /// hardware fingerprint and is never accepted as tenant identity.
+    #[serde(default)]
+    client_binding_id: Option<String>,
+}
+
+fn valid_client_binding_id(value: &str) -> bool {
+    (16..=128).contains(&value.len())
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
 fn json<T: serde::Serialize>(value: &T) -> Response {
@@ -317,6 +328,13 @@ pub async fn pair_device(
     let Some(name) = http::valid_display_name(&request.display_name) else {
         return ApiError::BadRequest.into_response();
     };
+    if request
+        .client_binding_id
+        .as_deref()
+        .is_some_and(|id| !valid_client_binding_id(id))
+    {
+        return ApiError::BadRequest.into_response();
+    }
     let device = db::NewDevice {
         platform: request.platform.as_str(),
         form_factor: request.form_factor.as_str(),
@@ -329,7 +347,14 @@ pub async fn pair_device(
         let Ok(mut conn) = db.lock() else {
             return ApiError::Internal.into_response();
         };
-        accounts::create_device_for_account(&mut conn, &account.tenant_id, state.now_ms(), &device)
+        accounts::create_device_for_account(
+            &mut conn,
+            &account.id,
+            &account.tenant_id,
+            state.now_ms(),
+            &device,
+            request.client_binding_id.as_deref(),
+        )
     };
     match outcome {
         Ok(device) => json(&usage_event::envelope::PairClaimResponse {

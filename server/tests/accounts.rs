@@ -216,6 +216,127 @@ async fn the_persistent_code_adds_devices_and_rotation_retires_the_old_one() {
 }
 
 #[tokio::test]
+async fn retrying_a_login_device_binding_returns_the_same_device_not_a_duplicate() {
+    let h = Harness::start().await;
+    let (session, status, body) = h.login("retry-device@example.com").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let request = || {
+        serde_json::to_vec(&json!({
+            "platform": "macos",
+            "formFactor": "desktop",
+            "displayName": "Mac mini",
+            "clientBindingId": "fixture-installation-request-0001"
+        }))
+        .unwrap()
+    };
+    let (first_status, first) = h
+        .post("/api/account/devices", Some(&session), request(), None)
+        .await;
+    assert_eq!(first_status, StatusCode::OK, "{first}");
+    let (second_status, second) = h
+        .post("/api/account/devices", Some(&session), request(), None)
+        .await;
+    assert_eq!(second_status, StatusCode::OK, "{second}");
+    assert_eq!(second["deviceId"], first["deviceId"]);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 1);
+    assert_eq!(h.count("SELECT COUNT(*) FROM account_device_bindings"), 1);
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM device_tokens WHERE revoked_at IS NULL"),
+        2
+    );
+
+    // Tokens from the earlier response stop working when a retry replaces
+    // them, so a lost first response can never leave two active credentials.
+    let (status, _) = h
+        .get(summary_path(), Some(first["readToken"].as_str().unwrap()))
+        .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _) = h
+        .get(summary_path(), Some(second["readToken"].as_str().unwrap()))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A new installation gets a different device, even with identical labels.
+    let third = serde_json::to_vec(&json!({
+        "platform": "macos", "formFactor": "desktop", "displayName": "Mac mini",
+        "clientBindingId": "fixture-installation-request-0002"
+    }))
+    .unwrap();
+    let (status, third) = h
+        .post("/api/account/devices", Some(&session), third, None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    assert_ne!(third["deviceId"], first["deviceId"]);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 2);
+
+    // The same opaque id in another account is a separate installation, never
+    // a way to rotate or read the first account's device credentials.
+    let (other, status, _) = h.login("other-space@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, other_device) = h
+        .post("/api/account/devices", Some(&other), request(), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{other_device}");
+    assert_ne!(other_device["deviceId"], first["deviceId"]);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 3);
+}
+
+#[tokio::test]
+async fn signing_out_and_back_in_reuses_the_same_account_device_binding() {
+    let h = Harness::start().await;
+    let (session, status, _) = h.login("relogin@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let payload = || {
+        serde_json::to_vec(&json!({
+            "platform": "macos", "formFactor": "desktop", "displayName": "Mac mini",
+            "clientBindingId": "stable-local-installation-0001"
+        }))
+        .unwrap()
+    };
+    let (_, first) = h
+        .post("/api/account/devices", Some(&session), payload(), None)
+        .await;
+    let (status, _) = h
+        .post(
+            "/api/auth/logout",
+            Some(&session),
+            serde_json::to_vec(&json!({})).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (next, status, _) = h.login("relogin@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, second) = h
+        .post("/api/account/devices", Some(&next), payload(), None)
+        .await;
+    assert_eq!(second["deviceId"], first["deviceId"]);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 1);
+    assert_eq!(h.count("SELECT COUNT(*) FROM account_device_bindings"), 1);
+}
+
+#[tokio::test]
+async fn device_binding_ids_are_optional_for_legacy_apps_but_validated() {
+    let h = Harness::start().await;
+    let (session, status, _) = h.login("binding-validation@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    // The old request shape stays valid during a rolling upgrade.
+    h.add_device_with_session(&session).await;
+    for id in ["short", "contains spaces", "bad/slash"] {
+        let body = serde_json::to_vec(&json!({
+            "platform": "macos", "formFactor": "laptop", "displayName": "Test",
+            "clientBindingId": id
+        }))
+        .unwrap();
+        let (status, _) = h
+            .post("/api/account/devices", Some(&session), body, None)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}");
+    }
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 1);
+}
+
+#[tokio::test]
 async fn a_login_session_cannot_upload_or_read_usage() {
     let h = Harness::start().await;
     let (session, status, body) = h.login("guard@example.com").await;

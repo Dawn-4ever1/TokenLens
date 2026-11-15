@@ -8,7 +8,7 @@ export const isTauri = (): boolean =>
 const KINDS: ApiErrorKind[] = [
   "not_paired", "unauthorized", "network", "bad_request", "not_found",
   "forbidden", "rate_limited", "server", "keychain", "unavailable",
-  "bad_code", "bad_email", "not_signed_in",
+  "bad_code", "bad_email", "not_signed_in", "account_mismatch",
 ];
 
 function toApiError(error: unknown): ApiError {
@@ -135,6 +135,8 @@ export function errorMessage(error: unknown): string {
       return "请在 TokenLens 应用中打开此页面。";
     case "bad_code":
       return "验证码不对或已过期，请重新获取。";
+    case "account_mismatch":
+      return "这台电脑当前连接的是另一个账号的空间。请先断开服务器，再登录新账号；本机记录不会删除。";
     case "bad_email":
       return "邮箱格式不对，请检查后重试。";
     case "not_signed_in":

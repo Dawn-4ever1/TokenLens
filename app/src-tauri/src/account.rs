@@ -328,10 +328,43 @@ fn session_get(server: &str, session: &str, path: &str) -> CmdResult<Value> {
 }
 
 fn session_post(server: &str, session: &str, path: &str, body: &Value) -> CmdResult<Value> {
+    session_post_allow_legacy(server, session, path, body, false)
+}
+
+fn session_post_allow_legacy(
+    server: &str,
+    session: &str,
+    path: &str,
+    body: &Value,
+    allow_unknown_binding: bool,
+) -> CmdResult<Value> {
     let payload = serde_json::to_vec(body).map_err(|_| CommandError::new("bad_request"))?;
     let response = UreqTransport::new()
         .post(&format!("{server}{path}"), Some(session), false, &payload)
         .map_err(|_| CommandError::new("network"))?;
+    if response.status == 400
+        && allow_unknown_binding
+        && response
+            .body
+            .windows(b"unknown field `clientBindingId`".len())
+            .any(|w| w == b"unknown field `clientBindingId`")
+    {
+        let legacy = body.as_object().cloned().map(|mut fields| {
+            fields.remove("clientBindingId");
+            Value::Object(fields)
+        });
+        let Some(legacy) = legacy else {
+            return Err(CommandError::new("server"));
+        };
+        let payload = serde_json::to_vec(&legacy).map_err(|_| CommandError::new("bad_request"))?;
+        let response = UreqTransport::new()
+            .post(&format!("{server}{path}"), Some(session), false, &payload)
+            .map_err(|_| CommandError::new("network"))?;
+        if response.status != 200 {
+            return Err(status_error(response.status, &response.body));
+        }
+        return body_json(&response);
+    }
     if response.status != 200 {
         return Err(status_error(response.status, &response.body));
     }
@@ -364,18 +397,35 @@ pub fn create_device(
     session: &str,
     form_factor: FormFactor,
     name: &str,
+    client_binding_id: &str,
 ) -> CmdResult<Credentials> {
     let server = server_url(server)?;
-    let body = session_post(
-        &server,
-        session,
-        "/api/account/devices",
-        &json!({
-            "platform": collector_core::credentials::this_platform().as_str(),
-            "formFactor": form_factor.as_str(),
-            "displayName": name.trim(),
-        }),
-    )?;
+    let fields = json!({
+        "platform": collector_core::credentials::this_platform().as_str(),
+        "formFactor": form_factor.as_str(),
+        "displayName": name.trim(),
+        "clientBindingId": client_binding_id,
+    });
+    let body =
+        match session_post_allow_legacy(&server, session, "/api/account/devices", &fields, true) {
+            Ok(body) => body,
+            Err(error) if error.kind == "bad_request" => {
+                // A pre-v10 server rejects the additional binding field. Keep the
+                // old flow during rolling upgrades; normal re-login still reuses
+                // the existing device before reaching this compatibility path.
+                session_post(
+                    &server,
+                    session,
+                    "/api/account/devices",
+                    &json!({
+                        "platform": collector_core::credentials::this_platform().as_str(),
+                        "formFactor": form_factor.as_str(),
+                        "displayName": name.trim(),
+                    }),
+                )?
+            }
+            Err(error) => return Err(error),
+        };
     let text = |name: &str| body[name].as_str().map(str::to_owned);
     let credential = Credentials {
         server_url: server,

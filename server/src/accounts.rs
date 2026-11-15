@@ -441,11 +441,43 @@ pub fn tenant_code(
 
 pub fn create_device_for_account(
     conn: &mut Connection,
+    account_id: &str,
     tenant_id: &str,
     now: i64,
     device: &db::NewDevice<'_>,
+    client_binding_id: Option<&str>,
 ) -> Result<db::ClaimedDevice, AccountError> {
     let tx = conn.transaction()?;
+    if let Some(binding) = client_binding_id
+        && let Some(device_id) = tx
+            .query_row(
+                "SELECT b.device_id FROM account_device_bindings b
+             JOIN devices d ON d.id = b.device_id
+             WHERE b.account_id = ?1 AND b.client_binding_id = ?2
+               AND d.tenant_id = ?3 AND d.revoked_at IS NULL",
+                params![account_id, binding, tenant_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+    {
+        // Replace credentials for this exact device in the same transaction;
+        // a lost response cannot create another device or leave two live keys.
+        tx.execute(
+            "UPDATE device_tokens SET revoked_at = ?3
+             WHERE tenant_id = ?1 AND device_id = ?2 AND revoked_at IS NULL",
+            params![tenant_id, device_id, now],
+        )?;
+        let ingest_token =
+            db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Ingest, now)?;
+        let read_token =
+            db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Read, now)?;
+        tx.commit()?;
+        return Ok(db::ClaimedDevice {
+            device_id,
+            ingest_token,
+            read_token,
+        });
+    }
     let exists = tx
         .query_row(
             "SELECT 1 FROM tenants WHERE id = ?1 AND revoked_at IS NULL",
@@ -464,6 +496,12 @@ pub fn create_device_for_account(
     let ingest =
         db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Ingest, now)?;
     let read = db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Read, now)?;
+    if let Some(binding) = client_binding_id {
+        tx.execute(
+            "INSERT INTO account_device_bindings (account_id, client_binding_id, device_id, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, binding, device_id, now],
+        )?;
+    }
     tx.commit()?;
     Ok(db::ClaimedDevice {
         device_id,

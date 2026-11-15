@@ -273,6 +273,8 @@ export interface AppStatus {
   };
   autostart: boolean | null;
   platform: "macos" | "windows" | "linux";
+  /** Product-family default; the user can still change it before pairing. */
+  formFactor: FormFactor;
   /** Hosted service preselected for new connections (D049). */
   cloudServer: string;
   /** Signed-in account email, or null when this computer is not signed in. */
@@ -321,7 +323,8 @@ export type ApiErrorKind =
   | "unavailable"
   | "bad_code"
   | "bad_email"
-  | "not_signed_in";
+  | "not_signed_in"
+  | "account_mismatch";
 
 export class ApiError extends Error {
   constructor(

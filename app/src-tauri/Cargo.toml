@@ -1,6 +1,6 @@
 [package]
 name = "tokenlens-app"
-version = "0.5.9"
+version = "0.5.10"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -20,6 +20,7 @@ chrono.workspace = true
 chrono-tz = "0.10"
 collector-core = { path = "../../crates/collector-core" }
 dirs.workspace = true
+getrandom = "0.4"
 iana-time-zone = "0.1"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 serde.workspace = true

@@ -359,6 +359,7 @@ mod tests {
             },
             autostart: None,
             platform: "macos",
+            form_factor: usage_event::envelope::FormFactor::Laptop,
             cloud_server: crate::account::CLOUD_URL,
             account_email: None,
             account_provider: None,
