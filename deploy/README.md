@@ -62,6 +62,22 @@ RUST_LOG=info
 The listen address and database path are fixed in `compose.yaml` so `.env`
 cannot expose the port to the internet.
 
+### Public product and privacy pages
+
+`/` and `/privacy` are static pages compiled into the server; their stylesheet
+and logo are under `server/public/`. They do not provide a browser dashboard,
+require a login, set cookies, run JavaScript or load third-party resources.
+Only the four explicit public GET routes are available, with a restrictive
+content-security policy; the API, account and dashboard boundaries stay as
+before. Update the hosted product description and privacy policy when data
+collection, providers or retention behavior changes.
+
+These files are included automatically by the normal server source archive and
+Docker build. No new port, environment variable, frontend service or Caddy
+route is required. After an upgrade, check `https://<your domain>/` and
+`https://<your domain>/privacy` anonymously, alongside `/healthz`. Self-hosters
+should adapt the policy and contact route to their own operation.
+
 ## 2. HTTPS
 
 Copy the block from `Caddyfile.example` into your Caddyfile, replace

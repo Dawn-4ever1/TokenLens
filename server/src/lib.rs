@@ -13,6 +13,7 @@ pub mod limiter;
 pub mod mailer;
 pub mod pairing_crypto;
 pub mod pricing;
+pub mod public_site;
 pub mod secrets;
 
 use std::future::Future;

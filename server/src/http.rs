@@ -294,6 +294,10 @@ fn error_kind(error: &db::DbError) -> &'static str {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(crate::public_site::index))
+        .route("/privacy", get(crate::public_site::privacy))
+        .route("/assets/site.css", get(crate::public_site::styles))
+        .route("/assets/tokenlens.svg", get(crate::public_site::logo))
         .route("/api/auth/code", post(crate::auth_http::request_code))
         .route("/api/auth/login", post(crate::auth_http::login))
         .route("/api/auth/me", get(crate::auth_http::me))
