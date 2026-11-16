@@ -471,7 +471,7 @@ pub enum GitHubPoll {
     SlowDown(u64),
     Expired,
     Denied,
-    Failed,
+    Failed(Option<String>),
     SignedIn(SignedIn),
 }
 
@@ -519,7 +519,8 @@ pub fn github_poll(server: &str, device_code: &str) -> CmdResult<GitHubPoll> {
         "expired" => GitHubPoll::Expired,
         "denied" => GitHubPoll::Denied,
         "ok" => GitHubPoll::SignedIn(signed_in_from(&server, &body)?),
-        _ => GitHubPoll::Failed,
+        "failed" => GitHubPoll::Failed(body["failureCode"].as_str().map(str::to_owned)),
+        _ => GitHubPoll::Failed(None),
     })
 }
 

@@ -4,8 +4,8 @@
 
 /*
  * Theme controls light/dark colours. Direction controls the interface's
- * typography, density, surfaces and chart geometry. All three directions
- * deliberately keep the same pages, data and interaction locations.
+ * typography, density, surfaces, layout and chart geometry. All three
+ * directions deliberately keep the same pages, data and interaction names.
  */
 :root,
 [data-direction="editorial"] {
@@ -17,11 +17,11 @@
   --ink: oklch(0.235 0.012 70);
   --ink-2: oklch(0.45 0.012 70);
   --ink-3: oklch(0.6 0.01 70);
-  --primary: oklch(0.4 0.085 262);
-  --primary-ink: oklch(0.985 0.008 262);
-  --primary-soft: oklch(0.93 0.022 260);
-  --accent: oklch(0.68 0.15 48);
-  --accent-soft: oklch(0.95 0.04 60);
+  --primary: oklch(0.62 0.17 48);
+  --primary-ink: oklch(0.985 0.008 48);
+  --primary-soft: oklch(0.93 0.045 48);
+  --accent: oklch(0.48 0.03 55);
+  --accent-soft: oklch(0.95 0.018 55);
   --good: oklch(0.6 0.13 155);
   --warn: oklch(0.74 0.15 75);
   --bad: oklch(0.58 0.19 27);
@@ -66,15 +66,20 @@
   --ink: oklch(0.94 0.008 85);
   --ink-2: oklch(0.76 0.01 85);
   --ink-3: oklch(0.6 0.01 85);
-  --primary: oklch(0.74 0.085 260);
-  --primary-ink: oklch(0.2 0.03 262);
-  --primary-soft: oklch(0.32 0.045 262);
-  --accent: oklch(0.76 0.14 55);
-  --accent-soft: oklch(0.33 0.06 55);
+  --bg: oklch(0.145 0.018 55);
+  --surface: oklch(0.205 0.018 55);
+  --surface-2: oklch(0.255 0.022 55);
+  --raised: oklch(0.33 0.025 55);
+  --border: oklch(0.31 0.02 55);
+  --primary: oklch(0.76 0.15 48);
+  --primary-ink: oklch(0.2 0.03 48);
+  --primary-soft: oklch(0.34 0.065 48);
+  --accent: oklch(0.78 0.08 65);
+  --accent-soft: oklch(0.34 0.035 60);
   --good: oklch(0.72 0.14 155);
   --warn: oklch(0.8 0.14 80);
   --bad: oklch(0.68 0.17 27);
-  --chart-grid: oklch(0.28 0.008 80);
+  --chart-grid: oklch(0.28 0.018 55);
   --shadow-card: none;
 }
 
@@ -87,11 +92,11 @@
   --ink: oklch(0.22 0.015 260);
   --ink-2: oklch(0.44 0.015 260);
   --ink-3: oklch(0.58 0.012 260);
-  --primary: oklch(0.46 0.15 258);
-  --primary-ink: oklch(0.99 0.005 258);
-  --primary-soft: oklch(0.93 0.035 258);
-  --accent: oklch(0.72 0.15 70);
-  --accent-soft: oklch(0.95 0.045 80);
+  --primary: oklch(0.5 0.14 150);
+  --primary-ink: oklch(0.99 0.005 150);
+  --primary-soft: oklch(0.93 0.04 150);
+  --accent: oklch(0.68 0.14 75);
+  --accent-soft: oklch(0.95 0.045 75);
   --good: oklch(0.6 0.13 160);
   --warn: oklch(0.75 0.15 75);
   --bad: oklch(0.58 0.2 25);
@@ -135,15 +140,20 @@
   --ink: oklch(0.945 0.006 250);
   --ink-2: oklch(0.76 0.01 250);
   --ink-3: oklch(0.6 0.012 250);
-  --primary: oklch(0.74 0.14 255);
-  --primary-ink: oklch(0.18 0.04 258);
-  --primary-soft: oklch(0.32 0.07 258);
+  --bg: oklch(0.105 0.015 145);
+  --surface: oklch(0.15 0.018 145);
+  --surface-2: oklch(0.2 0.022 145);
+  --raised: oklch(0.27 0.03 145);
+  --border: oklch(0.31 0.035 145);
+  --primary: oklch(0.74 0.16 150);
+  --primary-ink: oklch(0.13 0.025 145);
+  --primary-soft: oklch(0.3 0.08 150);
   --accent: oklch(0.8 0.14 75);
-  --accent-soft: oklch(0.34 0.06 75);
+  --accent-soft: oklch(0.32 0.06 75);
   --good: oklch(0.72 0.14 160);
   --warn: oklch(0.8 0.14 80);
   --bad: oklch(0.68 0.18 25);
-  --chart-grid: oklch(0.3 0.012 260);
+  --chart-grid: oklch(0.27 0.025 145);
   --shadow-card: none;
 }
 
@@ -156,11 +166,11 @@
   --ink: oklch(0.2 0.02 60);
   --ink-2: oklch(0.42 0.02 60);
   --ink-3: oklch(0.58 0.018 60);
-  --primary: oklch(0.42 0.065 215);
-  --primary-ink: oklch(0.98 0.01 215);
-  --primary-soft: oklch(0.9 0.03 215);
-  --accent: oklch(0.6 0.17 35);
-  --accent-soft: oklch(0.93 0.045 40);
+  --primary: oklch(0.28 0.02 60);
+  --primary-ink: oklch(0.98 0.01 60);
+  --primary-soft: oklch(0.9 0.02 60);
+  --accent: oklch(0.48 0.03 60);
+  --accent-soft: oklch(0.93 0.018 60);
   --good: oklch(0.55 0.11 150);
   --warn: oklch(0.7 0.14 70);
   --bad: oklch(0.55 0.19 28);
@@ -205,11 +215,11 @@
   --ink: oklch(0.93 0.015 85);
   --ink-2: oklch(0.76 0.016 85);
   --ink-3: oklch(0.6 0.015 85);
-  --primary: oklch(0.72 0.075 210);
-  --primary-ink: oklch(0.2 0.03 215);
-  --primary-soft: oklch(0.33 0.04 215);
-  --accent: oklch(0.72 0.15 40);
-  --accent-soft: oklch(0.34 0.06 40);
+  --primary: oklch(0.9 0.018 80);
+  --primary-ink: oklch(0.2 0.02 60);
+  --primary-soft: oklch(0.34 0.02 70);
+  --accent: oklch(0.82 0.02 80);
+  --accent-soft: oklch(0.34 0.018 70);
   --good: oklch(0.7 0.12 150);
   --warn: oklch(0.78 0.13 75);
   --bad: oklch(0.68 0.17 28);
@@ -325,12 +335,38 @@
 [data-direction="graphite"] .num {
   font-family: var(--font-numeric);
 }
+[data-direction="graphite"] .terminal-layout .card {
+  background: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-direction="graphite"] .terminal-kpi {
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+[data-direction="graphite"] .terminal-table th,
+[data-direction="graphite"] .terminal-table td {
+  border-bottom: 1px solid var(--border);
+}
+[data-direction="graphite"] .terminal-table tbody tr:hover {
+  background: var(--surface-2);
+}
+[data-direction="graphite"] .terminal-status {
+  border-top: 1px solid var(--border);
+  color: var(--ink-3);
+  font-family: var(--font-code);
+}
 [data-direction="graphite"] nav button[aria-current="page"] {
   border: 1px solid var(--border);
   box-shadow: none;
 }
 [data-direction="graphite"] [data-ui="segmented"] {
   border: 1px solid var(--border);
+}
+
+/* Comfort uses one warm accent; the icon and default dashboard share it. */
+[data-direction="editorial"] .comfort-accent {
+  color: var(--primary);
 }
 
 /* Paper replaces nested boxes with an editorial column and hairline separators. */
@@ -346,6 +382,34 @@
 }
 [data-direction="paper"] main .card > header {
   align-items: baseline;
+}
+[data-direction="paper"] .paper-layout {
+  font-family: var(--font-body);
+}
+[data-direction="paper"] .paper-masthead {
+  border-top: 3px double var(--ink);
+  border-bottom: 3px double var(--ink);
+  padding-block: 12px;
+}
+[data-direction="paper"] .paper-conclusion {
+  max-width: 44rem;
+  font-family: var(--font-display);
+  font-size: clamp(1.25rem, 2.2vw, 2rem);
+  line-height: 1.25;
+  letter-spacing: 0.01em;
+}
+[data-direction="paper"] .paper-rule {
+  border-top: 1px solid var(--border);
+}
+[data-direction="paper"] .paper-metric {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+[data-direction="paper"] [data-testid="overview-kpis"] {
+  border-bottom: 1px solid var(--border);
+}
+[data-direction="paper"] [data-testid="overview-kpis"] > section:first-child {
+  border-bottom: 1px solid var(--border);
 }
 [data-direction="paper"] nav button[aria-current="page"] {
   background: transparent;

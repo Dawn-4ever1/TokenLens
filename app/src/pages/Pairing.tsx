@@ -43,6 +43,26 @@ function loginError(error: unknown): string {
   return errorMessage(error);
 }
 
+function githubFailureMessage(code: string | null): string {
+  switch (code) {
+    case "missing_verified_email":
+      return "GitHub 没有返回已验证邮箱，请先在 GitHub 验证邮箱后重试。";
+    case "github_email_permission":
+      return "GitHub 没有允许读取邮箱，请在 GitHub App 的 Account → Email addresses 中开启 Read 权限后重试。";
+    case "client_not_configured":
+      return "服务器的 GitHub 授权配置有问题，请联系管理员。";
+    case "network":
+      return "服务器暂时连不上 GitHub，请稍后重试。";
+    case "github_profile":
+    case "github_response":
+      return "GitHub 账号资料读取失败，请稍后重试。";
+    case "oauth_failed":
+      return "GitHub 没有返回有效授权，请重新确认授权后重试。";
+    default:
+      return "GitHub 授权没有完成，请重试。";
+  }
+}
+
 /** Shown only if automatic local setup failed; normal launches go straight to the dashboard. */
 export function Pairing() {
   const { status, set } = useStatus();
@@ -90,6 +110,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [method, setMethod] = useState<Method>("github");
   const [gh, setGh] = useState<{ userCode: string; verificationUri: string } | null>(null);
   const [ghState, setGhState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
+  const [ghFailure, setGhFailure] = useState<string | null>(null);
   const [gg, setGg] = useState<{ authUrl: string } | null>(null);
   const [ggState, setGgState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
   const [ggOpening, setGgOpening] = useState(false);
@@ -114,6 +135,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       setMethod("email");
       setGh(null);
       setGhState("idle");
+      setGhFailure(null);
       setGg(null);
       setGgState("idle");
       setCopyState("idle");
@@ -199,6 +221,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     setBusy(true);
     setError(null);
     setGhState("idle");
+    setGhFailure(null);
     try {
       const next = await app.startGitHubLogin(server);
       setGh(next);
@@ -231,6 +254,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
         }
         if (next.status === "expired" || next.status === "denied" || next.status === "failed") {
           setGhState(next.status);
+          setGhFailure(next.failureCode ?? null);
           setGh(null);
           setCopyState("idle");
         }
@@ -369,7 +393,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           <p role="alert" className="text-center text-[13px] leading-5 text-bad">
             {ghState === "expired" || ggState === "expired" ? "授权超时了，请重新开始。"
               : ghState === "denied" || ggState === "denied" ? "你取消了授权。"
-              : ghState !== "idle" ? "GitHub 授权没有完成，请重试。"
+              : ghState !== "idle" ? githubFailureMessage(ghFailure)
               : "Google 授权没有完成，请重试。"}
           </p>
         )}
@@ -385,6 +409,9 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       {method === "github" && !gh ? (
         <div className="space-y-4">
           <p className="text-[13px] leading-6 text-ink-2">在 GitHub 上确认授权，不需要密码，也不会收到邮件。第一次登录会自动创建你的空间。</p>
+          {ghState === "expired" && <p role="alert" className="text-[13px] leading-5 text-bad">授权超时了，请重新开始。</p>}
+          {ghState === "denied" && <p role="alert" className="text-[13px] leading-5 text-bad">你取消了授权。</p>}
+          {ghState === "failed" && <p role="alert" className="text-[13px] leading-5 text-bad">{githubFailureMessage(ghFailure)}</p>}
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="button" variant="primary" className="h-11 w-full justify-center gap-2.5" disabled={!serverOk || busy} onClick={() => void startGitHub()}>
             <GitHubIcon className="h-5 w-5" /> {busy ? "正在打开…" : "继续前往 GitHub"}
@@ -422,7 +449,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
               </p>
               <div className="flex flex-wrap justify-center gap-2">
                 <Button type="button" size="sm" onClick={() => void app.openGitHubDevicePage(gh.verificationUri)}>重新打开授权页</Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => { setGh(null); setGhState("idle"); setCopyState("idle"); }}>取消</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { setGh(null); setGhState("idle"); setGhFailure(null); setCopyState("idle"); }}>取消</Button>
               </div>
               <p className="text-center text-xs text-ink-3">等待授权…</p>
             </>

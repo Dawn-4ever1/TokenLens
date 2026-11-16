@@ -862,7 +862,9 @@ pub async fn poll_github_login(
                 Ok(json!({ "status": "expired" }))
             }
             crate::account::GitHubPoll::Denied => Ok(json!({ "status": "denied" })),
-            crate::account::GitHubPoll::Failed => Ok(json!({ "status": "failed" })),
+            crate::account::GitHubPoll::Failed(code) => {
+                Ok(json!({ "status": "failed", "failureCode": code }))
+            }
             crate::account::GitHubPoll::SignedIn(signed) => {
                 let next = complete_account_sign_in(
                     app,

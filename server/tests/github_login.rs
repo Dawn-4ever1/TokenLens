@@ -212,6 +212,7 @@ async fn an_unverified_github_email_cannot_create_a_space() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "failed");
+    assert_eq!(body["failureCode"], "missing_verified_email");
     assert_eq!(h.count("SELECT COUNT(*) FROM accounts"), 0);
 }
 

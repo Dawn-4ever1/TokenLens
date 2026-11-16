@@ -449,7 +449,13 @@ pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response 
         }
         crate::github::Poll::Expired => json(&serde_json::json!({ "status": "expired" })),
         crate::github::Poll::Denied => json(&serde_json::json!({ "status": "denied" })),
-        crate::github::Poll::Failed => json(&serde_json::json!({ "status": "failed" })),
+        crate::github::Poll::Failed(failure) => {
+            tracing::warn!(failure = failure.code(), "GitHub device flow failed");
+            json(&serde_json::json!({
+                "status": "failed",
+                "failureCode": failure.code(),
+            }))
+        }
         crate::github::Poll::Ready {
             subject,
             email,

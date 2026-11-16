@@ -5,9 +5,9 @@ export type ThemeMode = "light" | "dark" | "system";
 export type Direction = "editorial" | "graphite" | "paper";
 
 export const DIRECTIONS: { key: Direction; label: string; description: string }[] = [
-  { key: "editorial", label: "暖白", description: "宽松留白、圆角卡片与柔和面积图（推荐）" },
-  { key: "graphite", label: "石墨", description: "紧凑密度、小圆角、等宽数字与清晰柱线" },
-  { key: "paper", label: "墨纸", description: "宋体标题、细分隔线与轻盈折线，阅读感" },
+  { key: "editorial", label: "舒适", description: "大数字、暖色构成条与柔和面积图（推荐）" },
+  { key: "graphite", label: "终端", description: "等宽数字、格线分区与一屏看全的表格" },
+  { key: "paper", label: "书卷", description: "报纸式标题、自动结论句与细线图" },
 ];
 
 export interface Settings {

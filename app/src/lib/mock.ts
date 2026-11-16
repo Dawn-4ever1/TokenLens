@@ -747,6 +747,7 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { userCode: "ABCD-1234", verificationUri: "https://github.com/login/device" };
     case "poll_github_login": {
       pollCount += 1;
+      if (params.has("github-failure")) return { status: "failed", failureCode: "github_email_permission" };
       if (pollCount % 2 === 1) return { status: "pending" };
       state.accountEmail = "octo@example.com";
       state.accountProvider = "github";

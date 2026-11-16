@@ -83,7 +83,7 @@ export const app = {
     name: string;
     autostart: boolean;
   }) =>
-    call<{ status: string; retryAfterSeconds?: number; app?: AppStatus }>("poll_github_login", input),
+    call<{ status: string; retryAfterSeconds?: number; failureCode?: string; app?: AppStatus }>("poll_github_login", input),
   openGitHubDevicePage: (url: string) => call<void>("open_github_device_page", { url }),
   startGoogleLogin: (server: string) =>
     call<{ authUrl: string }>("start_google_login", { server }),

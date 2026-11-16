@@ -25,6 +25,7 @@ export function autoBucket(span: DateSpan, firstEventDate: string | undefined, t
 
 export function Overview() {
   const { filters, timeZone, query, options } = useData();
+  const { settings } = useSettings();
   const span = resolveRange(filters, timeZone);
   const q = query();
   const summary = useDashboard<Summary>("summary", q);
@@ -39,10 +40,28 @@ export function Overview() {
   }
   const s = summary.data;
   const empty = s.messageCount === 0;
+  const errorBanner = summary.error ? <LoadError error={summary.error} onRetry={summary.reload} compact /> : null;
+
+  if (settings.direction === "graphite") {
+    return (
+      <>
+        {errorBanner}
+        <TerminalOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
+      </>
+    );
+  }
+  if (settings.direction === "paper") {
+    return (
+      <>
+        {errorBanner}
+        <PaperOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
+      </>
+    );
+  }
 
   return (
     <div className="space-y-[var(--stack-space)]">
-      {summary.error ? <LoadError error={summary.error} onRetry={summary.reload} compact /> : null}
+      {errorBanner}
       <div data-testid="overview-kpis" className="grid grid-cols-2 gap-[var(--grid-gap)] min-[1000px]:grid-cols-4">
         <Kpi label="Tokens" value={<Num value={s.totalTokens} />} />
         <Kpi label="成本" value={<span className="num">{usd(s.costUsd)}</span>} />
@@ -70,6 +89,141 @@ export function Overview() {
         <RecentCard page={recent.data} error={recent.error} reload={recent.reload} />
         <DeviceStrip data={devices.data} error={devices.error} reload={devices.reload} />
       </div>
+    </div>
+  );
+}
+
+type OverviewVariantProps = {
+  summary: Summary;
+  empty: boolean;
+  trend: Timeseries | null;
+  trendError: unknown;
+  trendReload: () => void;
+  bucket: Bucket;
+  recent: SessionPage | null;
+  recentError: unknown;
+  recentReload: () => void;
+  devices: Devices | null;
+  devicesError: unknown;
+  devicesReload: () => void;
+};
+
+function TerminalMetric({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <section className="terminal-kpi min-w-0 px-3 py-3 first:border-l last:border-r sm:px-4">
+      <h2 className="truncate text-xs font-medium uppercase tracking-[0.08em] text-ink-3">{label}</h2>
+      <div className="display num-fit num mt-2 truncate text-xl font-semibold text-ink">{value}</div>
+    </section>
+  );
+}
+
+function TerminalTools({ summary }: { summary: Summary }) {
+  const { go } = useNav();
+  const rows = summary.byClient.slice(0, 8);
+  return rows.length ? (
+    <div className="overflow-x-auto">
+      <table className="terminal-table w-full min-w-[520px] table-fixed text-left text-xs">
+        <thead className="text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          <tr>
+            <th className="w-[32%] px-3 py-2 font-medium">工具</th>
+            <th className="px-3 py-2 font-medium">Tokens</th>
+            <th className="w-[22%] px-3 py-2 text-right font-medium">成本</th>
+            <th className="w-[18%] px-3 py-2 text-right font-medium">占比</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.key} className="transition-colors">
+              <td className="px-3 py-2.5">
+                <button type="button" className="text-left" onClick={() => row.key !== OTHER_KEY && go("sessions", { clients: [row.key] })}>
+                  <ClientName id={row.key} label={row.label} className="text-ink" />
+                </button>
+              </td>
+              <td className="px-3 py-2.5"><Num value={row.totalTokens} plain className="font-semibold text-ink" /></td>
+              <td className="num px-3 py-2.5 text-right text-ink-2">{usd(row.costUsd)}</td>
+              <td className="num px-3 py-2.5 text-right text-ink-2">{percent(share(row.totalTokens, summary.totalTokens), 0)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  ) : <EmptyState title="没有工具数据" />;
+}
+
+function TerminalOverview({ summary, empty, trend, trendError, trendReload, bucket, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
+  return (
+    <div className="terminal-layout space-y-[var(--stack-space)]">
+      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-0 min-[900px]:grid-cols-5">
+        <TerminalMetric label="Tokens" value={<Num value={summary.totalTokens} />} />
+        <TerminalMetric label="成本" value={usd(summary.costUsd)} />
+        <TerminalMetric label="缓存命中率" value={percent(summary.cacheHitRate)} />
+        <TerminalMetric label="会话" value={exact(summary.sessionCount)} />
+        <TerminalMetric label="轮次" value={exact(summary.turnCount)} />
+      </div>
+      {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
+        <>
+          <TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} />
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-[1.15fr_0.85fr]">
+            <Card title="工具" subtitle="按工具查看用量"><TerminalTools summary={summary} /></Card>
+            <ModelCard summary={summary} />
+          </div>
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
+            <RecentCard page={recent} error={recentError} reload={recentReload} />
+            <DeviceStrip data={devices} error={devicesError} reload={devicesReload} />
+          </div>
+          <div className="terminal-status flex flex-wrap gap-x-4 gap-y-1 pt-2 text-[11px]">
+            <span>ACTIVE DAYS {exact(summary.activeDays)}</span>
+            <span>MESSAGES {exact(summary.messageCount)}</span>
+            <span>UPDATED {relativeTime(summary.generatedAt)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function PaperMetric({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <section className="paper-metric min-w-0">
+      <div className="text-xs text-ink-3">{label}</div>
+      <div className="display num-fit mt-1 truncate text-2xl text-ink">{value}</div>
+    </section>
+  );
+}
+
+function paperConclusion(summary: Summary): string {
+  if (summary.messageCount === 0) return "这个时间范围没有用量记录。";
+  const cache = summary.cacheHitRate == null ? "缓存读取比例尚未计算" : `${percent(summary.cacheHitRate)} 是缓存读取`;
+  return `本时间范围共用 ${compact(summary.totalTokens)}，其中 ${cache}。`;
+}
+
+function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
+  return (
+    <div className="paper-layout space-y-[var(--stack-space)]">
+      <div className="paper-masthead">
+        <div className="text-xs tracking-[0.16em] text-ink-3">TOKENLENS · USAGE REPORT</div>
+        <div className="paper-conclusion mt-3">{paperConclusion(summary)}</div>
+      </div>
+      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-x-6 gap-y-4 min-[900px]:grid-cols-4">
+        <PaperMetric label="Tokens" value={<Num value={summary.totalTokens} />} />
+        <PaperMetric label="成本" value={usd(summary.costUsd)} />
+        <PaperMetric label="缓存命中率" value={percent(summary.cacheHitRate)} />
+        <PaperMetric label="会话" value={exact(summary.sessionCount)} />
+      </div>
+      {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
+        <>
+          <div className="paper-rule pt-4"><TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} /></div>
+          <Card title="Token 构成" action={<PrecisionBadge precision={summary.precision} />}><Composition value={summary} /></Card>
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
+            <ToolCard summary={summary} />
+            <ModelCard summary={summary} />
+          </div>
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
+            <RecentCard page={recent} error={recentError} reload={recentReload} />
+            <DeviceStrip data={devices} error={devicesError} reload={devicesReload} />
+          </div>
+        </>
+      )}
     </div>
   );
 }

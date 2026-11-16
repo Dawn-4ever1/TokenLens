@@ -424,6 +424,20 @@ test("GitHub sign-in shows a device code and finishes without any email", async 
   expect(errors).toEqual([]);
 });
 
+test("GitHub sign-in shows the server failure reason instead of silently returning", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?github-failure" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("没有允许读取邮箱");
+  await expect(dialog.getByRole("button", { name: "继续前往 GitHub", exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
 test("Google sign-in finishes in the browser without any code or email", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page, { view: "devices", query: "" });

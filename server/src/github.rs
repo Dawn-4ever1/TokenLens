@@ -28,6 +28,31 @@ pub struct DeviceStart {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    Network,
+    OAuth,
+    ClientConfiguration,
+    Profile,
+    EmailPermission,
+    Response,
+    MissingVerifiedEmail,
+}
+
+impl Failure {
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::OAuth => "oauth_failed",
+            Self::ClientConfiguration => "client_not_configured",
+            Self::Profile => "github_profile",
+            Self::EmailPermission => "github_email_permission",
+            Self::Response => "github_response",
+            Self::MissingVerifiedEmail => "missing_verified_email",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Poll {
     Pending,
     SlowDown(u64),
@@ -39,7 +64,7 @@ pub enum Poll {
     },
     Denied,
     Expired,
-    Failed,
+    Failed(Failure),
 }
 
 #[derive(Clone)]
@@ -144,7 +169,7 @@ impl GitHub {
             }),
         );
         let Ok(reply) = reply else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::Network);
         };
         if let Some(error) = reply["error"].as_str() {
             return match error {
@@ -152,14 +177,17 @@ impl GitHub {
                 "slow_down" => Poll::SlowDown(reply["interval"].as_u64().unwrap_or(5)),
                 "expired_token" => Poll::Expired,
                 "access_denied" => Poll::Denied,
-                _ => Poll::Failed,
+                "incorrect_client_credentials" | "unauthorized_client" => {
+                    Poll::Failed(Failure::ClientConfiguration)
+                }
+                _ => Poll::Failed(Failure::OAuth),
             };
         }
         let Some(token) = reply["access_token"]
             .as_str()
             .filter(|value| !value.is_empty())
         else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::OAuth);
         };
         self.identity(token)
     }
@@ -182,10 +210,10 @@ impl GitHub {
             _ => None,
         };
         let Some(user) = user else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::Profile);
         };
         let Some(subject) = user["id"].as_i64().map(|id| id.to_string()) else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::Profile);
         };
         let display_name = user["login"]
             .as_str()
@@ -205,11 +233,11 @@ impl GitHub {
             .header("Authorization", format!("Bearer {token}"))
             .header("X-GitHub-Api-Version", "2026-03-10")
             .call();
-        let Some(list) = emails
-            .ok()
-            .filter(|response| response.status().is_success())
-        else {
-            return Poll::Failed;
+        let Some(list) = emails.ok() else {
+            return Poll::Failed(Failure::Network);
+        };
+        if !list.status().is_success() {
+            return Poll::Failed(Failure::EmailPermission);
         };
         let Ok(bytes) = list
             .into_body()
@@ -217,10 +245,10 @@ impl GitHub {
             .limit(128 * 1024)
             .read_to_vec()
         else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::Response);
         };
         let Ok(list) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
-            return Poll::Failed;
+            return Poll::Failed(Failure::Response);
         };
         let verified = |entry: &&serde_json::Value| entry["verified"].as_bool() == Some(true);
         let email = list
@@ -237,7 +265,7 @@ impl GitHub {
                 display_name,
                 avatar_url,
             },
-            None => Poll::Failed,
+            None => Poll::Failed(Failure::MissingVerifiedEmail),
         }
     }
 }
