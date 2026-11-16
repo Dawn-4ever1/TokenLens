@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::collector::now_ms;
 use crate::commands::{self, AppState, AppStatus};
+#[cfg(target_os = "macos")]
 use crate::config;
 use crate::format;
 use crate::remote;
@@ -124,7 +125,10 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 }
             })
     };
+    #[cfg(target_os = "macos")]
     let icon = builder.build(app)?;
+    #[cfg(not(target_os = "macos"))]
+    builder.build(app)?;
     let (sender, receiver) = mpsc::channel();
     app.manage(Tray::<Wry> {
         items,

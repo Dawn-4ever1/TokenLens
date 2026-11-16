@@ -14,7 +14,9 @@ pub const MAIN: &str = "main";
 /// second TokenLens above the sidebar's existing brand. Keep productName and
 /// macOS untouched; the window's taskbar icon still identifies the app.
 #[cfg(windows)]
-fn windows_config_without_native_title(mut config: tauri::WindowConfig) -> tauri::WindowConfig {
+fn windows_config_without_native_title(
+    mut config: tauri::utils::config::WindowConfig,
+) -> tauri::utils::config::WindowConfig {
     config.title.clear();
     config
 }
@@ -110,7 +112,7 @@ mod tests {
         assert_eq!(config["app"]["windows"][0]["title"], "TokenLens");
         #[cfg(windows)]
         {
-            let windows: tauri::WindowConfig =
+            let windows: tauri::utils::config::WindowConfig =
                 serde_json::from_value(config["app"]["windows"][0].clone())
                     .expect("Tauri window config");
             let adjusted = super::windows_config_without_native_title(windows);

@@ -566,7 +566,7 @@ pub fn apply_menu_bar_total(app: &AppHandle, enabled: bool) -> CmdResult<AppStat
 }
 
 #[cfg(not(target_os = "macos"))]
-pub fn apply_menu_bar_total(app: &AppHandle, _enabled: bool) -> CmdResult<AppStatus> {
+pub fn apply_menu_bar_total(_app: &AppHandle, _enabled: bool) -> CmdResult<AppStatus> {
     Err(CommandError::new("unavailable"))
 }
 
