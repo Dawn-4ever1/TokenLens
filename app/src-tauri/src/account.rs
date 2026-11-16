@@ -464,6 +464,8 @@ pub struct GitHubStart {
     pub device_code: String,
     pub user_code: String,
     pub verification_uri: String,
+    pub interval_seconds: u64,
+    pub expires_in_seconds: u64,
 }
 
 pub enum GitHubPoll {
@@ -494,6 +496,8 @@ pub fn github_start(server: &str) -> CmdResult<GitHubStart> {
         device_code: text("deviceCode").ok_or(CommandError::new("server"))?,
         user_code: text("userCode").ok_or(CommandError::new("server"))?,
         verification_uri: text("verificationUri").ok_or(CommandError::new("server"))?,
+        interval_seconds: body["intervalSeconds"].as_u64().unwrap_or(5).max(1),
+        expires_in_seconds: body["expiresInSeconds"].as_u64().unwrap_or(900).max(1),
     })
 }
 

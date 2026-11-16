@@ -108,7 +108,12 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const cloud = status?.cloudServer ?? "https://tokenlens.online";
   const [where, setWhere] = useState<Where>("cloud");
   const [method, setMethod] = useState<Method>("github");
-  const [gh, setGh] = useState<{ userCode: string; verificationUri: string } | null>(null);
+  const [gh, setGh] = useState<{
+    userCode: string;
+    verificationUri: string;
+    intervalSeconds: number;
+    expiresInSeconds: number;
+  } | null>(null);
   const [ghState, setGhState] = useState<"idle" | "pending" | "expired" | "denied" | "failed">("idle");
   const [ghFailure, setGhFailure] = useState<string | null>(null);
   const [gg, setGg] = useState<{ authUrl: string } | null>(null);
@@ -224,7 +229,13 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     setGhFailure(null);
     try {
       const next = await app.startGitHubLogin(server);
-      setGh(next);
+      setGh({
+        ...next,
+        // Older servers did not return the RFC 8628 timing fields. Keep their
+        // existing behavior while honoring the interval on current servers.
+        intervalSeconds: Math.max(1, next.intervalSeconds ?? 5),
+        expiresInSeconds: Math.max(1, next.expiresInSeconds ?? 900),
+      });
       setGhState("pending");
       setCopyState("idle");
       await app.openGitHubDevicePage(next.verificationUri).catch(() => undefined);
@@ -238,7 +249,23 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   useEffect(() => {
     if (!gh) return;
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let delayMs = gh.intervalSeconds * 1000;
+    const deadline = Date.now() + gh.expiresInSeconds * 1000;
+    const schedule = () => {
+      if (!alive) return;
+      const wait = Math.min(delayMs, Math.max(0, deadline - Date.now()));
+      timer = setTimeout(() => void tick(), wait);
+    };
     const tick = async () => {
+      if (Date.now() >= deadline) {
+        if (alive) {
+          setGhState("expired");
+          setGh(null);
+          setCopyState("idle");
+        }
+        return;
+      }
       try {
         const next = await app.pollGitHubLogin({
           server,
@@ -247,9 +274,16 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           autostart: status?.autostart === true,
         });
         if (!alive) return;
-        if (next.status === "ok" && next.app) {
-          set(next.app);
-          onClose();
+        if (next.status === "ok") {
+          if (next.app) {
+            set(next.app);
+            onClose();
+          } else {
+            setError("GitHub 已显示授权成功，但应用没有收到登录结果，请重新开始。");
+            setGhState("failed");
+            setGh(null);
+            setCopyState("idle");
+          }
           return;
         }
         if (next.status === "expired" || next.status === "denied" || next.status === "failed") {
@@ -257,16 +291,33 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           setGhFailure(next.failureCode ?? null);
           setGh(null);
           setCopyState("idle");
+          return;
         }
+        if (next.status === "slow_down") {
+          // RFC 8628 requires increasing the interval after slow_down. GitHub
+          // currently returns the new interval, but keep the increment too for
+          // providers that only return the error name.
+          delayMs = Math.max(
+            delayMs + 5_000,
+            Math.max(1, next.retryAfterSeconds ?? 0) * 1_000,
+          );
+        }
+        schedule();
       } catch (next) {
-        if (alive) setError(loginError(next));
+        if (alive) {
+          setError(loginError(next));
+          setGhState("failed");
+          setGh(null);
+          setCopyState("idle");
+        }
       }
     };
-    void tick();
-    const id = setInterval(() => void tick(), 5000);
+    // GitHub's device flow forbids an immediate first poll. The old code did
+    // that and then ignored slow_down, which left the dialog waiting forever.
+    schedule();
     return () => {
       alive = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
     // The flow restarts only when a new device code arrives.
     // eslint-disable-next-line react-hooks/exhaustive-deps

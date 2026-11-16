@@ -432,9 +432,24 @@ test("GitHub sign-in shows the server failure reason instead of silently returni
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
-  await expect(dialog.getByRole("alert")).toContainText("没有允许读取邮箱");
+  // Current servers honor GitHub's device-flow interval before the first poll.
+  await expect(dialog.getByRole("alert")).toContainText("没有允许读取邮箱", { timeout: 12_000 });
   await expect(dialog.getByRole("button", { name: "继续前往 GitHub", exact: true })).toBeVisible();
   await expect(dialog).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("GitHub poll errors leave the waiting state and can be retried", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?github-poll-error" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog.getByRole("alert").filter({ hasText: "另一个账号的空间" })).toBeVisible({ timeout: 12_000 });
+  await expect(dialog.getByText("等待授权…", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "继续前往 GitHub", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

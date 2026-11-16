@@ -76,7 +76,12 @@ export const app = {
   accountPairCode: (rotate: boolean) => call<SpaceCode>("account_pair_code", { rotate }),
   logoutAccount: () => call<AppStatus>("logout_account"),
   startGitHubLogin: (server: string) =>
-    call<{ userCode: string; verificationUri: string }>("start_github_login", { server }),
+    call<{
+      userCode: string;
+      verificationUri: string;
+      intervalSeconds?: number;
+      expiresInSeconds?: number;
+    }>("start_github_login", { server }),
   pollGitHubLogin: (input: {
     server: string;
     formFactor: "laptop" | "desktop";

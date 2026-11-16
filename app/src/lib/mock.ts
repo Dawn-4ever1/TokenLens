@@ -744,10 +744,19 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { ...state, collector: { ...state.collector } };
     case "start_github_login":
       if (params.has("githubfail")) throw new ApiError("unavailable");
-      return { userCode: "ABCD-1234", verificationUri: "https://github.com/login/device" };
+      return {
+        userCode: "ABCD-1234",
+        verificationUri: "https://github.com/login/device",
+        intervalSeconds: params.has("github-slow-down") ? 1 : 5,
+        expiresInSeconds: 900,
+      };
     case "poll_github_login": {
       pollCount += 1;
       if (params.has("github-failure")) return { status: "failed", failureCode: "github_email_permission" };
+      if (params.has("github-poll-error")) throw new ApiError("account_mismatch");
+      if (params.has("github-slow-down") && pollCount === 1) {
+        return { status: "slow_down", retryAfterSeconds: 1 };
+      }
       if (pollCount % 2 === 1) return { status: "pending" };
       state.accountEmail = "octo@example.com";
       state.accountProvider = "github";

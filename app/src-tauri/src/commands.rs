@@ -826,6 +826,8 @@ pub async fn start_github_login(app: AppHandle, server: String) -> CmdResult<Val
         Ok(json!({
             "userCode": start.user_code,
             "verificationUri": start.verification_uri,
+            "intervalSeconds": start.interval_seconds,
+            "expiresInSeconds": start.expires_in_seconds,
         }))
     })
     .await
