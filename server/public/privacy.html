@@ -139,7 +139,7 @@
               <tr><th scope="row">云服务器与网络服务商</th><td>托管数据库、备份与 HTTPS 连接；像多数网络服务一样，可能处理连接所需的 IP 地址、时间和基本请求日志。</td></tr>
               <tr><th scope="row">Google / GitHub</th><td>你主动选择对应登录方式时，处理登录授权及基本账号资料。</td></tr>
               <tr><th scope="row">邮件服务商</th><td>你选择邮箱验证码时，接收邮箱地址以投递验证码；当前默认接口为 Resend，自建服务可以另行配置。</td></tr>
-              <tr><th scope="row">公开价格与更新服务</th><td>应用或服务器下载公开价格表；应用按设置检查 GitHub Release。这些是匿名请求，不带账号会话、设备同步凭据或你的用量。</td></tr>
+              <tr><th scope="row">公开价格与更新服务</th><td>应用或服务器下载公开价格表；应用按设置先检查 GitHub Release，失败时尝试 TokenLens 官网的发布副本。官网也从 GitHub 的正式发布同步并校验安装包。这些是匿名请求，不带账号会话、设备同步凭据或你的用量。</td></tr>
             </tbody>
           </table>
           <p>相关第三方政策：</p>

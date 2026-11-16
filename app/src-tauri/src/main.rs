@@ -109,6 +109,7 @@ fn main() {
             commands::set_paused,
             commands::sync_now,
             commands::set_autostart,
+            commands::set_menu_bar_total,
             commands::create_pair_code,
             commands::rename_device,
             commands::set_device_form_factor,

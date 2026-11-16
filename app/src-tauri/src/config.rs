@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use collector_core::credentials::DEFAULT_KEYCHAIN_SERVICE;
 use collector_core::sync;
@@ -40,5 +40,41 @@ impl Paths {
 
     pub fn paused_marker(&self) -> PathBuf {
         self.state_dir.join("app-paused")
+    }
+}
+
+/// Whether the user explicitly asked for a number beside the Mac menu-bar
+/// icon. Windows is deliberately left icon-only. Missing/corrupt settings
+/// default to the requested display without blocking startup.
+pub fn menu_bar_total_enabled(state_dir: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(state_dir.join("menu-bar-total.json")) else {
+        return true;
+    };
+    serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|value| value.get("enabled")?.as_bool())
+        .unwrap_or(true)
+}
+
+pub fn save_menu_bar_total_enabled(state_dir: &Path, enabled: bool) -> std::io::Result<()> {
+    std::fs::create_dir_all(state_dir)?;
+    let path = state_dir.join("menu-bar-total.json");
+    let temporary = state_dir.join("menu-bar-total.json.tmp");
+    std::fs::write(&temporary, format!("{{\"enabled\":{enabled}}}\n"))?;
+    std::fs::rename(temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn menu_bar_preference_defaults_persists_and_survives_corruption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(super::menu_bar_total_enabled(dir.path()));
+        super::save_menu_bar_total_enabled(dir.path(), false).expect("save off");
+        assert!(!super::menu_bar_total_enabled(dir.path()));
+        super::save_menu_bar_total_enabled(dir.path(), true).expect("save on");
+        assert!(super::menu_bar_total_enabled(dir.path()));
+        std::fs::write(dir.path().join("menu-bar-total.json"), b"not json").expect("fixture");
+        assert!(super::menu_bar_total_enabled(dir.path()));
     }
 }

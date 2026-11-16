@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useSettings } from "./settings";
+import { useSettings, type Direction } from "./settings";
 
 let probe: HTMLSpanElement | null = null;
 let canvas: CanvasRenderingContext2D | null | undefined;
@@ -35,6 +35,12 @@ export function resolveColor(css: string): string {
 }
 
 export interface Palette {
+  direction: Direction;
+  fontFamily: string;
+  tooltipRadius: number;
+  chartLineWidth: number;
+  chartAreaOpacity: number;
+  barMaxWidth: number;
   ink: string;
   ink2: string;
   ink3: string;
@@ -49,7 +55,7 @@ export interface Palette {
 }
 
 export function usePalette(): Palette {
-  const { paletteVersion } = useSettings();
+  const { paletteVersion, settings } = useSettings();
   return useMemo(() => {
     const cache = new Map<string, string>();
     const resolve = (css: string) => {
@@ -57,7 +63,14 @@ export function usePalette(): Palette {
       if (!found) cache.set(css, (found = resolveColor(css)));
       return found;
     };
+    const styles = getComputedStyle(document.documentElement);
     return {
+      direction: settings.direction,
+      fontFamily: styles.getPropertyValue("--font-body").trim(),
+      tooltipRadius: Number.parseFloat(styles.getPropertyValue("--radius-control")) || 8,
+      chartLineWidth: settings.direction === "paper" ? 1.25 : settings.direction === "graphite" ? 2 : 2,
+      chartAreaOpacity: settings.direction === "paper" ? 0 : settings.direction === "graphite" ? 0.1 : 0.22,
+      barMaxWidth: settings.direction === "graphite" ? 32 : 24,
       ink: resolve("var(--ink)"),
       ink2: resolve("var(--ink-2)"),
       ink3: resolve("var(--ink-3)"),

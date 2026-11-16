@@ -55,6 +55,7 @@ pub struct AppState {
     google: Option<std::sync::Arc<crate::google::Google>>,
     google_flows: Arc<crate::google::GoogleFlows>,
     avatar_data: Arc<crate::avatar_data::AvatarData>,
+    release_mirror: Option<Arc<crate::release_mirror::ReleaseMirror>>,
     auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
 }
 
@@ -73,6 +74,7 @@ impl AppState {
             google: None,
             google_flows: Arc::new(crate::google::GoogleFlows::default()),
             avatar_data: Arc::new(crate::avatar_data::AvatarData::new()),
+            release_mirror: None,
             auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
         }
     }
@@ -115,6 +117,19 @@ impl AppState {
 
     pub fn avatar_data(&self) -> Arc<crate::avatar_data::AvatarData> {
         Arc::clone(&self.avatar_data)
+    }
+
+    #[must_use]
+    pub fn with_release_mirror(
+        mut self,
+        mirror: Arc<crate::release_mirror::ReleaseMirror>,
+    ) -> Self {
+        self.release_mirror = Some(mirror);
+        self
+    }
+
+    pub fn release_mirror(&self) -> Option<Arc<crate::release_mirror::ReleaseMirror>> {
+        self.release_mirror.clone()
     }
 
     pub fn db_handle(&self) -> Result<Arc<Mutex<Connection>>, ApiError> {
@@ -298,6 +313,10 @@ pub fn router(state: AppState) -> Router {
         .route("/privacy", get(crate::public_site::privacy))
         .route("/assets/site.css", get(crate::public_site::styles))
         .route("/assets/tokenlens.svg", get(crate::public_site::logo))
+        .route("/downloads/latest.json", get(download_manifest))
+        .route("/downloads/latest/windows", get(download_latest_windows))
+        .route("/downloads/latest/macos", get(download_latest_macos))
+        .route("/downloads/v{version}/{filename}", get(download_asset))
         .route("/api/auth/code", post(crate::auth_http::request_code))
         .route("/api/auth/login", post(crate::auth_http::login))
         .route("/api/auth/me", get(crate::auth_http::me))
@@ -375,6 +394,7 @@ pub enum ApiError {
     NotFound,
     PayloadTooLarge,
     UnsupportedEncoding,
+    ServiceUnavailable,
     TooManyRequests,
     /// Per-device ingest budget used up; seconds until the next window.
     SlowDown(u64),
@@ -390,6 +410,7 @@ impl ApiError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedEncoding => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Self::ServiceUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::TooManyRequests | Self::SlowDown(_) => StatusCode::TOO_MANY_REQUESTS,
             Self::Internal => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -404,6 +425,7 @@ impl ApiError {
             Self::NotFound => "not_found",
             Self::PayloadTooLarge => "payload_too_large",
             Self::UnsupportedEncoding => "unsupported_encoding",
+            Self::ServiceUnavailable => "release_mirror_unavailable",
             Self::TooManyRequests | Self::SlowDown(_) => "too_many_requests",
             Self::Internal => "internal",
         }
@@ -1046,6 +1068,138 @@ async fn dashboard_health(
     state
         .query(move |conn, tz, now| dashboard::health(conn, tz, &caller.tenant_id, now))
         .await
+}
+
+// ------------------------------------------------------------ downloads --
+
+fn mirror_snapshot(state: &AppState) -> Result<Arc<crate::release_mirror::Snapshot>, ApiError> {
+    state
+        .release_mirror
+        .as_ref()
+        .and_then(|mirror| mirror.current())
+        .ok_or(ApiError::ServiceUnavailable)
+}
+
+fn download_response(
+    method: axum::http::Method,
+    body: Vec<u8>,
+    content_type: &'static str,
+    cache: &'static str,
+    disposition: Option<&str>,
+) -> Response {
+    let length = body.len();
+    let mut response = (if method == axum::http::Method::HEAD {
+        Body::empty()
+    } else {
+        Body::from(body)
+    })
+    .into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&length.to_string()).expect("decimal content length"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    if let Some(disposition) = disposition {
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_str(disposition).expect("allow-listed asset filename"),
+        );
+    }
+    response
+}
+
+async fn download_manifest(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+) -> Result<Response, ApiError> {
+    let snapshot = mirror_snapshot(&state)?;
+    Ok(download_response(
+        method,
+        snapshot.manifest().to_vec(),
+        "application/json",
+        "public, max-age=60, must-revalidate",
+        None,
+    ))
+}
+
+async fn latest_installer(
+    state: AppState,
+    filename: impl FnOnce(&str) -> String,
+) -> Result<Response, ApiError> {
+    let snapshot = mirror_snapshot(&state)?;
+    let filename = filename(&snapshot.version());
+    let location = snapshot.location(&filename).ok_or(ApiError::NotFound)?;
+    let mut response = StatusCode::FOUND.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(location).map_err(|_| ApiError::Internal)?,
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    Ok(response)
+}
+
+async fn download_latest_windows(State(state): State<AppState>) -> Result<Response, ApiError> {
+    latest_installer(state, |version| {
+        format!("TokenLens_{version}_x64-setup.exe")
+    })
+    .await
+}
+
+async fn download_latest_macos(State(state): State<AppState>) -> Result<Response, ApiError> {
+    latest_installer(state, |version| format!("TokenLens_{version}_aarch64.dmg")).await
+}
+
+async fn download_asset(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+    Path((version, filename)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let snapshot = mirror_snapshot(&state)?;
+    if snapshot.version() != version {
+        return Err(ApiError::NotFound);
+    }
+    let path = snapshot.file_path(&filename).ok_or(ApiError::NotFound)?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| ApiError::ServiceUnavailable)?;
+    if bytes.len() > crate::release_mirror::MAX_ASSET_BYTES
+        || !snapshot.checksum_matches(&filename, &bytes)
+    {
+        return Err(ApiError::ServiceUnavailable);
+    }
+    let is_json = filename == crate::release_mirror::MANIFEST_FILE;
+    let bytes = if is_json {
+        snapshot.manifest().to_vec()
+    } else {
+        bytes
+    };
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    Ok(download_response(
+        method,
+        bytes,
+        if is_json {
+            "application/json"
+        } else {
+            "application/octet-stream"
+        },
+        if is_json {
+            "public, max-age=60, must-revalidate"
+        } else {
+            "public, max-age=31536000, immutable"
+        },
+        Some(&disposition),
+    ))
 }
 
 /// Liveness for the container healthcheck; reveals nothing.

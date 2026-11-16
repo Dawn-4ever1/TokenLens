@@ -149,12 +149,112 @@ for (const direction of ["editorial", "graphite", "paper"] as const) {
       if (!title) throw new Error("The page title is missing");
       return { title: getComputedStyle(title).fontFamily, body: getComputedStyle(document.body).fontFamily };
     });
-    expect(fontFamilies.title).toBe(fontFamilies.body);
+    if (direction === "paper") {
+      expect(fontFamilies.title).toContain("Songti SC");
+      expect(fontFamilies.title).not.toBe(fontFamilies.body);
+    } else {
+      expect(fontFamilies.title).toBe(fontFamilies.body);
+    }
     const background = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
     expect(luminance(background)).toBeLessThan(0.25);
     expect(errors).toEqual([]);
   });
 }
+
+test("directions change typography, density and surfaces, not just colours", async ({ page, browser }) => {
+  await page.close();
+  for (const direction of ["editorial", "graphite", "paper"] as const) {
+    page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const errors = await open(page, { direction });
+    await settle(page, "总览");
+    const expectedPadding = direction === "graphite" ? "16px" : "20px";
+    await expect.poll(() => page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--card-px").trim())).toBe(expectedPadding);
+    const style = await page.evaluate(() => {
+      const root = getComputedStyle(document.documentElement);
+      const card = getComputedStyle(document.querySelector("#overview-kpis, [data-testid='overview-kpis'] section")!);
+      const heading = getComputedStyle(document.querySelector("h1")!);
+      const numeric = getComputedStyle(document.querySelector(".display.num-fit")!);
+      return {
+        padding: root.getPropertyValue("--card-px").trim(),
+        radius: root.getPropertyValue("--radius-card").trim(),
+        shadow: card.boxShadow,
+        border: card.borderBottomWidth,
+        title: heading.fontFamily,
+        numeric: numeric.fontFamily,
+      };
+    });
+    if (direction === "editorial") {
+      expect(style.padding).toBe("20px");
+      expect(style.radius).toBe("14px");
+      expect(style.shadow).not.toBe("none");
+      expect(style.border).toBe("1px");
+    } else if (direction === "graphite") {
+      expect(style.padding).toBe("16px");
+      expect(style.radius).toBe("6px");
+      expect(style.shadow).toBe("none");
+      expect(style.numeric).toContain("Mono");
+    } else {
+      expect(style.radius).toBe("2px");
+      expect(style.shadow).toBe("none");
+      expect(style.border).toBe("1px");
+      expect(style.title).toContain("Songti SC");
+      expect(style.title).not.toBe(style.numeric);
+    }
+    expect(errors).toEqual([]);
+    await page.close();
+  }
+});
+
+test("direction previews mirror the real cards and preserve their own miniature fonts", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "settings", direction: "paper" });
+  await settle(page, "设置");
+  await expect(page.getByText("改变字体、密度、卡片和图表样式；数据、功能和操作方式保持一致。", { exact: true })).toBeVisible();
+  const previews = page.locator("[data-direction-preview]");
+  await expect(previews).toHaveCount(3);
+  await expect(page.locator("[data-direction-preview='graphite'] svg rect")).toHaveCount(6);
+  await expect(page.locator("[data-direction-preview='paper'] svg path[stroke='var(--primary)']")).toHaveAttribute("stroke-width", "1.2");
+  const radii = await previews.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).borderRadius));
+  expect(radii).toEqual(["14px", "6px", "2px"]);
+  const paperTitle = previews.nth(2).locator(".display");
+  await expect(paperTitle).toHaveCSS("font-size", "10px");
+  expect(await paperTitle.evaluate((node) => getComputedStyle(node).fontFamily)).toContain("Songti SC");
+  await page.getByRole("radiogroup", { name: "主题" }).getByRole("radio", { name: "深色" }).click();
+  await expect(previews.nth(0)).toHaveClass(/\bdark\b/);
+  await expect(previews.nth(1)).toHaveClass(/\bdark\b/);
+  await expect(previews.nth(2)).toHaveClass(/\bdark\b/);
+  expect(errors).toEqual([]);
+});
+
+test("chart geometry follows its direction; the long-range boundary has a unit test", async ({ page, browser }) => {
+  await page.close();
+  for (const direction of ["editorial", "paper", "graphite"] as const) {
+    page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+    const errors = await open(page, { direction });
+    await settle(page, "总览");
+    const chart = page.getByRole("img", { name: /用量趋势/ });
+    await expect(chart).toHaveAttribute("data-chart-direction", direction);
+    const series = await chart.locator("canvas").evaluate(async (canvas) => {
+      const url = performance.getEntriesByType("resource").map((entry) => entry.name)
+        .find((entry) => new URL(entry).pathname === "/node_modules/.vite/deps/echarts_core.js");
+      if (!url) throw new Error("ECharts module is missing");
+      const { getInstanceByDom } = await import(url);
+      const instance = getInstanceByDom(canvas.parentElement!.parentElement!);
+      if (!instance) throw new Error("ECharts instance is missing");
+      const option = instance.getOption() as { series: { type: string; lineStyle?: { width?: number }; areaStyle?: { opacity?: number } }[] };
+      return option.series.map(({ type, lineStyle, areaStyle }) => ({ type, width: lineStyle?.width, area: areaStyle?.opacity }));
+    });
+    expect(series).toHaveLength(1);
+    if (direction === "graphite") expect(series[0]!.type).toBe("bar");
+    else expect(series[0]!.type).toBe("line");
+    if (direction === "paper") {
+      expect(series[0]!.width).toBe(1.25);
+      expect(series[0]!.area ?? 0).toBe(0);
+    }
+    expect(errors).toEqual([]);
+    await page.close();
+  }
+});
 
 test("switching the theme in settings applies immediately and persists", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -883,7 +983,7 @@ test("clicking a token count switches every count to exact digits and remembers 
     await tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true }).click();
     await expect(tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: false })).toHaveText(/^[\d.]+[KMBT]$/);
     expect(errors).toEqual([]);
-    await page.evaluate(() => sessionStorage.clear());
+    await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   }
 });
 
@@ -1002,15 +1102,38 @@ test("download progress is visible and cannot start a second installation", asyn
   expect(errors).toEqual([]);
 });
 
+test("Mac menu-bar number preference toggles and reports save failures", async ({ page }) => {
+  const errors = await open(page, { query: "?server" });
+  await settle(page, "总览");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  const toggle = page.getByRole("switch", { name: "Mac 顶部显示今日用量", exact: true });
+  await expect(toggle).toBeChecked();
+  await expect(page.getByText("当前空间全部设备的今日总 Tokens，包含缓存读取", { exact: false })).toBeVisible();
+  await toggle.click();
+  await expect(toggle).not.toBeChecked();
+  await page.reload();
+  await settle(page, "设置");
+  await expect(toggle).not.toBeChecked();
+  await page.goto("/?menubar-error");
+  await settle(page, "设置");
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await settle(page, "设置");
+  await page.getByRole("switch", { name: "Mac 顶部显示今日用量", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("服务器出错了");
+  await expect(page.getByRole("switch", { name: "Mac 顶部显示今日用量", exact: true })).not.toBeChecked();
+  expect(errors).toEqual([]);
+});
+
 test("check failures remain quiet outside settings", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 800 });
   const errors = await open(page, { query: "?update=error" });
   await settle(page, "总览");
-  await expect(page.getByText("连不上 GitHub，稍后会再试。", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("暂时连不上更新服务，请稍后再试。", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("dialog")).toHaveCount(0);
   await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
   await settle(page, "设置");
-  await expect(page.getByText("连不上 GitHub，稍后会再试。", { exact: true })).toBeVisible();
+  await expect(page.getByText("暂时连不上更新服务，请稍后再试。", { exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });

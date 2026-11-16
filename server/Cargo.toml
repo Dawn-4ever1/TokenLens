@@ -16,9 +16,12 @@ chrono.workspace = true
 chrono-tz = "0.10"
 clap.workspace = true
 flate2 = "1"
+fs2 = "0.4"
 getrandom = "0.3"
 http-body-util = "0.1"
+minisign-verify = "0.3"
 rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+semver = "1"
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded = "0.7"

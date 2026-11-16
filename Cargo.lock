@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "collector"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "chrono",
  "clap",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5812,7 +5812,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokenlens-app"
-version = "0.5.12"
+version = "0.5.13"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -5854,10 +5854,13 @@ dependencies = [
  "chrono-tz",
  "clap",
  "flate2",
+ "fs2",
  "getrandom 0.3.4",
  "http-body-util",
+ "minisign-verify",
  "reqwest 0.12.28",
  "rusqlite",
+ "semver",
  "serde",
  "serde_json",
  "serde_urlencoded",

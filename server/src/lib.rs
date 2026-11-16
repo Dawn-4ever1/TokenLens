@@ -14,6 +14,7 @@ pub mod mailer;
 pub mod pairing_crypto;
 pub mod pricing;
 pub mod public_site;
+pub mod release_mirror;
 pub mod secrets;
 
 use std::future::Future;
@@ -23,6 +24,46 @@ use std::path::PathBuf;
 pub const DEFAULT_DATABASE_PATH: &str = "./data/tokenlens.sqlite";
 pub const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
 pub const DEFAULT_TIME_ZONE: chrono_tz::Tz = chrono_tz::Asia::Shanghai;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseMirrorConfig {
+    /// Persistent root for immutable releases and the atomic current pointer.
+    /// Production should explicitly set RELEASE_MIRROR_DIR=/app/downloads.
+    pub directory: PathBuf,
+    /// Absolute HTTPS origin used in updater URLs; never derived from Host.
+    pub public_base: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ReleaseMirrorConfigError {
+    #[error(
+        "RELEASE_MIRROR_PUBLIC_BASE must be an HTTPS origin without a path, query or credentials"
+    )]
+    BadPublicBase,
+}
+
+impl ReleaseMirrorConfig {
+    pub fn from_lookup(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Option<Self>, ReleaseMirrorConfigError> {
+        let non_empty = |name: &str| lookup(name).filter(|value| !value.trim().is_empty());
+        let Some(directory) = non_empty("RELEASE_MIRROR_DIR") else {
+            return Ok(None);
+        };
+        if directory.trim() == "off" {
+            return Ok(None);
+        }
+        let public_base = non_empty("RELEASE_MIRROR_PUBLIC_BASE")
+            .unwrap_or_else(|| release_mirror::DEFAULT_PUBLIC_BASE.to_owned());
+        if !release_mirror::valid_public_base(public_base.trim()) {
+            return Err(ReleaseMirrorConfigError::BadPublicBase);
+        }
+        Ok(Some(Self {
+            directory: PathBuf::from(directory.trim()),
+            public_base,
+        }))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -143,6 +184,36 @@ mod tests {
             .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
             .collect::<HashMap<_, _>>();
         Config::from_lookup(|name| map.get(name).cloned())
+    }
+
+    fn mirror_config(
+        pairs: &[(&str, &str)],
+    ) -> Result<Option<ReleaseMirrorConfig>, ReleaseMirrorConfigError> {
+        let map = pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect::<HashMap<_, _>>();
+        ReleaseMirrorConfig::from_lookup(|name| map.get(name).cloned())
+    }
+
+    #[test]
+    fn mirror_is_opt_in_and_public_base_is_not_a_request_header() {
+        assert_eq!(mirror_config(&[]), Ok(None));
+        assert_eq!(mirror_config(&[("RELEASE_MIRROR_DIR", "off")]), Ok(None));
+        assert_eq!(
+            mirror_config(&[("RELEASE_MIRROR_DIR", "/app/downloads")]),
+            Ok(Some(ReleaseMirrorConfig {
+                directory: PathBuf::from("/app/downloads"),
+                public_base: release_mirror::DEFAULT_PUBLIC_BASE.to_owned(),
+            }))
+        );
+        assert_eq!(
+            mirror_config(&[
+                ("RELEASE_MIRROR_DIR", "downloads"),
+                ("RELEASE_MIRROR_PUBLIC_BASE", "http://localhost")
+            ]),
+            Err(ReleaseMirrorConfigError::BadPublicBase)
+        );
     }
 
     #[test]

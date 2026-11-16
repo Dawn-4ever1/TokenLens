@@ -28,7 +28,7 @@ const REFRESH: { key: string; label: string }[] = [
 
 export function Settings() {
   return (
-    <div className="mx-auto max-w-3xl space-y-5">
+    <div className="mx-auto max-w-3xl space-y-[var(--stack-space)]">
       <Appearance />
       <Updates />
       <Collection />
@@ -44,7 +44,7 @@ function Updates() {
   const progressing = updateInProgress(status);
   return (
     <Card title="应用更新" bodyClassName="pt-1">
-      <Row title="自动检查更新" hint="启动后约 10 秒检查，之后每 24 小时一次。只读取 GitHub 的公开版本信息，不发送用量或账号信息；下载和安装前会征求你同意">
+      <Row title="自动检查更新" hint="启动后约 10 秒检查，之后每 24 小时一次。优先读取 GitHub 的公开版本信息，失败时尝试 TokenLens 官网；不发送用量或账号信息，下载和安装前会征求你同意">
         <Switch label="自动检查更新" checked={status?.autoCheck ?? true} disabled={!status || busy || progressing} onChange={(enabled) => void setAutoCheck(enabled)} />
       </Row>
       <Row title={`当前版本 ${appStatus?.appVersion ?? "—"}`} hint="关闭自动检查后，仍可在这里手动检查">
@@ -82,7 +82,7 @@ function Appearance() {
       </Row>
       <div className="py-3.5">
         <div className="text-[13px] font-medium text-ink">视觉风格</div>
-        <div className="mt-0.5 text-xs text-ink-3">三种方向只是配色和字体不同，数字和布局完全一样，随时可以换。</div>
+        <div className="mt-0.5 text-xs text-ink-3">改变字体、密度、卡片和图表样式；数据、功能和操作方式保持一致。</div>
         <div role="radiogroup" aria-label="视觉风格" className="mt-3 grid grid-cols-3 gap-3">
           {DIRECTIONS.map((direction) => (
             <DirectionCard
@@ -105,10 +105,40 @@ function Appearance() {
           onChange={(value) => update({ refreshSeconds: Number(value) })}
         />
       </Row>
+      <MenuBarPreference />
       <Row title="显示精确数字" hint={`Token 数显示每一位（如 ${exact(3531604092)}），而不是简写（3.53B）。在任意页面点一下 token 数也能切换`}>
         <Switch label="显示精确数字" checked={settings.exactNumbers} onChange={(exactNumbers) => update({ exactNumbers })} />
       </Row>
     </Card>
+  );
+}
+
+function MenuBarPreference() {
+  const { status, set } = useStatus();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (status?.platform !== "macos" || status.menuBarTotal == null) return null;
+  const change = async (enabled: boolean) => {
+    setBusy(true);
+    setError(null);
+    try {
+      set(await app.setMenuBarTotal(enabled));
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <Row
+        title="Mac 顶部显示今日用量"
+        hint={`在状态栏图标旁显示${status.server ? "当前空间全部设备" : "这台电脑"}的今日总 Tokens，包含缓存读取；数字约每 10 分钟更新，关闭后只显示图标。不影响后台采集`}
+      >
+        <Switch label="Mac 顶部显示今日用量" checked={status.menuBarTotal} disabled={busy} onChange={(enabled) => void change(enabled)} />
+      </Row>
+      {error && <p role="alert" className="pb-2 text-xs text-bad">{error}</p>}
+    </>
   );
 }
 
@@ -119,28 +149,74 @@ function DirectionCard({ direction, label, description, active, onPick }: { dire
       type="button"
       role="radio"
       aria-checked={active}
+      aria-label={`${label}：${description}`}
       onClick={onPick}
-      className={cn("min-w-0 rounded-xl border p-2.5 text-left transition-colors", active ? "border-primary ring-1 ring-primary" : "border-line hover:bg-surface-2")}
+      className={cn("min-w-0 rounded-[var(--radius-card)] border p-2.5 text-left transition-colors", active ? "border-primary ring-1 ring-primary" : "border-line hover:bg-surface-2")}
     >
-      <div data-direction={direction} className={cn("overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--bg)] p-2", dark && "dark")}>
-        <div className="flex gap-1.5">
-          <div className="h-10 w-3 rounded bg-[var(--surface-2)]" />
-          <div className="flex-1 space-y-1.5">
-            <div className="h-3 w-2/3 rounded-sm bg-[var(--ink)] opacity-80" />
-            <div className="flex h-6 items-end gap-0.5 rounded bg-[var(--surface)] p-1">
-              {[40, 65, 35, 80, 55, 90].map((h, i) => (
-                <div key={i} className="flex-1 rounded-[1px] bg-[var(--primary)]" style={{ height: `${h}%` }} />
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
+      <DirectionPreview direction={direction} dark={dark} />
       <div className="mt-2 flex items-center gap-1.5 text-[13px] font-medium text-ink">
         {label}
         {active && <Check className="h-3.5 w-3.5 text-primary" aria-hidden />}
       </div>
       <div className="mt-0.5 text-[11px] leading-4 text-ink-3">{description}</div>
     </button>
+  );
+}
+
+/** A miniature dashboard, not a colour swatch: geometry matches the real direction. */
+function DirectionPreview({ direction, dark }: { direction: Direction; dark: boolean }) {
+  const chart = "M1 35 C18 34 18 26 34 27 S52 19 65 23 S83 11 99 14 S116 7 132 9";
+  return (
+    <div
+      data-direction-preview={direction}
+      data-direction={direction}
+      className={cn("h-[92px] overflow-hidden border border-[var(--border)] bg-[var(--bg)] p-2.5", dark && "dark")}
+      style={{ borderRadius: "var(--radius-card)", fontFamily: "var(--font-body)" }}
+      aria-hidden
+    >
+      <div className="flex h-full gap-2.5">
+        <div className="w-3 shrink-0 border-r border-[var(--border)] pr-1.5">
+          <div className="mt-1 h-1.5 rounded-[var(--radius-small)] bg-[var(--primary)]" />
+          <div className="mt-2 space-y-1.5">
+            {[0, 1, 2].map((item) => <div key={item} className="h-1 rounded-[var(--radius-small)] bg-[var(--ink-3)] opacity-60" />)}
+          </div>
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="display text-[10px] leading-3 text-[var(--ink)]">用量总览</div>
+          <div className="mt-2 flex items-end justify-between gap-2">
+            <span className="num text-[15px] font-semibold leading-4 tracking-[-0.04em] text-[var(--ink)]">3.53B</span>
+            <span className="text-[6px] leading-2 text-[var(--ink-3)]">本月 Tokens</span>
+          </div>
+          <div
+            className="mt-2 border-[var(--border)] bg-[var(--surface)] p-1.5"
+            style={{
+              borderWidth: direction === "paper" ? "1px 0 0" : 1,
+              borderRadius: "var(--radius-card)",
+              boxShadow: "var(--shadow-card)",
+            }}
+          >
+            <svg viewBox="0 0 134 40" className="h-9 w-full overflow-visible">
+              <path d="M1 35H133" stroke="var(--chart-grid)" strokeWidth="1" />
+              {direction === "graphite" ? (
+                [24, 38, 31, 52, 45, 66].map((height, index) => (
+                  <rect key={index} x={7 + index * 21} y={36 - height * 0.46} width="11" height={height * 0.46} rx="1" fill="var(--primary)" />
+                ))
+              ) : (
+                <>
+                  {direction === "editorial" && <path d={`${chart} L132 36 L1 36 Z`} fill="var(--primary)" opacity="0.14" />}
+                  <path d={chart} fill="none" stroke="var(--primary)" strokeWidth={direction === "paper" ? 1.2 : 2} />
+                </>
+              )}
+            </svg>
+          </div>
+          <div className="mt-2 flex gap-1.5">
+            <span className="h-1 flex-[3] rounded-[var(--radius-small)] bg-[var(--primary)]" />
+            <span className="h-1 flex-1 rounded-[var(--radius-small)] bg-[var(--accent)]" />
+            <span className="h-1 flex-1 rounded-[var(--radius-small)] bg-[var(--ink-3)] opacity-50" />
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -278,7 +354,7 @@ function Definitions() {
         <Definition term="日期">按 {timeZone} 的自然日统计；跨设备的时间都换算到这个时区。</Definition>
         <Definition term="隐私">
           {!status?.server
-            ? "未连接服务器时数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取 GitHub 公开版本信息；这两项请求都不携带用量或账号信息。"
+            ? "未连接服务器时数据只保存在这台电脑上，会每天下载公开价格表，并按「自动检查更新」的设置读取公开版本信息，失败时尝试 TokenLens 官网；这些请求都不携带用量或账号信息。"
             : "本机保留数据，同时向已连接的服务器同步数字统计；看板显示本机与同一空间的其他设备。提示词、回答、代码、文件路径和会话标题都不会离开这台电脑。"}
         </Definition>
       </dl>

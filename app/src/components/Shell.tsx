@@ -40,9 +40,9 @@ export function Shell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <header
           data-tauri-drag-region
-          className={cn("flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line/70 px-6 pb-3", mac ? "pt-3.5" : "pt-3")}
+          className={cn("flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-line/70 px-[var(--page-px)] pb-3", mac ? "pt-3.5" : "pt-3")}
         >
-          <h1 data-tauri-drag-region className="display mr-auto text-xl text-ink">
+          <h1 data-tauri-drag-region className="display mr-auto text-[length:var(--page-title-size)] text-ink">
             {title}
           </h1>
           {FILTERED.includes(page) && (
@@ -55,7 +55,7 @@ export function Shell() {
         </header>
         {FILTERED.includes(page) && <ActiveFilters />}
         <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
-          <div className="mx-auto max-w-[1440px] px-6 pb-10 pt-5">
+          <div className="mx-auto max-w-[1440px] px-[var(--page-px)] pb-10 pt-5">
             <Suspense fallback={null}>
               <PageView page={page} />
             </Suspense>
@@ -99,7 +99,7 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
     </>
   );
   return (
-    <nav aria-label="主导航" className="flex w-16 shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-52">
+    <nav aria-label="主导航" className="flex w-[var(--sidebar-narrow)] shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-[var(--sidebar-wide)]">
       <div
         data-tauri-drag-region
         className={cn("flex shrink-0 items-end justify-center px-2 pb-3 min-[1100px]:justify-start min-[1100px]:px-3", mac ? "h-[72px]" : "h-14")}
@@ -142,7 +142,7 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
                   aria-current={active ? "page" : undefined}
                   onClick={() => go(item.key)}
                   className={cn(
-                    "flex h-9 w-full items-center justify-center gap-2.5 rounded-lg px-2.5 text-[13px] font-medium transition-colors min-[1100px]:justify-start",
+                    "flex h-9 w-full items-center justify-center gap-2.5 rounded-[var(--radius-control)] px-2.5 text-[13px] font-medium transition-colors min-[1100px]:justify-start",
                     active ? "bg-surface text-ink shadow-sm" : "text-ink-2 hover:bg-surface/60 hover:text-ink",
                   )}
                 >

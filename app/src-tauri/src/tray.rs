@@ -1,6 +1,6 @@
-//! Menu bar (macOS) / tray (Windows) icon with the simple menu from D020:
-//! one "today" line, the sync state, and a few actions. No live numbers on
-//! the icon itself.
+//! Menu bar (macOS) / tray (Windows) icon with the simple menu from D020.
+//! On Mac, an explicit preference adds today's complete-space total beside
+//! the icon. Windows deliberately remains icon-only.
 
 use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -13,6 +13,7 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::collector::now_ms;
 use crate::commands::{self, AppState, AppStatus};
+use crate::config;
 use crate::format;
 use crate::remote;
 use crate::window;
@@ -47,6 +48,8 @@ struct Items {
 
 pub struct Tray<R: tauri::Runtime> {
     items: Items,
+    #[cfg(target_os = "macos")]
+    icon: tauri::tray::TrayIcon<Wry>,
     sender: Mutex<Sender<Poke>>,
     marker: std::marker::PhantomData<fn() -> R>,
 }
@@ -121,10 +124,12 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
                 }
             })
     };
-    builder.build(app)?;
+    let icon = builder.build(app)?;
     let (sender, receiver) = mpsc::channel();
     app.manage(Tray::<Wry> {
         items,
+        #[cfg(target_os = "macos")]
+        icon,
         sender: Mutex::new(sender),
         marker: std::marker::PhantomData,
     });
@@ -219,6 +224,22 @@ fn today_line(total: Option<f64>) -> String {
     }
 }
 
+/// The small title is intentionally only the number; the full date/scope
+/// explanation lives in the menu and Settings, not in an additional popup.
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_title(total: Option<f64>, enabled: bool) -> Option<String> {
+    (enabled && total.is_some()).then(|| format::compact(total.unwrap_or_default()))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn menu_bar_tooltip(status: &AppStatus) -> String {
+    if status.server.is_some() {
+        "TokenLens · 今日全部设备 · 包含缓存读取".to_owned()
+    } else {
+        "TokenLens · 今日本机 · 包含缓存读取".to_owned()
+    }
+}
+
 fn fetch_today(app: &AppHandle) -> Option<f64> {
     let state = app.state::<AppState>();
     let credentials = state.credentials()?;
@@ -253,6 +274,12 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
         }
         let items = &tray.items;
         let _ = items.today.set_text(today_line(today));
+        #[cfg(target_os = "macos")]
+        {
+            let enabled = config::menu_bar_total_enabled(&app.state::<AppState>().paths.state_dir);
+            let _ = tray.icon.set_title(menu_bar_title(today, enabled));
+            let _ = tray.icon.set_tooltip(Some(menu_bar_tooltip(&status)));
+        }
         let _ = items.status.set_text(status_line(&status, now_ms()));
         let _ = items.pause.set_text(if status.collector.paused {
             "恢复采集"
@@ -358,6 +385,7 @@ mod tests {
                 last_error: None,
             },
             autostart: None,
+            menu_bar_total: Some(true),
             platform: "macos",
             form_factor: usage_event::envelope::FormFactor::Laptop,
             cloud_server: crate::account::CLOUD_URL,
@@ -393,6 +421,22 @@ mod tests {
     fn today_uses_compact_numbers() {
         assert_eq!(today_line(None), "今日 —");
         assert_eq!(today_line(Some(1_234_567.0)), "今日 1.23M tokens");
+    }
+
+    #[test]
+    fn menu_bar_title_respects_the_opt_in_and_never_fakes_a_total() {
+        assert_eq!(
+            menu_bar_title(Some(109_300_000.0), true).as_deref(),
+            Some("109M")
+        );
+        assert_eq!(menu_bar_title(Some(1.0), true).as_deref(), Some("1"));
+        assert_eq!(menu_bar_title(Some(109_300_000.0), false), None);
+        assert_eq!(menu_bar_title(None, true), None);
+        assert_eq!(menu_bar_title(None, false), None);
+        assert!(menu_bar_tooltip(&sample()).contains("全部设备"));
+        let mut local = sample();
+        local.server = None;
+        assert!(menu_bar_tooltip(&local).contains("本机"));
     }
 
     #[test]

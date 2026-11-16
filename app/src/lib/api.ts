@@ -98,6 +98,7 @@ export const app = {
   setPaused: (paused: boolean) => call<AppStatus>("set_paused", { paused }),
   syncNow: () => call<AppStatus>("sync_now"),
   setAutostart: (enabled: boolean) => call<AppStatus>("set_autostart", { enabled }),
+  setMenuBarTotal: (enabled: boolean) => call<AppStatus>("set_menu_bar_total", { enabled }),
   createPairCode: () => call<PairCode>("create_pair_code"),
   renameDevice: (deviceId: string, displayName: string) =>
     call<{ deviceId: string; displayName: string }>("rename_device", { deviceId, displayName }),

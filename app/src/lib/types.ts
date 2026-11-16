@@ -272,6 +272,8 @@ export interface AppStatus {
     lastError: string | null;
   };
   autostart: boolean | null;
+  /** Explicit Mac menu-bar number preference; null on Windows/Linux and older servers. */
+  menuBarTotal?: boolean | null;
   platform: "macos" | "windows" | "linux";
   /** Product-family default; the user can still change it before pairing. */
   formFactor: FormFactor;

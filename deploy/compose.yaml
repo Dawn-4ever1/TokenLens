@@ -18,9 +18,12 @@ services:
       LISTEN_ADDR: "0.0.0.0:8787"
       LISTEN_ALLOW_NON_LOOPBACK: "1"
       DATABASE_PATH: /app/data/tokenlens.sqlite
+      RELEASE_MIRROR_DIR: /app/downloads
+      # Set RELEASE_MIRROR_PUBLIC_BASE in .env to this server's public HTTPS origin.
     volumes:
       - ./data:/app/data
       - ./backups:/app/backups
+      - ./downloads:/app/downloads
     ports:
       # Only Caddy on this machine can reach it; Caddy adds TLS.
       - "127.0.0.1:8787:8787"

@@ -18,7 +18,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Serve the HTTP API (DATABASE_PATH, LISTEN_ADDR, DASHBOARD_TIMEZONE,
-    /// PRICING_DIR, PRICING_REFRESH).
+    /// PRICING_DIR, PRICING_REFRESH, RELEASE_MIRROR_DIR).
+    /// RELEASE_MIRROR_DIR is opt-in (production: /app/downloads); unset/off
+    /// never contacts GitHub. RELEASE_MIRROR_PUBLIC_BASE defaults to the
+    /// fixed https://tokenlens.online origin and never uses the Host header.
     Serve,
     /// One-time pairing codes for adding devices.
     PairCode {
@@ -163,6 +166,24 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 };
                 let state = match tokenlens_server::google::Google::from_env() {
                     Some(google) => state.with_google(google),
+                    None => state,
+                };
+                let state = match tokenlens_server::ReleaseMirrorConfig::from_lookup(|name| {
+                    std::env::var(name).ok()
+                })
+                .map_err(std::io::Error::other)?
+                {
+                    Some(mirror) => {
+                        let mirror = tokenlens_server::release_mirror::ReleaseMirror::open(
+                            mirror.directory,
+                            &mirror.public_base,
+                        )
+                        .map_err(std::io::Error::other)?;
+                        tokio::spawn(tokenlens_server::release_mirror::maintain(Arc::clone(
+                            &mirror,
+                        )));
+                        state.with_release_mirror(mirror)
+                    }
                     None => state,
                 };
                 let state = match std::env::var("TOKENLENS_PAIRING_KEY") {

@@ -73,10 +73,28 @@ before. Update the hosted product description and privacy policy when data
 collection, providers or retention behavior changes.
 
 These files are included automatically by the normal server source archive and
-Docker build. No new port, environment variable, frontend service or Caddy
-route is required. After an upgrade, check `https://<your domain>/` and
-`https://<your domain>/privacy` anonymously, alongside `/healthz`. Self-hosters
-should adapt the policy and contact route to their own operation.
+Docker build. No new port, frontend service or Caddy route is required. After an
+upgrade, check `https://<your domain>/` and `https://<your domain>/privacy`
+anonymously, alongside `/healthz`. Self-hosters should adapt the policy and
+contact route to their own operation.
+
+### Website downloads and backup updates
+
+Set `RELEASE_MIRROR_DIR=/app/downloads` and
+`RELEASE_MIRROR_PUBLIC_BASE=https://<your domain>` in `.env`. The official
+server anonymously reads the complete public GitHub Release, verifies its
+checksums and updater signatures, and only then replaces the current mirror.
+It serves the Windows and Apple-silicon installers from `/downloads/latest/`
+and exposes a signed-update manifest at `/downloads/latest.json`. The desktop
+tries GitHub first and uses this copy only when GitHub fails; updater signatures
+and the app's fixed public key remain mandatory.
+
+The website and updater consume your server's bandwidth when these URLs are
+used. Synchronization is anonymous and sends no account, device or usage data.
+An unavailable or incomplete mirror never replaces the last verified copy. The
+`downloads/` directory must be writable by container uid 10001; keep it on the
+same disk so publication can atomically rename the complete version directory.
+It is derived from public Releases and does not belong in database backups.
 
 ## 2. HTTPS
 

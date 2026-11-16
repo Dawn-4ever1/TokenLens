@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use usage_event::envelope::{FormFactor, PairClaimResponse, PairCodeResponse};
 
 use crate::collector::{self, Collector, Destination, Event, KEYCHAIN_ERROR, LOCAL_ERROR, Notify};
-use crate::config::Paths;
+use crate::config::{self, Paths};
 use crate::local::{self, LocalServer};
 use crate::remote::{self, CmdResult, CommandError, Remote};
 use crate::tray::{self, Poke};
@@ -202,6 +202,8 @@ pub struct AppStatus {
     pub app_version: String,
     pub collector: CollectorStatus,
     pub autostart: Option<bool>,
+    /// Explicit user preference, macOS only; the tray remains icon-only on Windows.
+    pub menu_bar_total: Option<bool>,
     pub platform: &'static str,
     /// Best-effort product-family detection; users can always correct it.
     pub form_factor: FormFactor,
@@ -276,6 +278,8 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
             last_error: live.last_error,
         },
         autostart: autostart_enabled(app),
+        menu_bar_total: cfg!(target_os = "macos")
+            .then(|| config::menu_bar_total_enabled(&state.paths.state_dir)),
         platform: platform(),
         form_factor: crate::device::detected_form_factor(),
         cloud_server: crate::account::CLOUD_URL,
@@ -550,6 +554,20 @@ pub fn apply_autostart(app: &AppHandle, enabled: bool) -> CmdResult<AppStatus> {
     write_autostart(app, enabled)?;
     changed(app, Poke::Status);
     Ok(status(app))
+}
+
+#[cfg(target_os = "macos")]
+pub fn apply_menu_bar_total(app: &AppHandle, enabled: bool) -> CmdResult<AppStatus> {
+    let state = app.state::<AppState>();
+    config::save_menu_bar_total_enabled(&state.paths.state_dir, enabled)
+        .map_err(|_| CommandError::new("server"))?;
+    changed(app, Poke::Status);
+    Ok(status(app))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn apply_menu_bar_total(app: &AppHandle, _enabled: bool) -> CmdResult<AppStatus> {
+    Err(CommandError::new("unavailable"))
 }
 
 fn pair_error(error: PairError) -> CommandError {
@@ -1168,6 +1186,11 @@ pub async fn sync_now(app: AppHandle) -> CmdResult<AppStatus> {
 #[tauri::command]
 pub async fn set_autostart(app: AppHandle, enabled: bool) -> CmdResult<AppStatus> {
     blocking(app, move |app| apply_autostart(app, enabled)).await
+}
+
+#[tauri::command]
+pub async fn set_menu_bar_total(app: AppHandle, enabled: bool) -> CmdResult<AppStatus> {
+    blocking(app, move |app| apply_menu_bar_total(app, enabled)).await
 }
 
 #[tauri::command]

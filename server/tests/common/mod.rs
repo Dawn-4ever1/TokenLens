@@ -76,6 +76,37 @@ impl Harness {
         .await
     }
 
+    pub async fn start_with_mirror(
+        mirror: Arc<tokenlens_server::release_mirror::ReleaseMirror>,
+    ) -> Self {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("server.sqlite");
+        let opened = db::open(&db_path).expect("open database");
+        assert!(opened.backup.is_none(), "a new database needs no backup");
+        let clock = ManualClock::new(START_MS);
+        let reader = db::open_reader(&db_path).expect("reader");
+        let state = AppState::new(opened.conn, Arc::new(clock.clone()))
+            .with_reader(reader)
+            .with_release_mirror(mirror);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("address"));
+        tokio::spawn(tokenlens_server::serve(
+            listener,
+            state.clone(),
+            std::future::pending(),
+        ));
+        Self {
+            base,
+            clock,
+            db_path,
+            http: reqwest::Client::new(),
+            state,
+            _dir: dir,
+        }
+    }
+
     /// A server wired to a stand-in GitHub for device-flow tests.
     pub async fn start_with_github(client_id: &str, oauth_base: &str, api_base: &str) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");

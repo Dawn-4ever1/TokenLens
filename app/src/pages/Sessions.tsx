@@ -150,8 +150,8 @@ export function Sessions() {
 }
 
 function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; timeZone: string; onOpen: (key: string) => void }) {
-  const th = "px-3 py-2.5 text-left text-xs font-medium text-ink-3 whitespace-nowrap";
-  const td = "px-3 py-2.5 whitespace-nowrap";
+  const th = "px-3 py-[var(--table-cell-y)] text-left text-xs font-medium text-ink-3 whitespace-nowrap";
+  const td = "px-3 py-[var(--table-cell-y)] whitespace-nowrap";
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-[13px]">

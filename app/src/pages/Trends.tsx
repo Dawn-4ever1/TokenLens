@@ -81,7 +81,7 @@ export function Trends() {
   const daily = useDashboard<Timeseries>("timeseries", { ...q, bucket: "day", groupBy: "none" });
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-[var(--stack-space)]">
       {summary.data && <CaveatList caveats={summary.data.caveats.filter((c) => c.code !== "estimated_cost")} />}
       <Card
         title="用量趋势"
@@ -111,7 +111,7 @@ export function Trends() {
         )}
       </Card>
       <PeriodCompare />
-      <div className="grid grid-cols-12 gap-4">
+      <div className="grid grid-cols-12 gap-[var(--grid-gap)]">
         <CalendarCard className="col-span-12 min-[1200px]:col-span-7" span={span} />
         <WeekHourCard className="col-span-12 min-[1200px]:col-span-5" />
       </div>
@@ -163,13 +163,14 @@ function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
             name: seriesName(data.groupBy, s.key, s.label),
             type: bars ? "bar" : "line",
             stack: "total",
-            barMaxWidth: 28,
+            barMaxWidth: palette.barMaxWidth,
             symbol: "none",
-            smooth: 0.2,
+            smooth: palette.direction === "paper" ? 0 : 0.2,
             smoothMonotone: "x",
             color,
-            lineStyle: { width: 1.5 },
-            areaStyle: bars ? undefined : { opacity: 0.22 },
+            lineStyle: { width: palette.chartLineWidth },
+            itemStyle: bars ? { borderRadius: palette.direction === "graphite" ? 1 : 0 } : undefined,
+            areaStyle: bars ? undefined : { opacity: palette.chartAreaOpacity },
             emphasis: { focus: "series" },
             data: s.points.map(value),
           };
@@ -345,7 +346,7 @@ function WeekHourCard({ className }: { className?: string }) {
           {
             type: "heatmap",
             data: cells.map((c) => [c.hour, c.weekday, c.totalTokens]),
-            itemStyle: { borderColor: palette.surface, borderWidth: 2, borderRadius: 3 },
+            itemStyle: { borderColor: palette.surface, borderWidth: 2, borderRadius: palette.direction === "paper" ? 0 : palette.direction === "graphite" ? 1 : 3 },
             emphasis: { itemStyle: { borderColor: palette.ink2 } },
           },
         ],

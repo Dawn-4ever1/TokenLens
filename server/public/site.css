@@ -119,6 +119,10 @@ h2 { margin-bottom: 15px; font-size: clamp(28px, 3vw, 37px); font-weight: 650; l
 .download-section h2 { margin-bottom: 10px; }
 .download-section p { margin-bottom: 0; color: #cbd4e4; font-size: 14px; }
 .download-section .button { flex-shrink: 0; background: #fff; color: var(--primary); border-color: #fff; }
+.download-section .button:not(.button-primary) { background: transparent; color: #fff; border-color: #8090ad; }
+.download-section .button:not(.button-primary):hover { background: rgba(255, 255, 255, .1); }
+.download-buttons { display: flex; flex-wrap: wrap; gap: 10px; }
+.download-actions { margin-bottom: 0; }
 .download-section .button:hover { background: var(--primary-soft); }
 .download-note { margin-top: 10px; font-size: 11px; color: #b9c5d9; text-align: center; }
 .site-footer { padding-block: 28px; color: var(--muted); font-size: 12px; }
@@ -198,6 +202,8 @@ h2 { margin-bottom: 15px; font-size: clamp(28px, 3vw, 37px); font-weight: 650; l
   .detail-grid { grid-template-columns: 1fr; gap: 35px; }
   .download-inner { display: block; }
   .download-section .button { margin-top: 24px; }
+  .download-buttons { display: grid; gap: 10px; }
+  .download-buttons .button { width: 100%; }
   .download-note { text-align: left; }
   .footer-inner { flex-direction: column; gap: 10px; }
   .policy-main { padding-block: 42px 60px; }

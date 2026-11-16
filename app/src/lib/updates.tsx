@@ -78,7 +78,7 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     catch { return failure(message); }
     finally { if (mounted.current) setBusy(false); }
   }, [accept, failure]);
-  const check = useCallback(() => run(app.checkUpdate, "连不上 GitHub，稍后会再试。"), [run]);
+  const check = useCallback(() => run(app.checkUpdate, "暂时连不上更新服务，请稍后再试。"), [run]);
   const install = useCallback(() => run(app.installUpdate, "更新没有完成，原来的版本仍可使用，请稍后重试。"), [run]);
   const setAutoCheck = useCallback((enabled: boolean) => run(
     () => app.setAutoCheckUpdates(enabled), "没能保存自动检查设置，请稍后再试。",

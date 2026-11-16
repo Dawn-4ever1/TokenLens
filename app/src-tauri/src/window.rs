@@ -10,6 +10,15 @@ use crate::commands::AppState;
 
 pub const MAIN: &str = "main";
 
+/// `hiddenTitle` is macOS-only in Tauri. Windows would otherwise show a
+/// second TokenLens above the sidebar's existing brand. Keep productName and
+/// macOS untouched; the window's taskbar icon still identifies the app.
+#[cfg(windows)]
+fn windows_config_without_native_title(mut config: tauri::WindowConfig) -> tauri::WindowConfig {
+    config.title.clear();
+    config
+}
+
 // Programmatic closes (the tray's Quit item and macOS's app menu) must not
 // trigger the one-time Windows background notice meant for clicking X.
 static SUPPRESS_CLOSE_NOTICE: AtomicBool = AtomicBool::new(false);
@@ -38,6 +47,8 @@ fn open_now(app: &AppHandle) {
     };
     #[cfg(target_os = "macos")]
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
+    #[cfg(windows)]
+    let config = windows_config_without_native_title(config);
     if let Ok(window) = WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
         let _ = window.set_focus();
     }
@@ -87,4 +98,26 @@ pub fn on_destroyed(app: &AppHandle) {
     }
     #[cfg(not(target_os = "macos"))]
     let _ = app;
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn only_the_windows_native_title_is_removed() {
+        let raw = include_str!("../tauri.conf.json");
+        let config: serde_json::Value = serde_json::from_str(raw).expect("window config");
+        assert_eq!(config["productName"], "TokenLens");
+        assert_eq!(config["app"]["windows"][0]["title"], "TokenLens");
+        #[cfg(windows)]
+        {
+            let windows: tauri::WindowConfig =
+                serde_json::from_value(config["app"]["windows"][0].clone())
+                    .expect("Tauri window config");
+            let adjusted = super::windows_config_without_native_title(windows);
+            assert_eq!(adjusted.title, "");
+            assert_eq!(adjusted.label, super::MAIN);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(config["app"]["windows"][0]["titleBarStyle"], "Overlay");
+    }
 }

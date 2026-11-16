@@ -8,7 +8,7 @@ type Part = (typeof TOKEN_PARTS)[number] & { tokens: number };
 
 function Bar({ parts, whole, total, dense }: { parts: Part[]; whole: number; total: number; dense?: boolean }) {
   return (
-    <div className={cn("flex w-full gap-px overflow-hidden rounded-md bg-surface-2", dense ? "h-2.5" : "h-4")}>
+    <div className={cn("flex w-full gap-px overflow-hidden rounded-[var(--radius-small)] bg-surface-2", dense ? "h-2.5" : "h-4")}>
       {whole > 0 &&
         parts
           .filter((part) => part.tokens > 0)

@@ -21,7 +21,7 @@ export function Devices() {
   const data = devices.data;
   const max = Math.max(0, ...(data?.usage ?? []).map((usage) => usage.totalTokens));
   return (
-    <div className="space-y-5">
+    <div className="space-y-[var(--stack-space)]">
       <div className="flex flex-wrap items-center gap-3">
         <p className="min-w-[200px] flex-1 text-xs leading-5 text-ink-3">
           {connected
@@ -34,7 +34,7 @@ export function Devices() {
       </div>
       {devices.error ? <LoadError error={devices.error} onRetry={devices.reload} compact /> : null}
       {!data ? (
-        !devices.error && <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+        !devices.error && <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
           {[0, 1].map((i) => <Skeleton key={i} className="h-56 rounded-[var(--radius-card)]" />)}
         </div>
       ) : (
@@ -43,7 +43,7 @@ export function Devices() {
           {data.devices.length === 0 ? (
             <Card><EmptyState title="还没有设备" hint="本机数据正在准备；连接服务器后还可以添加其他电脑。" /></Card>
           ) : (
-            <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+            <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
               {data.devices.map((device) => (
                 <DeviceCard
                   key={device.deviceId}

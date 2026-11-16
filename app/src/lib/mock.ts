@@ -621,7 +621,7 @@ export function mockUpdateStatus(scenario: string | null): UpdateStatus {
     notes: available ? "• 更新说明改成一条一条\n• 打开即可看本机用量\n• 用 GitHub 授权登录\n• 配对、数据和设置保持不变" : null,
     downloadedBytes: phase === "downloading" ? 4_200_000 : 0,
     totalBytes: phase === "downloading" ? 10_000_000 : null,
-    error: phase === "error" ? "连不上 GitHub，稍后会再试。" : null,
+    error: phase === "error" ? "暂时连不上更新服务，请稍后再试。" : null,
     checkedAt: phase === "idle" ? null : Date.now(),
   };
 }
@@ -644,6 +644,7 @@ const state: AppStatus = {
     lastHeartbeatAt: Date.now() - 120_000, backlog: 0, uploadState: "ok", backfillComplete: true, lastError: null,
   },
   autostart: true,
+  menuBarTotal: sessionStorage.getItem("tokenlens.mock.menubar-off") !== "true",
   platform: "macos",
   formFactor: "laptop",
 };
@@ -729,6 +730,17 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return { ...state, collector: { ...state.collector } };
     case "set_autostart":
       state.autostart = Boolean(args.enabled);
+      return { ...state, collector: { ...state.collector } };
+    case "set_menu_bar_total":
+      if (params.has("menubar-error")) throw new ApiError("server");
+      state.menuBarTotal = Boolean(args.enabled);
+      // A real reload constructs the Rust app again and reads its persistent
+      // preference; a browser mock must represent that same behavior.
+      if (state.menuBarTotal) params.delete("menubar-off");
+      else params.set("menubar-off", "1");
+      // The real preference survives a full app restart, not a reset of the
+      // fixture's navigation. Keep the mock backend instance across reloads.
+      sessionStorage.setItem("tokenlens.mock.menubar-off", String(!state.menuBarTotal));
       return { ...state, collector: { ...state.collector } };
     case "start_github_login":
       if (params.has("githubfail")) throw new ApiError("unavailable");

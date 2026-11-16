@@ -9,6 +9,7 @@ import { useData, useDashboard } from "@/lib/data";
 import { bucketLabel, compact, exact, percent, relativeTime, share, usd } from "@/lib/format";
 import { clientColor, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
+import { useSettings } from "@/lib/settings";
 import { daysBetween, resolveRange, todayIn, type DateSpan } from "@/lib/range";
 import type { Bucket, DeviceStatus, Devices, Point, SessionPage, Summary, Timeseries } from "@/lib/types";
 
@@ -40,9 +41,9 @@ export function Overview() {
   const empty = s.messageCount === 0;
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-[var(--stack-space)]">
       {summary.error ? <LoadError error={summary.error} onRetry={summary.reload} compact /> : null}
-      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
+      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-[var(--grid-gap)] min-[1000px]:grid-cols-4">
         <Kpi label="Tokens" value={<Num value={s.totalTokens} />} />
         <Kpi label="成本" value={<span className="num">{usd(s.costUsd)}</span>} />
         <Kpi label="缓存命中率" value={<span className="num">{percent(s.cacheHitRate)}</span>} />
@@ -55,7 +56,7 @@ export function Overview() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
             <ToolCard summary={s} />
             <ModelCard summary={s} />
           </div>
@@ -65,7 +66,7 @@ export function Overview() {
       <Card title="Token 构成" action={<PrecisionBadge precision={s.precision} />}>
         <Composition value={s} />
       </Card>
-      <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+      <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
         <RecentCard page={recent.data} error={recent.error} reload={recent.reload} />
         <DeviceStrip data={devices.data} error={devices.error} reload={devices.reload} />
       </div>
@@ -75,11 +76,15 @@ export function Overview() {
 
 function Kpi({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <section className="card min-w-0 px-5 py-5">
+    <section className="card min-w-0 px-[var(--card-px)] py-[var(--kpi-py)]">
       <h2 className="truncate text-sm font-semibold text-ink">{label}</h2>
-      <div className="display num-fit mt-3 text-[32px] leading-10 text-ink min-[1300px]:text-[36px]">{value}</div>
+      <div className="display num-fit mt-[var(--kpi-gap)] text-[32px] leading-10 text-ink min-[1300px]:text-[36px]">{value}</div>
     </section>
   );
+}
+
+export function compactTrendUsesBars(direction: "editorial" | "graphite" | "paper", pointCount: number): boolean {
+  return direction === "graphite" && pointCount > 0 && pointCount <= 45;
 }
 
 type TrendMode = "total" | "nonCache" | "cost";
@@ -97,6 +102,7 @@ function pointValue(point: Point, mode: TrendMode): number {
 
 function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; error: unknown; reload: () => void; bucket: Bucket }) {
   const [mode, setMode] = useState<TrendMode>("total");
+  const { settings } = useSettings();
   const values = useMemo(() => {
     if (!data) return [];
     return data.buckets.map((_, index) => data.series.reduce((sum, series) => sum + (series.points[index] ? pointValue(series.points[index], mode) : 0), 0));
@@ -111,7 +117,7 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         grid: { left: 4, right: 12, top: 12, bottom: 4, containLabel: true },
         xAxis: {
           type: "category",
-          boundaryGap: false,
+          boundaryGap: compactTrendUsesBars(palette.direction, values.length),
           data: data?.buckets ?? [],
           axisLine: { lineStyle: { color: palette.border } },
           axisTick: { show: false },
@@ -130,14 +136,19 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         },
         series: [
           {
-            type: "line",
+            type: compactTrendUsesBars(palette.direction, values.length) ? "bar" : "line",
             data: values,
-            smooth: 0.25,
+            barMaxWidth: palette.barMaxWidth,
+            smooth: palette.direction === "paper" ? 0 : 0.25,
             smoothMonotone: "x",
             symbol: "none",
-            lineStyle: { width: 2, color: palette.primary },
-            itemStyle: { color: palette.primary },
-            areaStyle: {
+            lineStyle: { width: palette.chartLineWidth, color: palette.primary },
+            itemStyle: {
+              color: palette.primary,
+              borderRadius: palette.direction === "graphite" ? 1 : 0,
+            },
+            areaStyle: compactTrendUsesBars(palette.direction, values.length) ? undefined : {
+              opacity: palette.direction === "paper" ? 0 : undefined,
               color: {
                 type: "linear", x: 0, y: 0, x2: 0, y2: 1,
                 colorStops: [
@@ -150,7 +161,7 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         ],
       };
     },
-    [data, values, mode, bucket],
+    [data, values, mode, bucket, settings.direction],
   );
   const unit = { hour: "每小时", day: "每天", week: "每周", month: "每月" }[data?.bucket ?? bucket];
   return (
@@ -178,7 +189,7 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         <Skeleton className="h-[260px]" />
       ) : (
         <div className="relative min-h-[260px] flex-1">
-          <Chart option={option} height="100%" className="absolute inset-0" label="用量趋势面积图" />
+          <Chart option={option} height="100%" className="absolute inset-0" label={settings.direction === "graphite" ? "用量趋势柱状图或折线图" : settings.direction === "paper" ? "用量趋势细折线图" : "用量趋势面积图"} />
         </div>
       )}
     </Card>
@@ -203,7 +214,7 @@ function ToolCard({ summary }: { summary: Summary }) {
                   type="button"
                   disabled={!clickable}
                   onClick={() => go("sessions", { clients: [row.key] })}
-                  className="group w-full rounded-lg px-2 py-1.5 text-left hover:bg-surface-2 disabled:hover:bg-transparent"
+                  className="group w-full rounded-[var(--radius-control)] px-2 py-1.5 text-left hover:bg-surface-2 disabled:hover:bg-transparent"
                 >
                   <div className="flex items-center justify-between gap-2 text-[13px]">
                     <ClientName id={row.key} label={row.label} className="text-ink" />
@@ -298,7 +309,7 @@ function RecentCard({ page, error, reload }: { page: SessionPage | null; error: 
         <ul>
           {page.sessions.map((session) => (
             <li key={session.sessionKey}>
-              <button type="button" onClick={() => openSession(session.sessionKey)} className="w-full rounded-lg px-3 py-2 text-left hover:bg-surface-2">
+              <button type="button" onClick={() => openSession(session.sessionKey)} className="w-full rounded-[var(--radius-control)] px-3 py-2 text-left hover:bg-surface-2">
                 <div className="flex items-center justify-between gap-3 text-[13px]">
                   <ClientName id={session.client} className="text-ink" />
                   <Num value={session.totalTokens} plain className="shrink-0 font-medium text-ink" />
@@ -358,7 +369,7 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
                 key={device.deviceId}
                 type="button"
                 onClick={() => go("devices")}
-                className="min-w-0 rounded-xl border border-line px-4 py-3 text-left hover:bg-surface-2"
+                className="min-w-0 rounded-[var(--radius-card)] border border-line px-4 py-3 text-left hover:bg-surface-2"
               >
                 <div className="flex items-center gap-2">
                   <StatusDot tone={tone.tone} />
@@ -389,12 +400,12 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
 function OverviewSkeleton() {
   return (
     <div className="space-y-5" aria-busy>
-      <div className="grid grid-cols-2 gap-4 min-[1000px]:grid-cols-4">
+      <div className="grid grid-cols-2 gap-[var(--grid-gap)] min-[1000px]:grid-cols-4">
         {[0, 1, 2, 3].map((i) => (
           <Skeleton key={i} className="h-[110px] rounded-[var(--radius-card)]" />
         ))}
       </div>
-      <div className="grid grid-cols-1 gap-4 min-[1100px]:grid-cols-2">
+      <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
         <Skeleton className="h-[340px] rounded-[var(--radius-card)]" />
         <Skeleton className="h-[340px] rounded-[var(--radius-card)]" />
       </div>

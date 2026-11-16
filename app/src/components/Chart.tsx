@@ -16,14 +16,14 @@ export function baseOption(palette: Palette): ChartOption {
   return {
     animationDuration: 300,
     animationDurationUpdate: 250,
-    textStyle: { fontFamily: "inherit", color: palette.ink2, fontSize: 11 },
+    textStyle: { fontFamily: palette.fontFamily, color: palette.ink2, fontSize: 11 },
     tooltip: {
       backgroundColor: palette.surface,
       borderColor: palette.border,
       borderWidth: 1,
-      padding: [8, 10],
-      textStyle: { color: palette.ink, fontSize: 12 },
-      extraCssText: "border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);",
+      padding: palette.direction === "graphite" ? [6, 8] : [8, 10],
+      textStyle: { color: palette.ink, fontSize: 12, fontFamily: palette.fontFamily },
+      extraCssText: `border-radius:${palette.tooltipRadius}px;box-shadow:${palette.direction === "editorial" ? "0 8px 24px rgba(0,0,0,.12)" : "none"};`,
       confine: true,
     },
   };
@@ -66,5 +66,5 @@ export function Chart({
     chart.current?.setOption(option(palette), { notMerge: true });
   }, [option, palette]);
 
-  return <div ref={ref} role="img" aria-label={label} className={className} style={{ height, width: "100%" }} />;
+  return <div ref={ref} role="img" aria-label={label} data-chart-direction={palette.direction} className={className} style={{ height, width: "100%" }} />;
 }

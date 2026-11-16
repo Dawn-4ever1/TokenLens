@@ -11,7 +11,8 @@ describe("updater state shown by the UI", () => {
     expect(available.notes).toContain("配对、数据和设置保持不变");
     expect(mockUpdateStatus("latest").version).toBeNull();
     expect(mockUpdateStatus("latest").phase).toBe("latest");
-    expect(mockUpdateStatus("error").error).toContain("连不上 GitHub");
+    expect(mockUpdateStatus("error").error).toBe("暂时连不上更新服务，请稍后再试。");
+    expect(mockUpdateStatus("error").error).not.toContain("GitHub");
     expect(mockUpdateStatus("error").version).toBeNull();
   });
 

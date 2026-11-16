@@ -3,22 +3,20 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Three visual directions (Q9) share one set of semantic tokens; only the
- * values differ. Colour approach after TokenTracker's DESIGN.md (MIT):
- * OKLCH neutrals, one restrained brand colour, tabular numbers.
+ * Theme controls light/dark colours. Direction controls the interface's
+ * typography, density, surfaces and chart geometry. All three directions
+ * deliberately keep the same pages, data and interaction locations.
  */
 :root,
 [data-direction="editorial"] {
   --bg: oklch(0.982 0.006 85);
   --surface: oklch(0.997 0.002 85);
   --surface-2: oklch(0.958 0.008 85);
-  /* Selected segment and other raised controls; must read lighter than surface-2. */
   --raised: oklch(1 0 0);
   --border: oklch(0.905 0.01 85);
   --ink: oklch(0.235 0.012 70);
   --ink-2: oklch(0.45 0.012 70);
   --ink-3: oklch(0.6 0.01 70);
-  /* Ink navy, same family as the app icon tile (#1e2b4a); see D041. */
   --primary: oklch(0.4 0.085 262);
   --primary-ink: oklch(0.985 0.008 262);
   --primary-soft: oklch(0.93 0.022 260);
@@ -28,10 +26,35 @@
   --warn: oklch(0.74 0.15 75);
   --bad: oklch(0.58 0.19 27);
   --chart-grid: oklch(0.92 0.008 85);
-  --radius-card: 14px;
-  --shadow-card: 0 1px 2px oklch(0.3 0.02 70 / 0.05), 0 1px 1px oklch(0.3 0.02 70 / 0.03);
-  --font-display: inherit;
+
+  --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-code: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-display: var(--font-body);
+  --font-numeric: var(--font-body);
   --display-weight: 650;
+  --display-tracking: -0.01em;
+  --page-title-size: 20px;
+  --section-title-size: 15px;
+  --sidebar-narrow: 64px;
+  --sidebar-wide: 208px;
+  --page-px: 24px;
+  --stack-space: 20px;
+  --grid-gap: 16px;
+  --card-px: 20px;
+  --card-pt: 12px;
+  --card-pb: 20px;
+  --card-header: 16px;
+  --kpi-py: 20px;
+  --kpi-gap: 12px;
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 40px;
+  --control-input: 36px;
+  --table-cell-y: 10px;
+  --radius-card: 14px;
+  --radius-control: 9px;
+  --radius-small: 6px;
+  --shadow-card: 0 2px 3px oklch(0.3 0.02 70 / 0.025), 0 10px 26px oklch(0.3 0.02 70 / 0.035);
 }
 .dark[data-direction="editorial"],
 .dark:not([data-direction]) {
@@ -60,11 +83,11 @@
   --surface: oklch(1 0 0);
   --surface-2: oklch(0.955 0.005 250);
   --raised: oklch(1 0 0);
-  --border: oklch(0.91 0.006 250);
+  --border: oklch(0.865 0.009 250);
   --ink: oklch(0.22 0.015 260);
   --ink-2: oklch(0.44 0.015 260);
-  --ink-3: oklch(0.6 0.012 260);
-  --primary: oklch(0.48 0.14 258);
+  --ink-3: oklch(0.58 0.012 260);
+  --primary: oklch(0.46 0.15 258);
   --primary-ink: oklch(0.99 0.005 258);
   --primary-soft: oklch(0.93 0.035 258);
   --accent: oklch(0.72 0.15 70);
@@ -72,22 +95,47 @@
   --good: oklch(0.6 0.13 160);
   --warn: oklch(0.75 0.15 75);
   --bad: oklch(0.58 0.2 25);
-  --chart-grid: oklch(0.93 0.005 250);
-  --radius-card: 10px;
-  --shadow-card: 0 1px 3px oklch(0.25 0.03 260 / 0.07);
-  --font-display: inherit;
-  --display-weight: 600;
+  --chart-grid: oklch(0.895 0.008 250);
+
+  --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-code: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-display: var(--font-body);
+  --font-numeric: var(--font-code);
+  --display-weight: 650;
+  --display-tracking: -0.025em;
+  --page-title-size: 18px;
+  --section-title-size: 14px;
+  --sidebar-narrow: 56px;
+  --sidebar-wide: 184px;
+  --page-px: 18px;
+  --stack-space: 12px;
+  --grid-gap: 12px;
+  --card-px: 16px;
+  --card-pt: 10px;
+  --card-pb: 14px;
+  --card-header: 12px;
+  --kpi-py: 14px;
+  --kpi-gap: 8px;
+  --control-sm: 24px;
+  --control-md: 28px;
+  --control-lg: 34px;
+  --control-input: 32px;
+  --table-cell-y: 6px;
+  --radius-card: 6px;
+  --radius-control: 4px;
+  --radius-small: 3px;
+  --shadow-card: none;
 }
 .dark[data-direction="graphite"] {
   --bg: oklch(0.155 0.008 260);
   --surface: oklch(0.195 0.01 260);
   --surface-2: oklch(0.235 0.012 260);
   --raised: oklch(0.315 0.014 260);
-  --border: oklch(0.29 0.012 260);
+  --border: oklch(0.345 0.014 260);
   --ink: oklch(0.945 0.006 250);
   --ink-2: oklch(0.76 0.01 250);
   --ink-3: oklch(0.6 0.012 250);
-  --primary: oklch(0.72 0.13 255);
+  --primary: oklch(0.74 0.14 255);
   --primary-ink: oklch(0.18 0.04 258);
   --primary-soft: oklch(0.32 0.07 258);
   --accent: oklch(0.8 0.14 75);
@@ -95,7 +143,7 @@
   --good: oklch(0.72 0.14 160);
   --warn: oklch(0.8 0.14 80);
   --bad: oklch(0.68 0.18 25);
-  --chart-grid: oklch(0.26 0.01 260);
+  --chart-grid: oklch(0.3 0.012 260);
   --shadow-card: none;
 }
 
@@ -117,11 +165,36 @@
   --warn: oklch(0.7 0.14 70);
   --bad: oklch(0.55 0.19 28);
   --chart-grid: oklch(0.89 0.016 85);
-  --radius-card: 4px;
+
+  --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+  --font-code: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-display: "Songti SC", STSong, "Noto Serif CJK SC", "Source Han Serif SC", SimSun, serif;
+  --font-numeric: var(--font-body);
+  --display-weight: 600;
+  --display-tracking: 0.015em;
+  --page-title-size: 24px;
+  --section-title-size: 18px;
+  --sidebar-narrow: 64px;
+  --sidebar-wide: 224px;
+  --page-px: 28px;
+  --stack-space: 24px;
+  --grid-gap: 20px;
+  --card-px: 20px;
+  --card-pt: 12px;
+  --card-pb: 24px;
+  --card-header: 16px;
+  --section-px: 0px;
+  --kpi-py: 20px;
+  --kpi-gap: 12px;
+  --control-sm: 26px;
+  --control-md: 30px;
+  --control-lg: 40px;
+  --control-input: 38px;
+  --table-cell-y: 12px;
+  --radius-card: 2px;
+  --radius-control: 3px;
+  --radius-small: 1px;
   --shadow-card: none;
-  /* Keep the paper palette without switching glyph families between screens. */
-  --font-display: inherit;
-  --display-weight: 650;
 }
 .dark[data-direction="paper"] {
   --bg: oklch(0.19 0.01 70);
@@ -141,6 +214,7 @@
   --warn: oklch(0.78 0.13 75);
   --bad: oklch(0.68 0.17 28);
   --chart-grid: oklch(0.3 0.012 70);
+  --shadow-card: none;
 }
 
 @theme inline {
@@ -161,8 +235,8 @@
   --color-warn: var(--warn);
   --color-bad: var(--bad);
   --radius-card: var(--radius-card);
-  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
-  --font-mono: "SF Mono", ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  --font-sans: var(--font-body);
+  --font-mono: var(--font-code);
 }
 
 @layer base {
@@ -174,7 +248,7 @@
   body {
     background: var(--bg);
     color: var(--ink);
-    font-family: var(--font-sans);
+    font-family: var(--font-body);
     font-feature-settings: "tnum" 1;
     -webkit-font-smoothing: antialiased;
     overflow: hidden;
@@ -197,6 +271,7 @@
 }
 
 @utility num {
+  font-family: var(--font-numeric);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
 }
@@ -204,9 +279,8 @@
 /* A headline number: a long exact count shrinks to the box width instead of overflowing. */
 @utility num-fit {
   container-type: inline-size;
+  font-family: var(--font-numeric);
   & [data-exact] {
-    /* Digits plus commas measure ~0.49–0.52em; 0.60 keeps a margin so the
-       longest exact count never spills past the card at 1200px. */
     font-size: min(1em, calc(100cqi / (var(--num-chars, 1) * 0.6)));
   }
 }
@@ -214,7 +288,7 @@
 @utility display {
   font-family: var(--font-display);
   font-weight: var(--display-weight);
-  letter-spacing: -0.01em;
+  letter-spacing: var(--display-tracking);
 }
 
 @utility card {
@@ -228,6 +302,12 @@
   -webkit-app-region: drag;
 }
 
+/* Display headings may be serif; their numbers remain quick to scan. */
+.display.num-fit,
+.display.num-fit .num {
+  font-family: var(--font-numeric);
+}
+
 @keyframes shimmer {
   0% { opacity: 0.55; }
   50% { opacity: 1; }
@@ -236,8 +316,58 @@
 
 @utility skeleton {
   background: var(--surface-2);
-  border-radius: 6px;
+  border-radius: var(--radius-small);
   animation: shimmer 1.6s ease-in-out infinite;
+}
+
+/* Graphite is the compact tool: aligned numbers, firmer rules, no soft shadows. */
+[data-direction="graphite"] .num-fit,
+[data-direction="graphite"] .num {
+  font-family: var(--font-numeric);
+}
+[data-direction="graphite"] nav button[aria-current="page"] {
+  border: 1px solid var(--border);
+  box-shadow: none;
+}
+[data-direction="graphite"] [data-ui="segmented"] {
+  border: 1px solid var(--border);
+}
+
+/* Paper replaces nested boxes with an editorial column and hairline separators. */
+[data-direction="paper"] main .card,
+[data-direction="paper"] [data-portal-card="paper"] .card {
+  background: transparent;
+  border-width: 0 0 1px;
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-direction="paper"] main .card {
+  --card-px: var(--section-px);
+}
+[data-direction="paper"] main .card > header {
+  align-items: baseline;
+}
+[data-direction="paper"] nav button[aria-current="page"] {
+  background: transparent;
+  box-shadow: inset 2px 0 0 var(--primary);
+}
+[data-direction="paper"] [data-ui="segmented"] {
+  gap: 2px;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+}
+[data-direction="paper"] [data-ui="segmented"] > button {
+  margin-bottom: -1px;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+}
+[data-direction="paper"] [data-ui="segmented"] > button[aria-checked="true"] {
+  border-bottom-color: var(--primary);
+  background: transparent;
+  box-shadow: none;
+  color: var(--primary);
 }
 
 @media (prefers-reduced-motion: reduce) {

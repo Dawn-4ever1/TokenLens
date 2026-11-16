@@ -19,14 +19,15 @@ macOS.
   server you host.
 - **Light in the background**: a tray app that reads agent logs only when they
   change; the window is opened on demand.
-- **In-app updates**: checks public GitHub releases automatically (can be turned
-  off in Settings); download and install a signed update only when you choose.
+- **In-app updates**: checks GitHub first and falls back to the verified release
+  copy on the TokenLens website (automatic checks can be turned off in Settings);
+  downloads and installs a signed update only when you choose.
 
 > Status: early (0.x). The interface is in Simplified Chinese for now.
 
 ## Download
 
-Get the latest installer from [Releases](https://github.com/Dawn-4ever1/TokenLens/releases):
+Get the latest installer from the [TokenLens website](https://tokenlens.online/), or browse [Releases](https://github.com/Dawn-4ever1/TokenLens/releases):
 
 | System | File |
 |---|---|
@@ -66,10 +67,11 @@ view.
 - Server tokens are stored in the macOS Keychain or Windows Credential Manager
   and never reach the web view; the server stores only their hashes.
 - In local mode nothing is uploaded at all.
-- Update checks use anonymous GET requests to public GitHub releases about
-  10 seconds after launch and every 24 hours; no usage or credentials are sent.
-  Turn off automatic checks in Settings, or check manually. Update signatures
-  are verified before installation; they are separate from OS code signing.
+- Update checks use anonymous GET requests about 10 seconds after launch and
+  every 24 hours. GitHub is tried first, then the TokenLens website's verified
+  release copy; no usage or credentials are sent. Turn off automatic checks in
+  Settings, or check manually. Update signatures are verified before installation;
+  they are separate from OS code signing.
 
 ## Supported agents
 

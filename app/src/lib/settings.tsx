@@ -5,9 +5,9 @@ export type ThemeMode = "light" | "dark" | "system";
 export type Direction = "editorial" | "graphite" | "paper";
 
 export const DIRECTIONS: { key: Direction; label: string; description: string }[] = [
-  { key: "editorial", label: "暖白", description: "暖米色背景、墨蓝主色，安静耐看（推荐）" },
-  { key: "graphite", label: "石墨", description: "冷灰背景、亮蓝主色，偏工具感" },
-  { key: "paper", label: "墨纸", description: "纸张底色、统一字体、细线分隔，偏杂志感" },
+  { key: "editorial", label: "暖白", description: "宽松留白、圆角卡片与柔和面积图（推荐）" },
+  { key: "graphite", label: "石墨", description: "紧凑密度、小圆角、等宽数字与清晰柱线" },
+  { key: "paper", label: "墨纸", description: "宋体标题、细分隔线与轻盈折线，阅读感" },
 ];
 
 export interface Settings {
@@ -24,7 +24,7 @@ interface SettingsContext {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
   dark: boolean;
-  /** Changes whenever resolved colours change (theme or direction). */
+  /** Changes whenever colours or chart geometry change (theme or direction). */
   paletteVersion: string;
 }
 

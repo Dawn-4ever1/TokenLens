@@ -12,7 +12,7 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg text-[13px] font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none",
+  "inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-[var(--radius-control)] text-[13px] font-medium transition-colors disabled:opacity-50 disabled:pointer-events-none",
   {
     variants: {
       variant: {
@@ -23,10 +23,10 @@ const buttonVariants = cva(
         danger: "border border-bad/40 text-bad hover:bg-bad/10",
       },
       size: {
-        sm: "h-7 px-2.5",
-        md: "h-8 px-3",
-        lg: "h-10 px-4 text-sm",
-        icon: "h-8 w-8",
+        sm: "h-[var(--control-md)] px-2.5",
+        md: "h-[calc(var(--control-md)+4px)] px-3",
+        lg: "h-[var(--control-lg)] px-4 text-sm",
+        icon: "h-[calc(var(--control-md)+4px)] w-[calc(var(--control-md)+4px)]",
       },
     },
     defaultVariants: { variant: "outline", size: "md" },
@@ -53,20 +53,20 @@ export function Card({ title, subtitle, action, className, bodyClassName, childr
   return (
     <section className={cn("card flex min-w-0 flex-col", className)} {...props}>
       {(title || action) && (
-        <header className="flex items-start justify-between gap-3 px-5 pt-4">
+        <header className="flex items-start justify-between gap-3 px-[var(--card-px)] pt-[var(--card-header)]">
           <div className="min-w-0">
-            {title && <h2 className="display text-[15px] leading-6 text-ink">{title}</h2>}
+            {title && <h2 className="display text-[length:var(--section-title-size)] leading-6 text-ink">{title}</h2>}
             {subtitle && <p className="mt-0.5 text-xs text-ink-3">{subtitle}</p>}
           </div>
           {action && <div className="flex shrink-0 items-center gap-1.5">{action}</div>}
         </header>
       )}
-      <div className={cn("min-w-0 flex-1 px-5 pb-5 pt-3", bodyClassName)}>{children}</div>
+      <div className={cn("min-w-0 flex-1 px-[var(--card-px)] pb-[var(--card-pb)] pt-[var(--card-pt)]", bodyClassName)}>{children}</div>
     </section>
   );
 }
 
-const badgeVariants = cva("inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium leading-4 whitespace-nowrap", {
+const badgeVariants = cva("inline-flex items-center gap-1 rounded-[var(--radius-small)] px-1.5 py-0.5 text-[11px] font-medium leading-4 whitespace-nowrap", {
   variants: {
     tone: {
       neutral: "bg-surface-2 text-ink-2",
@@ -102,7 +102,7 @@ export function Tip({ content, children, side = "top" }: { content: ReactNode; c
           side={side}
           sideOffset={6}
           collisionPadding={8}
-          className="z-50 max-w-72 rounded-lg border border-line bg-surface px-2.5 py-1.5 text-xs leading-5 text-ink shadow-lg"
+          className="z-50 max-w-72 rounded-[var(--radius-control)] border border-line bg-surface px-2.5 py-1.5 text-xs leading-5 text-ink shadow-lg"
         >
           {content}
         </TooltipPrimitive.Content>
@@ -125,7 +125,7 @@ export function Segmented<T extends string>({
   label?: string;
 }) {
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex shrink-0 rounded-lg bg-surface-2 p-0.5">
+    <div role="radiogroup" aria-label={label} data-ui="segmented" className="inline-flex shrink-0 rounded-[var(--radius-control)] bg-surface-2 p-0.5">
       {options.map((option) => (
         <button
           key={option.key}
@@ -134,8 +134,8 @@ export function Segmented<T extends string>({
           aria-checked={option.key === value}
           onClick={() => onChange(option.key)}
           className={cn(
-            "rounded-md px-2.5 font-medium text-ink-2 transition-colors hover:text-ink",
-            size === "sm" ? "h-6 text-xs" : "h-7 text-[13px]",
+            "rounded-[calc(var(--radius-control)-2px)] px-2.5 font-medium text-ink-2 transition-colors hover:text-ink",
+            size === "sm" ? "h-[var(--control-sm)] text-xs" : "h-[var(--control-md)] text-[13px]",
             option.key === value && "bg-raised text-ink shadow-sm",
           )}
         >
@@ -208,7 +208,7 @@ export function PopoverContent({ className, children, align = "end" }: { classNa
         align={align}
         sideOffset={6}
         collisionPadding={12}
-        className={cn("z-40 rounded-xl border border-line bg-surface p-3 text-ink shadow-xl outline-none", className)}
+        className={cn("z-40 rounded-[var(--radius-card)] border border-line bg-surface p-3 text-ink shadow-xl outline-none", className)}
       >
         {children}
       </PopoverPrimitive.Content>
@@ -237,6 +237,7 @@ export function Sheet({
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/25 dark:bg-black/50" />
         <DialogPrimitive.Content
           style={{ width }}
+          data-portal-card="paper"
           className="fixed inset-y-0 right-0 z-50 flex flex-col border-l border-line bg-bg shadow-2xl outline-none"
         >
           <header className="flex items-start justify-between gap-4 border-b border-line px-6 pb-4 pt-6">
@@ -279,9 +280,9 @@ export function Dialog({
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay className="fixed inset-0 z-40 bg-black/25 dark:bg-black/50" />
-        <DialogPrimitive.Content className="card fixed left-1/2 top-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 p-6 shadow-2xl outline-none">
+        <DialogPrimitive.Content data-portal-card="paper" className="card fixed left-1/2 top-1/2 z-50 w-[min(440px,92vw)] -translate-x-1/2 -translate-y-1/2 p-6 shadow-2xl outline-none">
           {brand && <div className="mb-6 flex items-center justify-center gap-2">{brand}</div>}
-          <DialogPrimitive.Close aria-label="关闭对话框" className="absolute right-4 top-4 rounded-md p-1.5 text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink">
+          <DialogPrimitive.Close aria-label="关闭对话框" className="absolute right-4 top-4 rounded-[var(--radius-control)] p-1.5 text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink">
             <span aria-hidden className="block text-lg leading-4">×</span>
           </DialogPrimitive.Close>
           <DialogPrimitive.Title className={brand ? "sr-only" : "display text-base text-ink"}>{title}</DialogPrimitive.Title>
@@ -304,4 +305,4 @@ export function Field({ label, hint, children }: { label: string; hint?: ReactNo
 }
 
 export const inputClass =
-  "h-9 w-full rounded-lg border border-line bg-surface px-3 text-sm text-ink placeholder:text-ink-3 focus:border-primary focus:outline-none";
+  "h-[var(--control-input)] w-full rounded-[var(--radius-control)] border border-line bg-surface px-3 text-sm text-ink placeholder:text-ink-3 focus:border-primary focus:outline-none";

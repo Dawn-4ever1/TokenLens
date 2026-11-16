@@ -160,8 +160,8 @@ export function ModelName({ id, className }: { id: string; className?: string })
 export function ShareBar({ value, max, color, className }: { value: number; max: number; color: string; className?: string }) {
   const width = max > 0 ? Math.max(value > 0 ? 1.5 : 0, (value / max) * 100) : 0;
   return (
-    <div className={cn("h-1.5 w-full overflow-hidden rounded-full bg-surface-2", className)}>
-      <div className="h-full rounded-full" style={{ width: `${width}%`, background: color }} />
+    <div className={cn("h-1.5 w-full overflow-hidden rounded-[var(--radius-small)] bg-surface-2", className)}>
+      <div className="h-full rounded-[var(--radius-small)]" style={{ width: `${width}%`, background: color }} />
     </div>
   );
 }

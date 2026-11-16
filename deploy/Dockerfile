@@ -28,8 +28,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN useradd --system --uid 10001 --user-group --home-dir /app --shell /usr/sbin/nologin tokenlens \
- && mkdir -p /app/data /app/backups \
- && chown tokenlens:tokenlens /app/data /app/backups
+ && mkdir -p /app/data /app/backups /app/downloads \
+ && chown tokenlens:tokenlens /app/data /app/backups /app/downloads
 COPY --from=build /tokenlens-server /usr/local/bin/tokenlens-server
 USER tokenlens
 WORKDIR /app
