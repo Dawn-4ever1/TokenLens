@@ -48,6 +48,9 @@ pub enum Event {
 }
 
 pub type Notify = Arc<dyn Fn(Event) + Send + Sync>;
+/// Only the network destination reports a newly observed credential rejection.
+/// The sink runs on the uploader thread, so it must only enqueue/forward work.
+pub type Expired = Arc<dyn Fn(Credentials) + Send + Sync>;
 
 /// Where uploads go: the paired server, or in local mode (D044) the server
 /// running inside this app.
@@ -137,11 +140,18 @@ impl Collector {
         destination: Destination,
         notify: Notify,
     ) {
-        self.start_run(options, state_dir, RunMode::Single(destination), notify);
+        self.start_run(
+            options,
+            state_dir,
+            RunMode::Single(destination),
+            notify,
+            None,
+        );
     }
 
     /// One scan feeds the local database and, when paired, a separate server
     /// queue. The local destination is always active.
+    #[allow(clippy::too_many_arguments)]
     pub fn start_with_server(
         &self,
         options: WatchOptions,
@@ -150,6 +160,7 @@ impl Collector {
         server: Option<Destination>,
         legacy_local_queue: bool,
         notify: Notify,
+        expired: Expired,
     ) {
         self.start_run(
             options,
@@ -160,10 +171,18 @@ impl Collector {
                 legacy_local_queue,
             },
             notify,
+            Some(expired),
         );
     }
 
-    fn start_run(&self, options: WatchOptions, state_dir: PathBuf, mode: RunMode, notify: Notify) {
+    fn start_run(
+        &self,
+        options: WatchOptions,
+        state_dir: PathBuf,
+        mode: RunMode,
+        notify: Notify,
+        expired: Option<Expired>,
+    ) {
         let mut lifecycle = lock(&self.lifecycle);
         if lifecycle.update_resume.is_some()
             || lifecycle
@@ -195,6 +214,7 @@ impl Collector {
                         &receiver,
                         &live,
                         &notify,
+                        expired.as_ref(),
                     ) else {
                         return;
                     };
@@ -236,6 +256,8 @@ impl Collector {
             let _ = running.sender.send(Msg::Stop);
             // Hold the lifecycle gate until all worker-owned locks have been
             // released. A concurrent stop must not return before this join.
+            // Status notifications only queue work; they do not wait for a UI
+            // read that would need this gate, so this cannot form a wait cycle.
             let _ = running.handle.join();
         }
     }
@@ -318,6 +340,7 @@ impl Fanout {
         receiver: &Receiver<Msg>,
         live: &Arc<Mutex<Live>>,
         notify: &Notify,
+        expired: Option<&Expired>,
     ) -> Option<Self> {
         let FanoutDestinations {
             local,
@@ -364,19 +387,12 @@ impl Fanout {
         )?;
         let local = Target::new(local_syncer);
         let server = server.and_then(|destination| {
-            let sink = sender.clone();
-            let status = Arc::clone(live);
-            let started = Syncer::start_with_queue_lock(
+            let started = start_server_syncer(
                 state_dir,
-                destination.credentials.clone(),
-                destination.transport(),
-                SyncTiming::default(),
-                Box::new(move |mut line| {
-                    apply_server_line(&mut lock(&status), &mut line);
-                    // Wake the watch loop (including restore/resync handling)
-                    // without overwriting the local upload state.
-                    let _ = sink.send(Msg::Sync(line));
-                }),
+                destination,
+                sender,
+                live,
+                expired,
                 Arc::clone(&root_lock),
             )
             .map(Target::new);
@@ -404,6 +420,72 @@ impl Fanout {
             server.syncer.stop();
         }
     }
+}
+
+/// Forwards only this server snapshot's real 401 to the application. This
+/// closure runs on the uploader thread and therefore never resets it here.
+fn start_server_syncer(
+    state_dir: &Path,
+    destination: &Destination,
+    sender: &Sender<Msg>,
+    live: &Arc<Mutex<Live>>,
+    expired: Option<&Expired>,
+    root_lock: Arc<File>,
+) -> Result<Syncer, StateError> {
+    start_server_syncer_with_transport(
+        state_dir,
+        destination,
+        sender,
+        live,
+        expired,
+        root_lock,
+        destination.transport(),
+    )
+}
+
+#[cfg_attr(not(test), allow(clippy::too_many_arguments))]
+fn start_server_syncer_with_transport(
+    state_dir: &Path,
+    destination: &Destination,
+    sender: &Sender<Msg>,
+    live: &Arc<Mutex<Live>>,
+    expired: Option<&Expired>,
+    root_lock: Arc<File>,
+    transport: Box<dyn Transport>,
+) -> Result<Syncer, StateError> {
+    #[cfg(test)]
+    let timing = SyncTiming {
+        min_round_gap: Duration::from_millis(5),
+        heartbeat_interval: Duration::from_millis(20),
+        backoff_base: Duration::from_millis(5),
+        backoff_max: Duration::from_millis(20),
+    };
+    #[cfg(not(test))]
+    let timing = SyncTiming::default();
+    let sink = sender.clone();
+    let status = Arc::clone(live);
+    let observed = destination.credentials.clone();
+    let rejected = expired.cloned();
+    Syncer::start_with_queue_lock(
+        state_dir,
+        destination.credentials.clone(),
+        transport,
+        timing,
+        Box::new(move |mut line| {
+            // A persisted status is not enough: this line represents an actual
+            // 401 from the server in this upload or heartbeat round.
+            if line.state.as_deref() == Some("pairing_required")
+                && let Some(report) = &rejected
+            {
+                report(observed.clone());
+            }
+            apply_server_line(&mut lock(&status), &mut line);
+            // Wake the watch loop (including restore/resync handling) without
+            // overwriting the local upload state.
+            let _ = sink.send(Msg::Sync(line));
+        }),
+        root_lock,
+    )
 }
 
 impl ScanSync for Fanout {
@@ -1030,6 +1112,91 @@ mod tests {
     }
 
     #[test]
+    fn server_upload_and_heartbeat_rejections_report_the_matching_connection() {
+        struct ReplyTransport {
+            online: Arc<AtomicBool>,
+        }
+        impl Transport for ReplyTransport {
+            fn post(
+                &self,
+                _url: &str,
+                _bearer: Option<&str>,
+                _gzip: bool,
+                _body: &[u8],
+            ) -> Result<HttpResponse, TransportError> {
+                if !self.online.load(Ordering::SeqCst) {
+                    return Err(TransportError::Network);
+                }
+                Ok(HttpResponse {
+                    status: 401,
+                    retry_after: None,
+                    body: b"{\"error\":\"unauthorized\"}".to_vec(),
+                })
+            }
+        }
+        for with_pending_upload in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let local = TestDestination::new(&root.path().join("local-store"), true);
+            let queue = root.path().join("queue");
+            let local_queue = queue.join("local-queue");
+            let root_guard = Arc::new(collector_core::state::lock_queue(&queue).unwrap());
+            let local_guard = Arc::new(collector_core::state::lock_queue(&local_queue).unwrap());
+            let live = Arc::new(Mutex::new(Live::default()));
+            let reported = Arc::new(Mutex::new(Vec::new()));
+            let seen = Arc::clone(&reported);
+            let expired: Expired = Arc::new(move |credentials| {
+                lock(&seen).push(credentials);
+            });
+            let (sender, _receiver) = watch::channel();
+            let credentials = synthetic_credentials();
+            let online = Arc::new(AtomicBool::new(false));
+            let mut fanout = Fanout {
+                local: local.target(&local_queue, local_guard),
+                server: None,
+                live: Arc::clone(&live),
+                notify: Arc::new(|_| {}),
+                _root_lock: Arc::clone(&root_guard),
+            };
+            fanout.server = Some(Target::new(
+                start_server_syncer_with_transport(
+                    &queue,
+                    &Destination {
+                        credentials: credentials.clone(),
+                        local: None,
+                    },
+                    &sender,
+                    &live,
+                    Some(&expired),
+                    root_guard,
+                    Box::new(ReplyTransport {
+                        online: Arc::clone(&online),
+                    }),
+                )
+                .unwrap(),
+            ));
+            let counts = BTreeMap::new();
+            let changed = if with_pending_upload {
+                fixture_events()
+            } else {
+                Vec::new()
+            };
+            fanout.record_scan(true, &counts, changed, Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(
+                lock(&reported).is_empty(),
+                "network errors never expire a connection"
+            );
+            online.store(true, Ordering::SeqCst);
+            fanout.record_scan(true, &counts, Vec::new(), Duration::ZERO);
+            wait_until(|| lock(&reported).len() == 1);
+            assert_eq!(lock(&reported).as_slice(), &[credentials]);
+            fanout.stop();
+            assert!(collector_core::state::lock_queue(&queue).is_ok());
+            assert!(collector_core::state::lock_queue(&local_queue).is_ok());
+        }
+    }
+
+    #[test]
     fn a_corrupt_server_queue_does_not_block_a_new_local_destination() {
         let root = tempfile::tempdir().unwrap();
         let local = TestDestination::new(&root.path().join("local-store"), true);
@@ -1058,6 +1225,7 @@ mod tests {
             &receiver,
             &live,
             &notify,
+            None,
         )
         .expect("local destination starts despite the damaged server queue");
         assert!(fanout.server.is_none());
