@@ -59,6 +59,50 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
 }
 
 #[tokio::test]
+async fn the_home_page_emphasizes_the_visitors_desktop_download_without_scripts() {
+    let h = Harness::start().await;
+    for (user_agent, recommended, other) in [
+        (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15",
+            "macos",
+            "windows",
+        ),
+        (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+            "windows",
+            "macos",
+        ),
+    ] {
+        let response = h
+            .http
+            .get(format!("{}/", h.base))
+            .header(header::USER_AGENT, user_agent)
+            .send()
+            .await
+            .expect("home page");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::VARY)
+                .and_then(|value| value.to_str().ok()),
+            Some("User-Agent, Sec-CH-UA-Platform")
+        );
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let body = response.text().await.expect("body");
+        let primary = |platform: &str| {
+            format!("class=\"button button-primary\" data-download-platform=\"{platform}\"")
+        };
+        assert_eq!(body.matches(&primary(recommended)).count(), 2);
+        assert_eq!(body.matches(&primary(other)).count(), 0);
+        assert!(body.contains("href=\"/downloads/latest/windows\""));
+        assert!(body.contains("href=\"/downloads/latest/macos\""));
+        assert!(!body.contains("<script"));
+        assert!(!body.contains("{{"));
+    }
+}
+
+#[tokio::test]
 async fn public_routes_do_not_expose_files_or_relax_private_api_authentication() {
     let h = Harness::start().await;
     // Disable redirects so normalized dot-segments cannot turn into a false

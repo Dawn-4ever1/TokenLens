@@ -37,11 +37,11 @@
           <p class="hero-copy">把不同 AI 编程助手、不同电脑的用量放在一起。Token 构成、趋势、会话与成本，都能从总览一路看到每一轮。</p>
           <div class="actions">
             <div class="actions download-actions">
-              <a class="button button-primary" href="/downloads/latest/windows">
+              <a class="button{{WINDOWS_BUTTON_CLASS}}" data-download-platform="windows" href="/downloads/latest/windows">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>
                 下载 Windows 版
               </a>
-              <a class="button" href="/downloads/latest/macos">下载 Mac 版 · Apple 芯片</a>
+              <a class="button{{MACOS_BUTTON_CLASS}}" data-download-platform="macos" href="/downloads/latest/macos">下载 Mac 版 · Apple 芯片</a>
             </div>
             <a class="text-link" href="https://github.com/Dawn-4ever1/TokenLens" rel="noopener noreferrer">查看开源项目 <span aria-hidden="true">↗</span></a>
           </div>
@@ -154,8 +154,8 @@
           </div>
           <div>
             <div class="download-buttons">
-              <a class="button button-primary" href="/downloads/latest/windows">下载 Windows 版</a>
-              <a class="button" href="/downloads/latest/macos">下载 Mac 版 · Apple 芯片</a>
+              <a class="button{{WINDOWS_BUTTON_CLASS}}" data-download-platform="windows" href="/downloads/latest/windows">下载 Windows 版</a>
+              <a class="button{{MACOS_BUTTON_CLASS}}" data-download-platform="macos" href="/downloads/latest/macos">下载 Mac 版 · Apple 芯片</a>
             </div>
             <p class="download-note">当前为 0.x 早期版本；界面提供简体中文。支持 Windows 10 / 11 与 Apple 芯片 Mac。</p>
           </div>

@@ -69,8 +69,11 @@ and logo are under `server/public/`. They do not provide a browser dashboard,
 require a login, set cookies, run JavaScript or load third-party resources.
 Only the four explicit public GET routes are available, with a restrictive
 content-security policy; the API, account and dashboard boundaries stay as
-before. Update the hosted product description and privacy policy when data
-collection, providers or retention behavior changes.
+before. The home page reads standard browser platform hints to emphasize the
+Mac or Windows download button, varies its cache by those hints, and always
+keeps both choices available. It does not save the detected platform. Update
+the hosted product description and privacy policy when data collection,
+providers or retention behavior changes.
 
 These files are included automatically by the normal server source archive and
 Docker build. No new port, frontend service or Caddy route is required. After an

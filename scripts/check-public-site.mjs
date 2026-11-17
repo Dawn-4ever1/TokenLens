@@ -63,8 +63,29 @@ for (const [name, type, options] of [
       if (errors.length) throw new Error(errors.join("\n"));
       await page.close();
     }
+    for (const [platform, userAgent] of [
+      ["macos", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.1 Safari/605.1.15"],
+      ["windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36"],
+    ]) {
+      const page = await browser.newPage({ userAgent, viewport: { width: 1440, height: 1000 } });
+      const response = await page.goto(`${base}/`, { waitUntil: "networkidle" });
+      if (response?.status() !== 200) throw new Error(`${name} ${platform}: HTTP ${response?.status()}`);
+      for (const candidate of ["macos", "windows"]) {
+        const primaryCount = await page.locator(`[data-download-platform="${candidate}"].button-primary`).count();
+        if (primaryCount !== (candidate === platform ? 2 : 0)) {
+          throw new Error(`${name} ${platform}: ${candidate} primary download count is ${primaryCount}`);
+        }
+      }
+      const scripts = await page.locator("script").count();
+      if (scripts) throw new Error(`${name} ${platform}: platform selection must not add scripts`);
+      if (screenshots && platform === "macos") {
+        await page.screenshot({ path: join(screenshots, `${name}-1440-index-macos.png`), fullPage: true });
+      }
+      checks.push({ browser: name, platform, path: "/", scripts });
+      await page.close();
+    }
   } finally {
     await browser.close();
   }
 }
-console.log(`Public pages passed ${checks.length} viewport/page checks; no overflow, scripts, cookies or third-party resources.`);
+console.log(`Public pages passed ${checks.length} viewport/platform/page checks; matching desktop downloads are emphasized, with no overflow, scripts, cookies or third-party resources.`);
