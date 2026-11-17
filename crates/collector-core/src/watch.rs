@@ -45,6 +45,11 @@ pub const AGENT_ROOT_ENV_VARS: &[&str] = &[
     "VIBE_HOME",
     "BB_DATA_DIR",
     "QODER_CONFIG_DIR",
+    "QODER_HOME",
+    "QODER_DB_PATH",
+    "QODER_CN_HOME",
+    "QODER_CN_DB_PATH",
+    "APPDATA",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
 ];

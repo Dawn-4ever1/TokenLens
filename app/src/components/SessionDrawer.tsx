@@ -6,7 +6,7 @@ import type { Palette } from "@/lib/colors";
 import type { SessionDetail, SessionTurn } from "@/lib/types";
 import { Chart, baseOption, type ChartOption } from "./Chart";
 import { Composition } from "./Composition";
-import { ClientName, LoadError, ModelName, Num, PrecisionBadge, Stat } from "./common";
+import { ClientName, LoadError, ModelName, Num, Stat } from "./common";
 import { Badge, Sheet, Skeleton, Tip } from "./ui";
 
 const TURN_LIMIT = 300;
@@ -49,7 +49,7 @@ function SessionBody({ detail }: { detail: SessionDetail }) {
         <Stat label="总 tokens">
           <Num value={s.totalTokens} />
         </Stat>
-        <Stat label="成本（估算）" hint={s.unpricedTokens > 0 ? `${compact(s.unpricedTokens)} 未定价` : undefined}>
+        <Stat label="成本" hint={s.unpricedTokens > 0 ? `${compact(s.unpricedTokens)} 未定价` : undefined}>
           {usd(s.costUsd)}
         </Stat>
         <Stat label="轮次">{exact(s.turnCount)}</Stat>
@@ -61,7 +61,6 @@ function SessionBody({ detail }: { detail: SessionDetail }) {
         <span className="num">
           {dateTime(s.startedAt, timeZone, true, true)} → {dateTime(s.lastUsedAt, timeZone, true, true)}
         </span>
-        <PrecisionBadge precision={s.precision} always />
         {s.credits !== null && <Badge tone="accent">Qoder credits {credits(s.credits)}</Badge>}
       </div>
       <section>
@@ -189,11 +188,6 @@ function TurnTable({ turns, timeZone }: { turns: SessionTurn[]; timeZone: string
                 {turn.isSubagent && (
                   <Badge tone="primary" className="ml-1.5">
                     子代理
-                  </Badge>
-                )}
-                {turn.precision === "estimated" && (
-                  <Badge tone="accent" className="ml-1.5">
-                    估算
                   </Badge>
                 )}
               </td>

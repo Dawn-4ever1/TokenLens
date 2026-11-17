@@ -12,9 +12,9 @@ import type { CSSProperties, ReactNode } from "react";
 import { app, errorMessage } from "@/lib/api";
 import { compact, exact, percent } from "@/lib/format";
 import { useExactNumbers } from "@/lib/settings";
-import { clientColor, clientIcon, clientLabel, isBrandIcon, modelBrand, modelLabel, precisionLabel, type BrandName, type IdentityIconName } from "@/lib/labels";
+import { clientColor, clientIcon, clientLabel, isBrandIcon, modelBrand, modelLabel, type BrandName, type IdentityIconName } from "@/lib/labels";
 import { useStatus } from "@/lib/status";
-import { ApiError, type Caveat, type Precision } from "@/lib/types";
+import { ApiError, type Caveat } from "@/lib/types";
 import { BrandMark } from "./brandMarks";
 import { Badge, Button, ErrorState, Tip, cn } from "./ui";
 
@@ -95,25 +95,6 @@ export function Delta({ current, previous, points, label = "与上一周期相�
   );
 }
 
-const PRECISION_HINT: Record<Precision, string> = {
-  measured: "来自 agent 日志里的实际 token 计数",
-  estimated: "由 Qoder credits × 校准汇率折算，不是官方 token 计数",
-  mixed: "其中一部分是折算或未核查的数据，详见页面上方说明",
-  unknown: "这个 agent 的解析尚未核查，数字可能含字数估算",
-};
-
-export function PrecisionBadge({ precision, always }: { precision: Precision; always?: boolean }) {
-  if (precision === "measured" && !always) return null;
-  const tone = precision === "measured" ? "good" : precision === "unknown" ? "neutral" : "accent";
-  return (
-    <Tip content={PRECISION_HINT[precision]}>
-      <span>
-        <Badge tone={tone}>{precisionLabel(precision)}</Badge>
-      </span>
-    </Tip>
-  );
-}
-
 const GENERIC_ICONS: Record<Exclude<IdentityIconName, BrandName>, LucideIcon> = {
   bot: Bot,
   cpu: Cpu,
@@ -169,10 +150,18 @@ export function ShareBar({ value, max, color, className }: { value: number; max:
 const CAVEAT_TONE = { info: "neutral", warning: "warn", error: "bad" } as const;
 
 export function CaveatList({ caveats, className }: { caveats: Caveat[]; className?: string }) {
-  if (!caveats.length) return null;
+  // Token precision and cost-estimate chips are hidden (D065); the data and
+  // the separate cost wording in charts/settings remain available.
+  const visible = caveats.filter(
+    (caveat) =>
+      caveat.code !== "estimated_qoder" &&
+      caveat.code !== "unknown_precision" &&
+      caveat.code !== "estimated_cost",
+  );
+  if (!visible.length) return null;
   return (
     <div className={cn("flex flex-wrap items-center gap-1.5", className)}>
-      {caveats.map((caveat, index) => (
+      {visible.map((caveat, index) => (
         <Tip key={`${caveat.code}-${caveat.deviceId ?? ""}-${caveat.client ?? ""}-${index}`} content={caveat.message}>
           <span>
             <Badge tone={CAVEAT_TONE[caveat.severity]} className="max-w-80">
@@ -188,12 +177,6 @@ export function CaveatList({ caveats, className }: { caveats: Caveat[]; classNam
 
 function caveatTitle(caveat: Caveat): string {
   switch (caveat.code) {
-    case "estimated_qoder":
-      return "含 Qoder 估算";
-    case "unknown_precision":
-      return "含未核查数据";
-    case "estimated_cost":
-      return "成本为 API 等价估算";
     case "partial_cost":
       return "部分价格不全";
     case "unpriced_tokens":
@@ -210,6 +193,8 @@ function caveatTitle(caveat: Caveat): string {
       return "某个 agent 读取出错";
     case "imported_history":
       return "含导入的历史";
+    default:
+      return caveat.code;
   }
 }
 

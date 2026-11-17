@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod interactive;
 mod mapping;
 pub mod qoder;
+mod qoder_ide;
 pub mod roots;
 pub mod schedule;
 pub mod snapshot;
@@ -18,7 +19,7 @@ pub mod worker_cli;
 pub const TOKSCALE_REV: &str = "e9cf1041af784bdaa4e217978f89f2168e731b69";
 /// Changes whenever parsing, mapping, Qoder handling or `event_key` rules
 /// change; a new value makes every event queue for upload once more.
-pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-3.qoder-1.key-1";
+pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-3.qoder-2.key-1";
 
 pub use mapping::{
     EventKeySetDigest, MappingError, canonical_json, event_key_set_digest, event_value_digest,
@@ -306,6 +307,7 @@ pub fn scan(config: &Config, range: DateRange) -> Result<ScanReport, Error> {
 }
 
 pub const QODER_CLIENT: &str = "qoder-intl";
+pub const QODER_CN_IDE_CLIENT: &str = "qoder-cn-ide";
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -390,9 +392,27 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
     let mut combined = messages;
     if include_qoder {
         let qoder = qoder::scan_home(&options.home, range)?;
-        combined.extend(qoder.events.iter().map(qoder_message_for_summary));
-        events.extend(qoder.events);
+        let qoder_events = qoder.events;
+        let qoder_ide = qoder_ide::scan_home(&options.home, options.use_env_roots, range)?;
+        combined.extend(qoder_events.iter().map(qoder_message_for_summary));
+        combined.extend(qoder_ide.iter().map(qoder_message_for_summary));
+        events.extend(qoder_events);
+        events.extend(qoder_ide);
         listed.push(QODER_CLIENT.to_owned());
+    }
+    if !config
+        .exclude
+        .iter()
+        .any(|id| normalize_id(id) == QODER_CN_IDE_CLIENT)
+        && options
+            .clients
+            .as_ref()
+            .is_none_or(|subset| subset.contains(QODER_CN_IDE_CLIENT))
+    {
+        let cn_ide = qoder_ide::scan_home_cn(&options.home, options.use_env_roots, range)?;
+        combined.extend(cn_ide.iter().map(qoder_message_for_summary));
+        events.extend(cn_ide);
+        listed.push(QODER_CN_IDE_CLIENT.to_owned());
     }
     let mut report = summarize(
         combined,

@@ -1,0 +1,5 @@
+/* These two source marks are monochrome, not coloured product artwork. */
+.brand-mark-hermes { filter: invert(0); }
+.brand-mark-pi { filter: invert(1); }
+.dark .brand-mark-hermes { filter: invert(1); }
+.dark .brand-mark-pi { filter: invert(0); }

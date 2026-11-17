@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { clientLabel } from "../src/lib/labels";
 
 type View = "overview" | "trends" | "sessions" | "devices" | "cloud" | "settings";
 
@@ -24,7 +25,10 @@ interface Options {
 async function open(page: Page, { view = "overview", theme = "light", direction = "editorial", query = "?server" }: Options = {}) {
   await page.addInitScript(
     ([settings, initialView]) => {
-      if (sessionStorage.getItem("e2e-seeded")) return;
+      const key = new URLSearchParams(location.search).has("brand-gallery")
+        ? `e2e-seeded-${settings}-${initialView}`
+        : "e2e-seeded";
+      if (sessionStorage.getItem(key)) return;
       localStorage.clear();
       localStorage.setItem("tokenlens.settings.v1", settings);
       localStorage.setItem("tokenlens.page.v1", initialView);
@@ -129,12 +133,36 @@ test("overview prioritizes concise KPIs and a full-width trend", async ({ page }
   expect(errors).toEqual([]);
 });
 
-test("overview marks Qoder numbers as estimated", async ({ page }) => {
+test("every registered agent icon is bundled and loads in light and dark mode", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?server&brand-gallery" });
+  await settle(page, "设备");
+  const expected: Record<string, string> = {
+    cline: "cline", trae: "trae", kiro: "kiro", augment: "augment",
+    codebuddy: "codebuddy", zed: "zed", warp: "warp", goose: "goose",
+    junie: "junie", crush: "crush", grok: "grok", "devin-cli": "devin",
+    "devin-desktop": "devin", lmstudio: "lmstudio", cherrystudio: "cherrystudio",
+    codebuff: "codebuff", hermes: "hermes", pi: "pi", kilo: "kilo",
+  };
+  for (const [id, brand] of Object.entries(expected)) {
+    const image = page.getByTitle(clientLabel(id), { exact: true }).locator(`img[data-brand="${brand}"]`);
+    await expect(image).toBeVisible();
+    expect(await image.evaluate((element: HTMLImageElement) => element.complete && element.naturalWidth > 0)).toBe(true);
+  }
+  await expect(page.locator('img[data-brand="hermes"]')).toHaveCSS("filter", "invert(0)");
+  await expect(page.locator('img[data-brand="pi"]')).toHaveCSS("filter", "invert(1)");
+  await open(page, { view: "devices", theme: "dark", query: "?server&brand-gallery" });
+  await settle(page, "设备");
+  await expect(page.locator('img[data-brand="hermes"]')).toHaveCSS("filter", "invert(1)");
+  await expect(page.locator('img[data-brand="pi"]')).toHaveCSS("filter", "invert(0)");
+  expect(errors).toEqual([]);
+});
+
+test("overview no longer shows precision badges", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page);
   await settle(page, "总览");
-  const qoder = page.getByRole("button", { name: /Qoder/ }).first();
-  await expect(qoder.getByText("估算", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^(估算|含估算|未核查)$/)).toHaveCount(0);
 });
 
 for (const direction of ["editorial", "graphite", "paper"] as const) {
@@ -281,14 +309,15 @@ test("session drawer opens from a row and closes with Escape", async ({ page }) 
   expect(errors).toEqual([]);
 });
 
-test("a Qoder session shows the estimated badge in the drawer", async ({ page }) => {
+test("a Qoder session keeps credits without a precision badge", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page, { view: "sessions" });
   await settle(page, "会话");
   await page.locator("tbody tr").filter({ hasText: "Qoder" }).first().click();
   const drawer = page.getByRole("dialog");
   await expect(drawer.locator(".skeleton")).toHaveCount(0);
-  await expect(drawer.getByText("估算", { exact: true }).first()).toBeVisible();
+  await expect(drawer.getByText(/^(估算|含估算|未核查)$/)).toHaveCount(0);
+  await expect(drawer.getByText(/Qoder credits/)).toBeVisible();
 });
 
 test("offline state explains the problem without crashing", async ({ page }) => {

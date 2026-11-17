@@ -203,6 +203,7 @@ fn upload_restart_and_revoke() {
     append(&files.codex, &codex);
     append(&files.qoder, &[qoder_fragment(1, 0.5)]);
     append(&files.mirror, &[qoder_fragment(9, 7.0)]);
+    qoder_ide(&home);
 
     // First run: backfill everything.
     let first = run_once(&home, &state_dir, &paired, 5);
@@ -212,7 +213,7 @@ fn upload_restart_and_revoke() {
         .expect("seed");
     assert_eq!(seed["known"], 0);
     assert_eq!(seed["deviceChanged"], true);
-    assert_eq!(sum(&first, "upload", "accepted"), 4);
+    assert_eq!(sum(&first, "upload", "accepted"), 5);
     assert_eq!(sum(&first, "upload", "rejected"), 0);
     assert!(
         first
@@ -220,10 +221,15 @@ fn upload_restart_and_revoke() {
             .any(|line| line["sync"] == "heartbeat" && line["ok"] == true)
     );
     let conn = server.conn();
-    assert_eq!(conn.count("SELECT count(*) FROM usage_events"), 4);
+    assert_eq!(conn.count("SELECT count(*) FROM usage_events"), 5);
     assert_eq!(
         conn.count("SELECT count(*) FROM usage_events WHERE client = 'qoder-intl' AND precision = 'estimated'"),
         1
+    );
+    assert_eq!(
+        conn.count("SELECT count(*) FROM usage_events WHERE client = 'qoder-intl' AND precision = 'measured' AND input = 20 AND cache_read = 80 AND output = 10 AND is_turn_start = 1"),
+        1,
+        "IDE measured tokens reach storage with cached input separated"
     );
     assert!(conn.count("SELECT count(*) FROM device_client_status WHERE detected = 1") >= 3);
     let local = sync::local_status(&state_dir)
@@ -231,7 +237,7 @@ fn upload_restart_and_revoke() {
         .expect("exists");
     assert_eq!(local.outbox_backlog, 0);
     assert!(local.backfill_complete);
-    assert_eq!(local.known_events, 4);
+    assert_eq!(local.known_events, 5);
     assert_eq!(local.upload_state.as_deref(), Some("ok"));
 
     // Restart after new and changed events: only those are sent.
@@ -243,7 +249,7 @@ fn upload_restart_and_revoke() {
         .iter()
         .find(|line| line["state"] == "seed")
         .expect("seed");
-    assert_eq!(seed["known"], 4);
+    assert_eq!(seed["known"], 5);
     assert_eq!(seed["deviceChanged"], false);
     assert_eq!(
         sum(&second, "queued", "events"),
@@ -254,15 +260,52 @@ fn upload_restart_and_revoke() {
     assert_eq!(sum(&second, "upload", "updated"), 1);
     assert_eq!(sum(&second, "upload", "duplicates"), 0);
     let full = full_scan_digest(&home);
-    assert_eq!(full["event_count"], 6);
+    assert_eq!(full["event_count"], 7);
     let keys = conn.keys();
-    assert_eq!(keys.len(), 6);
+    assert_eq!(keys.len(), 7);
     assert_eq!(Value::from(key_set_sha256(&keys)), full["key_set_sha256"]);
     // Fragments of one Qoder message keep the maximum, not the sum.
     assert_eq!(
         conn.count("SELECT CAST(round(sum(credits) * 100) AS INTEGER) FROM usage_events"),
         75
     );
+    let today = chrono::Local::now().date_naive().to_string();
+    let transport = UreqTransport::new();
+    let summary = transport
+        .get(
+            &format!(
+                "{}/api/dashboard/summary?from={today}&to={today}",
+                server.base
+            ),
+            Some(&paired.read_token),
+        )
+        .expect("dashboard summary");
+    assert_eq!(summary.status, 200);
+    let summary: Value = serde_json::from_slice(&summary.body).expect("summary JSON");
+    let qoder = summary["byClient"]
+        .as_array()
+        .expect("client summary")
+        .iter()
+        .find(|client| client["key"] == "qoder-intl")
+        .expect("Qoder included in dashboard")
+        .clone();
+    // IDE adds its session and one measured turn to the existing fixture.
+    assert_eq!(summary["sessionCount"], 4);
+    assert_eq!(summary["turnCount"], 1);
+    assert_eq!(qoder["messageCount"], 2);
+    assert!(qoder["totalTokens"].as_i64().expect("total") > 205);
+    let ide_model = summary["byModel"]
+        .as_array()
+        .expect("model summary")
+        .iter()
+        .find(|model| model["key"] == "synthetic-ide-model")
+        .expect("IDE model included in dashboard")
+        .clone();
+    assert_eq!(ide_model["inputTokens"], 20);
+    assert_eq!(ide_model["cacheReadTokens"], 80);
+    assert_eq!(ide_model["outputTokens"], 10);
+    assert_eq!(ide_model["totalTokens"], 110);
+    assert_eq!(ide_model["precision"], "measured");
 
     // A revoked device stops uploading and keeps its queue.
     let mut raw = db::open(&server.db_path).expect("open").conn;
@@ -277,7 +320,7 @@ fn upload_restart_and_revoke() {
         "{third:?}"
     );
     assert_eq!(sum(&third, "upload", "accepted"), 0);
-    assert_eq!(conn.count("SELECT count(*) FROM usage_events"), 6);
+    assert_eq!(conn.count("SELECT count(*) FROM usage_events"), 7);
     let local = sync::local_status(&state_dir)
         .expect("status")
         .expect("exists");

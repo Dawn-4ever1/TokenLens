@@ -52,6 +52,14 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     // scanner.rs:3008-3013: the newer ZCode SQLite store (+ -wal/-shm).
     push("zcode", home.join(".zcode").join("cli").join("db"));
     push(QODER_CLIENT, crate::qoder::projects_root(home));
+    // Qoder IDE's SQLite store is distinct from the newer Desktop transcripts.
+    // Watch its parent, including -wal/-shm; reading never creates sidecars.
+    if let Some(parent) = crate::qoder_ide::database_path(home, use_env_roots).parent() {
+        push(QODER_CLIENT, parent.to_path_buf());
+    }
+    if let Some(parent) = crate::qoder_ide::database_path_cn(home, use_env_roots).parent() {
+        push(crate::QODER_CN_IDE_CLIENT, parent.to_path_buf());
+    }
     roots.retain(|root| {
         !is_forbidden(&root.path)
             // A root equal to (or above) home would mean watching everything.
@@ -179,6 +187,36 @@ mod tests {
         assert_eq!(
             map.client_for(&home.path().join(".qoder-cn/projects/a.jsonl")),
             None
+        );
+    }
+
+    #[test]
+    fn ide_wal_changes_map_to_qoder_without_selecting_cn_or_desktop() {
+        let home = tempfile::tempdir().expect("home");
+        let database = crate::qoder_ide::database_path(home.path(), false);
+        let directory = database.parent().expect("IDE database directory");
+        std::fs::create_dir_all(directory).expect("IDE fixture directory");
+        let roots = watch_roots(home.path(), false, &detected(&[QODER_CLIENT]));
+        let map = RootMap::new(&roots, &[]);
+        for sidecar in ["local.db", "local.db-wal", "local.db-shm"] {
+            assert_eq!(map.client_for(&directory.join(sidecar)), Some(QODER_CLIENT));
+        }
+        assert!(
+            roots
+                .iter()
+                .all(|root| !root.path.to_string_lossy().contains("QoderCN"))
+        );
+        assert!(
+            map.client_for(&home.path().join(".qoder-cn/projects/a.jsonl"))
+                .is_none()
+        );
+        assert!(
+            map.client_for(
+                &home
+                    .path()
+                    .join("Library/Application Support/com.qoder.app.stable/main.sqlite")
+            )
+            .is_none()
         );
     }
 

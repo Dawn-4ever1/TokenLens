@@ -4,30 +4,50 @@
 // files in `src/assets/brands/` (sources in its README).
 import amp from "@/assets/brands/amp.svg";
 import antigravity from "@/assets/brands/antigravity.png";
+import augment from "@/assets/brands/augment.png";
+import cherrystudio from "@/assets/brands/cherrystudio.png";
+import cline from "@/assets/brands/cline.png";
+import codebuddy from "@/assets/brands/codebuddy.svg";
+import codebuff from "@/assets/brands/codebuff.png";
 import cohere from "@/assets/brands/cohere.png";
+import crush from "@/assets/brands/crush.png";
 import cursor from "@/assets/brands/cursor.svg";
 import deepseek from "@/assets/brands/deepseek.png";
+import devin from "@/assets/brands/devin.svg";
 import factory from "@/assets/brands/factory.svg";
 import gemini from "@/assets/brands/gemini.png";
+import goose from "@/assets/brands/goose.png";
+import grok from "@/assets/brands/grok.svg";
+import hermes from "@/assets/brands/hermes.svg";
+import junie from "@/assets/brands/junie.svg";
 import kilo from "@/assets/brands/kilo.svg";
 import kimi from "@/assets/brands/kimi.png";
+import kiro from "@/assets/brands/kiro.svg";
+import lmstudio from "@/assets/brands/lmstudio.svg";
 import meta from "@/assets/brands/meta.png";
 import mistral from "@/assets/brands/mistral.svg";
 import openclaw from "@/assets/brands/openclaw.svg";
 import opencode from "@/assets/brands/opencode.svg";
+import pi from "@/assets/brands/pi.svg";
 import qoder from "@/assets/brands/qoder.png";
 import qwen from "@/assets/brands/qwen.png";
 import roocode from "@/assets/brands/roocode.png";
+import trae from "@/assets/brands/trae.svg";
+import warp from "@/assets/brands/warp.png";
 import workbuddy from "@/assets/brands/workbuddy.png";
 import xai from "@/assets/brands/xai.png";
 import zai from "@/assets/brands/zai.svg";
 import zcode from "@/assets/brands/zcode.png";
+import zed from "@/assets/brands/zed.webp";
 import type { BrandName } from "@/lib/labels";
+import "./brand-marks.css";
 import { cn } from "./ui";
 
 const IMAGES: Record<Exclude<BrandName, "claude" | "openai" | "copilot">, string> = {
-  amp, antigravity, cohere, cursor, deepseek, factory, gemini, kilo, kimi, meta,
-  mistral, openclaw, opencode, qoder, qwen, roocode, workbuddy, xai, zai, zcode,
+  amp, antigravity, augment, cherrystudio, cline, codebuddy, codebuff, cohere,
+  crush, cursor, deepseek, devin, factory, gemini, goose, grok, hermes, junie,
+  kilo, kimi, kiro, lmstudio, meta, mistral, openclaw, opencode, pi, qoder, qwen,
+  roocode, trae, warp, workbuddy, xai, zai, zcode, zed,
 };
 
 export function BrandMark({ name, className }: { name: BrandName; className?: string }) {
@@ -35,7 +55,10 @@ export function BrandMark({ name, className }: { name: BrandName; className?: st
   if (name === "openai") return <OpenAIMark className={className} />;
   if (name === "copilot") return <CopilotMark className={className} />;
   // Square app icons get the same soft corners; transparent marks are unaffected.
-  return <img src={IMAGES[name]} alt="" draggable={false} className={cn("rounded-[22%] object-contain", className)} />;
+  // Pi is published in white only, Hermes in black only. Switch just these
+  // monochrome marks between themes; never tint or filter the other logos.
+  const monochrome = name === "pi" ? "brand-mark-pi" : name === "hermes" ? "brand-mark-hermes" : undefined;
+  return <img src={IMAGES[name]} alt="" draggable={false} data-brand={name} className={cn("rounded-[22%] object-contain", monochrome, className)} />;
 }
 
 /** Claude mark, from https://claude.com/favicon.svg (fetched 2026-11-12). */

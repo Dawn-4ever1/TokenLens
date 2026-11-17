@@ -1,6 +1,6 @@
 import { Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { ClientName, LoadError, ModelName, Num, PrecisionBadge } from "@/components/common";
+import { ClientName, LoadError, ModelName, Num } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, Tip, cn, inputClass } from "@/components/ui";
 import { dashboardGet, errorMessage } from "@/lib/api";
 import { useData, useDashboard } from "@/lib/data";
@@ -185,7 +185,6 @@ function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; time
               <td className={cn(td, "max-w-[280px] pl-5")}>
                 <div className="flex min-w-0 items-center gap-1.5">
                   <ClientName id={session.client} className="font-medium text-ink" />
-                  <PrecisionBadge precision={session.precision} />
                 </div>
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-ink-3">
                   <Tip content={`会话 ID：${session.sessionId}`}>

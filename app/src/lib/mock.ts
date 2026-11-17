@@ -493,6 +493,9 @@ function deviceStatuses(): DeviceStatus[] {
     "amp", "antigravity", "augment", "claude", "cline", "codebuddy", "codex", "copilot", "crush", "cursor", "droid",
     "dsh", "gemini", "goose", "junie", "kilocode", "kimi", "kiro", "openclaw", "opencode", "qoder-intl", "qwen",
     "roocode", "trae", "warp", "workbuddy", "zcode", "zed",
+    // Opt-in fixture covers every bundled agent mark without changing the
+    // default dashboard or suggesting these agents are actually installed.
+    ...(params.has("brand-gallery") ? ["cherrystudio", "codebuff", "devin-cli", "devin-desktop", "grok", "hermes", "lmstudio", "pi", "qoder-cn-ide", "kilo"] : []),
   ];
   return DEVICES.filter((d) => state.mode === "local" ? d.id === "dev_mock_mbp" : !revoked.has(d.id)).map((d) => {
     const mine = all.filter((e) => e.device === d.id);

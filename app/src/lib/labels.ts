@@ -22,7 +22,24 @@ export type BrandName =
   | "mistral"
   | "xai"
   | "meta"
-  | "cohere";
+  | "cohere"
+  | "cline"
+  | "trae"
+  | "kiro"
+  | "augment"
+  | "codebuddy"
+  | "zed"
+  | "warp"
+  | "goose"
+  | "junie"
+  | "crush"
+  | "grok"
+  | "devin"
+  | "lmstudio"
+  | "cherrystudio"
+  | "codebuff"
+  | "hermes"
+  | "pi";
 
 /** A brand mark, or a generic mark for unknown agents, unknown models and "other". */
 export type IdentityIconName = BrandName | "bot" | "cpu" | "circle";
@@ -37,6 +54,7 @@ const CLIENTS: Record<string, { label: string; color: string }> = {
   claude: { label: "Claude Code", color: "#D97757" },
   codex: { label: "Codex", color: "#4F6BED" },
   "qoder-intl": { label: "Qoder", color: "#14A38B" },
+  "qoder-cn-ide": { label: "Qoder CN IDE", color: "#2F8F83" },
   dsh: { label: "DSH", color: "#8B5CF6" },
   zcode: { label: "ZCode", color: "#2F9BD8" },
   openclaw: { label: "OpenClaw", color: "#D9468F" },
@@ -69,6 +87,7 @@ const CLIENT_ICONS: Record<string, IdentityIconName> = {
   claude: "claude",
   codex: "openai",
   "qoder-intl": "qoder",
+  "qoder-cn-ide": "qoder",
   dsh: "deepseek",
   zcode: "zcode",
   openclaw: "openclaw",
@@ -86,6 +105,25 @@ const CLIENT_ICONS: Record<string, IdentityIconName> = {
   antigravity: "antigravity",
   "antigravity-cli": "antigravity",
   "antigravity-extension": "antigravity",
+  cline: "cline",
+  trae: "trae",
+  kiro: "kiro",
+  augment: "augment",
+  codebuddy: "codebuddy",
+  zed: "zed",
+  warp: "warp",
+  goose: "goose",
+  junie: "junie",
+  crush: "crush",
+  grok: "grok",
+  "devin-cli": "devin",
+  "devin-desktop": "devin",
+  lmstudio: "lmstudio",
+  cherrystudio: "cherrystudio",
+  codebuff: "codebuff",
+  hermes: "hermes",
+  pi: "pi",
+  kilo: "kilo",
 };
 
 function hash(text: string): number {
@@ -138,7 +176,7 @@ export function clientLabel(id: string, fallback?: string): string {
  */
 export const CLIENT_POPULARITY: readonly string[] = [
   "claude", "codex", "cursor", "copilot", "gemini",
-  "openclaw", "cline", "trae", "roocode", "kilocode", "opencode", "antigravity", "qoder-intl", "kiro", "qwen",
+  "openclaw", "cline", "trae", "roocode", "kilocode", "opencode", "antigravity", "qoder-intl", "qoder-cn-ide", "kiro", "qwen",
   "codebuddy", "workbuddy", "augment", "amp", "droid", "zed", "warp", "kimi", "kilo", "goose", "junie", "crush",
   "grok", "devin-desktop", "devin-cli", "antigravity-cli", "antigravity-extension", "lmstudio", "cherrystudio",
   "hermes", "pi", "codebuff", "zcode", "dsh",
@@ -244,19 +282,6 @@ export function formFactorLabel(formFactor: string | null | undefined): string {
       return "台式机";
     default:
       return "";
-  }
-}
-
-export function precisionLabel(precision: string): string {
-  switch (precision) {
-    case "measured":
-      return "实测";
-    case "estimated":
-      return "估算";
-    case "mixed":
-      return "含估算";
-    default:
-      return "未核查";
   }
 }
 

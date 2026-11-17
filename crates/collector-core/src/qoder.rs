@@ -27,6 +27,8 @@ pub enum QoderError {
     Read(#[from] std::io::Error),
     #[error("Qoder credit rates are invalid")]
     InvalidRates,
+    #[error("Qoder IDE database could not be read; no source details are printed for privacy")]
+    Database(#[from] rusqlite::Error),
 }
 
 #[derive(Debug, Deserialize)]
@@ -419,7 +421,7 @@ fn fallback_session_id(path: &Path) -> String {
         .to_owned()
 }
 
-fn in_range(timestamp: i64, range: crate::DateRange) -> bool {
+pub(crate) fn in_range(timestamp: i64, range: crate::DateRange) -> bool {
     let Some(date) = DateTime::from_timestamp_millis(timestamp)
         .map(|time| time.with_timezone(&chrono::Local).date_naive())
     else {
@@ -501,18 +503,22 @@ fn integer(usage: &Map<String, Value>, keys: &[&str]) -> Result<u64, ()> {
     rounded_tokens(value)
 }
 
+pub(crate) fn qoder_timestamp(value: &str) -> Option<i64> {
+    if let Ok(time) = DateTime::parse_from_rfc3339(value) {
+        return Some(time.timestamp_millis());
+    }
+    for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
+        if let Ok(time) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(time.and_utc().timestamp_millis());
+        }
+    }
+    value.trim().parse::<i64>().ok().and_then(timestamp_number)
+}
+
 fn timestamp(value: Option<&Value>) -> Option<i64> {
     let value = value?;
     if let Some(text) = value.as_str() {
-        if let Ok(time) = DateTime::parse_from_rfc3339(text) {
-            return Some(time.timestamp_millis());
-        }
-        for format in ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"] {
-            if let Ok(time) = NaiveDateTime::parse_from_str(text, format) {
-                return Some(time.and_utc().timestamp_millis());
-            }
-        }
-        return text.parse::<i64>().ok().and_then(timestamp_number);
+        return qoder_timestamp(text);
     }
     value.as_i64().and_then(timestamp_number)
 }

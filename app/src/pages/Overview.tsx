@@ -2,7 +2,7 @@ import { ChevronRight } from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Chart, baseOption, type ChartOption } from "@/components/Chart";
 import { Composition } from "@/components/Composition";
-import { ClientName, LoadError, ModelName, Num, PrecisionBadge, ShareBar } from "@/components/common";
+import { ClientName, LoadError, ModelName, Num, ShareBar } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, StatusDot, Tip, cn } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
@@ -82,7 +82,7 @@ export function Overview() {
           <TrendCard data={trend.data} error={trend.error} reload={trend.reload} bucket={bucket} />
         </>
       )}
-      <Card title="Token 构成" action={<PrecisionBadge precision={s.precision} />}>
+      <Card title="Token 构成">
         <Composition value={s} />
       </Card>
       <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
@@ -213,7 +213,7 @@ function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket,
       {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
         <>
           <div className="paper-rule pt-4"><TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} /></div>
-          <Card title="Token 构成" action={<PrecisionBadge precision={summary.precision} />}><Composition value={summary} /></Card>
+          <Card title="Token 构成"><Composition value={summary} /></Card>
           <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
             <ToolCard summary={summary} />
             <ModelCard summary={summary} />
@@ -373,7 +373,6 @@ function ToolCard({ summary }: { summary: Summary }) {
                   <div className="flex items-center justify-between gap-2 text-[13px]">
                     <ClientName id={row.key} label={row.label} className="text-ink" />
                     <span className="flex shrink-0 items-center gap-2">
-                      <PrecisionBadge precision={row.precision} />
                       <Num value={row.totalTokens} plain className="font-medium text-ink" />
                     </span>
                   </div>
@@ -417,7 +416,6 @@ function ModelCard({ summary }: { summary: Summary }) {
                     <Tip content={row.key}>
                       <ModelName id={row.key} className="text-ink" />
                     </Tip>
-                    <PrecisionBadge precision={row.precision} />
                   </div>
                 </td>
                 <td className="px-2 py-2">

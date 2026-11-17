@@ -350,7 +350,7 @@ function Definitions() {
         <Definition term="总 tokens">输入 + 输出 + 缓存读取 + 缓存写入 + 推理，五类互斥相加。缓存读取通常占九成以上，所以总量不等于计费 token。</Definition>
         <Definition term="缓存命中率">缓存读取 ÷（输入 + 缓存读取 + 缓存写入）。不含输出和推理。</Definition>
         <Definition term="成本">按公开 API 价格折算的「API 等价成本」，不是订阅或中转站账单。价格来自 LiteLLM、OpenRouter、models.dev 三份公开价格表，每天更新一次（本机数据由这台电脑算价，服务器数据由服务器算价），价格变了历史会一起重算。没有价格的模型不计入，会单独提示；Qoder 只显示 credits，不折算美元。</Definition>
-        <Definition term="Qoder 估算">Qoder 本地大多只记 credits，这里按校准汇率折算成 token，标为「估算」，原始 credits 会一起显示。</Definition>
+        <Definition term="Qoder 折算">Qoder 本地大多只记 credits，这里按校准汇率折算成 token，原始 credits 会一起显示。</Definition>
         <Definition term="日期">按 {timeZone} 的自然日统计；跨设备的时间都换算到这个时区。</Definition>
         <Definition term="隐私">
           {!status?.server

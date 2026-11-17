@@ -61,6 +61,31 @@ pub fn qoder_fragment(fragment: u32, credits: f64) -> String {
     )
 }
 
+pub fn qoder_ide(home: &Path) {
+    let root = if cfg!(target_os = "windows") {
+        home.join("AppData/Roaming/Qoder")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library/Application Support/Qoder")
+    } else {
+        home.join(".config/Qoder")
+    };
+    let directory = root.join("SharedClientCache/cache/db");
+    std::fs::create_dir_all(&directory).expect("IDE directory");
+    let db = rusqlite::Connection::open(directory.join("local.db")).expect("IDE fixture");
+    db.execute_batch(
+        "CREATE TABLE chat_message (\
+         id TEXT, session_id TEXT, request_id TEXT, role TEXT, token_info TEXT, model_info TEXT, gmt_create INTEGER, body TEXT);\
+         CREATE TABLE chat_record (request_id TEXT, extra TEXT, content TEXT);\
+         CREATE TABLE chat_session (session_id TEXT, project_uri TEXT);",
+    )
+    .expect("IDE schema");
+    db.execute(
+        "INSERT INTO chat_message VALUES ('synthetic-ide-message', 'synthetic-ide-session', 'synthetic-ide-request', 'assistant', '{\"prompt_tokens\":100,\"cached_tokens\":80,\"completion_tokens\":10}', '{\"model_key\":\"synthetic-ide-model\"}', ?1, 'not read')",
+        [chrono::Utc::now().timestamp_millis()],
+    )
+    .expect("IDE usage");
+}
+
 pub struct Paths {
     pub claude: PathBuf,
     pub codex: PathBuf,

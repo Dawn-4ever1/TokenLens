@@ -8,8 +8,17 @@ describe("identity marks", () => {
     expect(clientIcon("openclaw")).toBe("openclaw");
     expect(clientIcon("dsh")).toBe("deepseek");
     expect(clientIcon("qoder-intl")).toBe("qoder");
+    expect(clientIcon("qoder-cn-ide")).toBe("qoder");
     expect(clientIcon("workbuddy")).toBe("workbuddy");
     expect(clientIcon("antigravity-extension")).toBe("antigravity");
+    const expanded: Record<string, string> = {
+      cline: "cline", trae: "trae", kiro: "kiro", augment: "augment",
+      codebuddy: "codebuddy", zed: "zed", warp: "warp", goose: "goose",
+      junie: "junie", crush: "crush", grok: "grok", "devin-cli": "devin",
+      "devin-desktop": "devin", lmstudio: "lmstudio", cherrystudio: "cherrystudio",
+      codebuff: "codebuff", hermes: "hermes", pi: "pi", kilo: "kilo",
+    };
+    for (const [id, icon] of Object.entries(expanded)) expect(clientIcon(id)).toBe(icon);
     expect(clientLabel("antigravity-extension")).toBe("Antigravity");
     expect(clientIcon("new-agent")).toBe("bot");
   });
