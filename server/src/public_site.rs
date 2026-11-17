@@ -1,8 +1,8 @@
 //! Public product and privacy pages. These files are compiled into the server
 //! and served only from explicit GET routes: no directory traversal, fallback
 //! to the dashboard, account cookies, JavaScript, or third-party resources.
-//! The home page uses standard browser platform hints only to emphasize the
-//! matching installer; both download choices remain available.
+//! The home page uses standard browser platform hints only to put the matching
+//! installer first and emphasize it; both download choices remain available.
 
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -42,14 +42,36 @@ fn page(content: &str, content_type: &'static str, cache: &'static str) -> Respo
 
 pub async fn index(headers: HeaderMap) -> Response {
     let macos = requested_platform(&headers) == Some(DesktopPlatform::Macos);
-    let (windows_class, macos_class) = if macos {
-        ("", " button-primary")
+    let (hero_downloads, bottom_downloads) = if macos {
+        (
+            [
+                download_button(DesktopPlatform::Macos, true, true),
+                download_button(DesktopPlatform::Windows, false, true),
+            ]
+            .join("\n              "),
+            [
+                download_button(DesktopPlatform::Macos, true, false),
+                download_button(DesktopPlatform::Windows, false, false),
+            ]
+            .join("\n              "),
+        )
     } else {
-        (" button-primary", "")
+        (
+            [
+                download_button(DesktopPlatform::Windows, true, true),
+                download_button(DesktopPlatform::Macos, false, true),
+            ]
+            .join("\n              "),
+            [
+                download_button(DesktopPlatform::Windows, true, false),
+                download_button(DesktopPlatform::Macos, false, false),
+            ]
+            .join("\n              "),
+        )
     };
     let content = INDEX
-        .replace("{{WINDOWS_BUTTON_CLASS}}", windows_class)
-        .replace("{{MACOS_BUTTON_CLASS}}", macos_class);
+        .replace("{{HERO_DOWNLOAD_BUTTONS}}", &hero_downloads)
+        .replace("{{BOTTOM_DOWNLOAD_BUTTONS}}", &bottom_downloads);
     debug_assert!(!content.contains("{{"), "unrendered download placeholder");
     let mut response = page(&content, "text/html; charset=utf-8", "public, max-age=300");
     // The default Windows recommendation is also the conservative no-script
@@ -59,6 +81,22 @@ pub async fn index(headers: HeaderMap) -> Response {
         header::HeaderValue::from_static("User-Agent, Sec-CH-UA-Platform"),
     );
     response
+}
+
+fn download_button(platform: DesktopPlatform, primary: bool, hero: bool) -> String {
+    let (platform_name, label, icon) = match platform {
+        DesktopPlatform::Macos => ("macos", "下载 Mac 版 · Apple 芯片", false),
+        DesktopPlatform::Windows => ("windows", "下载 Windows 版", true),
+    };
+    let primary_class = if primary { " button-primary" } else { "" };
+    let icon = if hero && icon {
+        "\n                <svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.7\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4\"/></svg>\n                "
+    } else {
+        ""
+    };
+    format!(
+        "<a class=\"button{primary_class}\" data-download-platform=\"{platform_name}\" href=\"/downloads/latest/{platform_name}\">{icon}{label}</a>"
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -174,11 +212,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn download_emphasis_is_rendered_before_the_page_reaches_the_browser() {
-        for (request_headers, macos_count, windows_count) in [
-            (headers(Some(MAC_UA), None), 2, 0),
-            (headers(Some(WINDOWS_UA), None), 0, 2),
-            (headers(None, None), 0, 2),
+    async fn download_priority_is_rendered_before_the_page_reaches_the_browser() {
+        for (request_headers, first, second) in [
+            (headers(Some(MAC_UA), None), "macos", "windows"),
+            (headers(Some(WINDOWS_UA), None), "windows", "macos"),
+            (headers(None, None), "windows", "macos"),
         ] {
             let response = index(request_headers).await;
             assert_eq!(
@@ -187,15 +225,21 @@ mod tests {
             );
             let body = to_bytes(response.into_body(), 100_000).await.expect("body");
             let body = std::str::from_utf8(&body).expect("HTML");
-            assert_eq!(
-                body.matches("class=\"button button-primary\" data-download-platform=\"macos\"")
-                    .count(),
-                macos_count
+            let first = format!("data-download-platform=\"{first}\"");
+            let second = format!("data-download-platform=\"{second}\"");
+            let mut positions = body.match_indices(&first);
+            let (first_position, _) = positions.next().expect("first platform");
+            let (next_position, _) = positions.next().expect("second section");
+            let second_position = body.find(&second).expect("other platform");
+            assert!(first_position < second_position, "first section");
+            assert!(
+                next_position < body.rfind(&second).expect("other platform"),
+                "second section"
             );
-            assert_eq!(
-                body.matches("class=\"button button-primary\" data-download-platform=\"windows\"")
-                    .count(),
-                windows_count
+            assert!(
+                body.matches("class=\"button button-primary\" data-download-platform")
+                    .count()
+                    == 2
             );
             assert!(body.contains("/downloads/latest/windows"));
             assert!(body.contains("/downloads/latest/macos"));

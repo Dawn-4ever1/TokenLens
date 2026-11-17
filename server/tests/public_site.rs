@@ -59,7 +59,7 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
 }
 
 #[tokio::test]
-async fn the_home_page_emphasizes_the_visitors_desktop_download_without_scripts() {
+async fn the_home_page_puts_the_visitors_desktop_download_first_without_scripts() {
     let h = Harness::start().await;
     for (user_agent, recommended, other) in [
         (
@@ -95,6 +95,19 @@ async fn the_home_page_emphasizes_the_visitors_desktop_download_without_scripts(
         };
         assert_eq!(body.matches(&primary(recommended)).count(), 2);
         assert_eq!(body.matches(&primary(other)).count(), 0);
+        for section in body.split("class=\"actions download-actions\"").skip(1) {
+            let section = section.split("</div>").next().expect("hero downloads");
+            let first = format!("data-download-platform=\"{recommended}\"");
+            let second = format!("data-download-platform=\"{other}\"");
+            assert!(section.find(&first) < section.find(&second), "hero");
+        }
+        for section in body.split("<div class=\"download-buttons\">").skip(1) {
+            let first = format!("data-download-platform=\"{recommended}\"");
+            let second = format!("data-download-platform=\"{other}\"");
+            if section.contains(&first) && section.contains(&second) {
+                assert!(section.find(&first) < section.find(&second), "bottom");
+            }
+        }
         assert!(body.contains("href=\"/downloads/latest/windows\""));
         assert!(body.contains("href=\"/downloads/latest/macos\""));
         assert!(!body.contains("<script"));

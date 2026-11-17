@@ -76,6 +76,12 @@ for (const [name, type, options] of [
           throw new Error(`${name} ${platform}: ${candidate} primary download count is ${primaryCount}`);
         }
       }
+      for (const selector of [".download-actions", ".download-buttons"]) {
+        const order = await page.locator(`${selector} [data-download-platform]`).evaluateAll((buttons) => buttons.map((button) => button.getAttribute("data-download-platform")));
+        if (order.join(",") !== [platform, platform === "macos" ? "windows" : "macos"].join(",")) {
+          throw new Error(`${name} ${platform} ${selector}: order is ${order.join(",")}`);
+        }
+      }
       const scripts = await page.locator("script").count();
       if (scripts) throw new Error(`${name} ${platform}: platform selection must not add scripts`);
       if (screenshots && platform === "macos") {
@@ -88,4 +94,4 @@ for (const [name, type, options] of [
     await browser.close();
   }
 }
-console.log(`Public pages passed ${checks.length} viewport/platform/page checks; matching desktop downloads are emphasized, with no overflow, scripts, cookies or third-party resources.`);
+console.log(`Public pages passed ${checks.length} viewport/platform/page checks; matching desktop downloads come first, with no overflow, scripts, cookies or third-party resources.`);
