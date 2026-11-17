@@ -13,11 +13,47 @@ use std::time::SystemTime;
 use chrono::{DateTime, NaiveDateTime};
 use serde::Deserialize;
 use serde_json::{Map, Value};
-use usage_event::{Precision, UsageEvent, qoder_event_key};
+use usage_event::{Precision, UsageEvent, qoder_cn_event_key, qoder_event_key};
 
 const RATES_JSON: &str = include_str!("../../../config/qoder-credit-rates.json");
 const CLIENT_ID: &str = "qoder-intl";
+const CLIENT_CN: &str = "qoder-cn";
 const DEFAULT_MODEL: &str = "auto";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Edition {
+    International,
+    China,
+}
+
+impl Edition {
+    pub const fn client_id(self) -> &'static str {
+        match self {
+            Self::International => CLIENT_ID,
+            Self::China => CLIENT_CN,
+        }
+    }
+
+    const fn allows_cn_path(self) -> bool {
+        matches!(self, Self::China)
+    }
+
+    fn event_key(
+        self,
+        session_id: &str,
+        turn_key: Option<&str>,
+        timestamp: i64,
+        model_id: &str,
+        ordinal: u64,
+    ) -> String {
+        match self {
+            Self::International => {
+                qoder_event_key(session_id, turn_key, timestamp, model_id, ordinal)
+            }
+            Self::China => qoder_cn_event_key(session_id, turn_key, timestamp, model_id, ordinal),
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum QoderError {
@@ -179,6 +215,19 @@ pub fn projects_root(home: &Path) -> PathBuf {
     home.join(".qoder").join("projects")
 }
 
+/// Qoder CN Desktop / CLI transcripts. The old bridge may have written copies
+/// here; callers must drop events that duplicate the international lane.
+pub fn projects_root_cn(home: &Path, use_env_roots: bool) -> PathBuf {
+    if use_env_roots
+        && let Some(root) = std::env::var_os("QODERCN_CONFIG_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    {
+        return root.join("projects");
+    }
+    home.join(".qoder-cn").join("projects")
+}
+
 pub fn scan_default(range: crate::DateRange) -> Result<QoderOutput, QoderError> {
     let home = dirs::home_dir().ok_or_else(|| {
         QoderError::Read(std::io::Error::new(
@@ -190,8 +239,28 @@ pub fn scan_default(range: crate::DateRange) -> Result<QoderOutput, QoderError> 
 }
 
 pub fn scan_home(home: &Path, range: crate::DateRange) -> Result<QoderOutput, QoderError> {
-    let root = projects_root(home);
-    assert_international_path(&root)?;
+    scan_home_for(home, Edition::International, false, range)
+}
+
+pub fn scan_home_cn(
+    home: &Path,
+    use_env_roots: bool,
+    range: crate::DateRange,
+) -> Result<QoderOutput, QoderError> {
+    scan_home_for(home, Edition::China, use_env_roots, range)
+}
+
+pub fn scan_home_for(
+    home: &Path,
+    edition: Edition,
+    use_env_roots: bool,
+    range: crate::DateRange,
+) -> Result<QoderOutput, QoderError> {
+    let root = match edition {
+        Edition::International => projects_root(home),
+        Edition::China => projects_root_cn(home, use_env_roots),
+    };
+    assert_edition_path(&root, edition)?;
     if !root.is_dir() {
         return Ok(QoderOutput {
             events: Vec::new(),
@@ -199,14 +268,19 @@ pub fn scan_home(home: &Path, range: crate::DateRange) -> Result<QoderOutput, Qo
             assistant_without_usage: Vec::new(),
         });
     }
-    scan_root(&root, range)
+    scan_root_for(&root, range, edition)
 }
 
 /// Check every component before any filesystem operation on the path.
 pub fn assert_international_path(path: &Path) -> Result<(), QoderError> {
+    assert_edition_path(path, Edition::International)
+}
+
+pub fn assert_edition_path(path: &Path, edition: Edition) -> Result<(), QoderError> {
     if path
         .components()
         .any(|component| matches!(component, Component::Normal(part) if part == ".qoder-cn"))
+        && !edition.allows_cn_path()
     {
         Err(QoderError::ForbiddenMirrorPath)
     } else {
@@ -215,9 +289,17 @@ pub fn assert_international_path(path: &Path) -> Result<(), QoderError> {
 }
 
 pub fn scan_root(root: &Path, range: crate::DateRange) -> Result<QoderOutput, QoderError> {
-    assert_international_path(root)?;
+    scan_root_for(root, range, Edition::International)
+}
+
+pub fn scan_root_for(
+    root: &Path,
+    range: crate::DateRange,
+    edition: Edition,
+) -> Result<QoderOutput, QoderError> {
+    assert_edition_path(root, edition)?;
     let mut paths = Vec::new();
-    collect_jsonl(root, &mut paths)?;
+    collect_jsonl(root, &mut paths, edition)?;
     paths.sort();
     let rates = Rates::load()?;
     let mut events = Vec::<UsageEvent>::new();
@@ -229,8 +311,8 @@ pub fn scan_root(root: &Path, range: crate::DateRange) -> Result<QoderOutput, Qo
 
     for path in paths {
         let mut context = FileContext::default();
-        for record in read_records(&path)? {
-            match transform_record(&record, &mut context) {
+        for record in read_records(&path, edition)? {
+            match transform_record(&record, &mut context, edition) {
                 Ok(Some(fragment)) => {
                     stats.usage_records += 1;
                     let event = &fragment.event;
@@ -248,7 +330,7 @@ pub fn scan_root(root: &Path, range: crate::DateRange) -> Result<QoderOutput, Qo
                     } else {
                         0
                     };
-                    let event_key = qoder_event_key(
+                    let event_key = edition.event_key(
                         &event.session_id,
                         fragment.turn_key.as_deref(),
                         event.ts,
@@ -297,7 +379,7 @@ pub fn scan_root(root: &Path, range: crate::DateRange) -> Result<QoderOutput, Qo
             .turn_key
             .clone()
             .map(|key| (fragment.event.session_id.clone(), key));
-        match fragment.into_event(&rates) {
+        match fragment.into_event(&rates, edition) {
             Ok(Some(event)) => {
                 if let Some(group) = group {
                     measured_turns.insert(group);
@@ -349,18 +431,22 @@ fn assistant_reply_without_usage(record: &RawRecord) -> Option<i64> {
     Some(timestamp(value.get("timestamp")).unwrap_or(record.fallback_timestamp))
 }
 
-fn collect_jsonl(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), QoderError> {
-    assert_international_path(directory)?;
+fn collect_jsonl(
+    directory: &Path,
+    paths: &mut Vec<PathBuf>,
+    edition: Edition,
+) -> Result<(), QoderError> {
+    assert_edition_path(directory, edition)?;
     for entry in std::fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
-        assert_international_path(&path)?;
+        assert_edition_path(&path, edition)?;
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             continue;
         }
         if file_type.is_dir() {
-            collect_jsonl(&path, paths)?;
+            collect_jsonl(&path, paths, edition)?;
         } else if file_type.is_file()
             && path
                 .extension()
@@ -372,8 +458,8 @@ fn collect_jsonl(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), Qoder
     Ok(())
 }
 
-fn read_records(path: &Path) -> Result<Vec<RawRecord>, QoderError> {
-    assert_international_path(path)?;
+fn read_records(path: &Path, edition: Edition) -> Result<Vec<RawRecord>, QoderError> {
+    assert_edition_path(path, edition)?;
     let fallback_timestamp = std::fs::metadata(path)?
         .modified()
         .ok()
@@ -580,7 +666,7 @@ struct PendingTurn {
 }
 
 impl PendingTurn {
-    fn into_event(mut self, rates: &Rates) -> Result<Option<UsageEvent>, ()> {
+    fn into_event(mut self, rates: &Rates, edition: Edition) -> Result<Option<UsageEvent>, ()> {
         self.event.credits = self.raw.credits;
         let has_real_tokens = self.raw.input > 0 || self.raw.output > 0 || self.raw.cache_read > 0;
         if has_real_tokens {
@@ -595,8 +681,9 @@ impl PendingTurn {
             self.event.cache_write_1h = self.raw.cache_write_1h.min(self.raw.cache_write);
             self.event.reasoning = self.raw.reasoning;
             self.event.precision = Precision::Measured;
-        } else if self.raw.credits.unwrap_or(0.0) > 0.0 {
-            // Merge raw counters first; apply the credit rate exactly once.
+        } else if edition == Edition::International && self.raw.credits.unwrap_or(0.0) > 0.0 {
+            // The international bridge rate table was never calibrated for
+            // Qoder CN plans. Do not turn CN credits into invented tokens.
             let (rate, mix) = rates.for_model(&self.event.model_id).map_err(|_| ())?;
             let total = self.raw.credits.unwrap_or(0.0) * rate;
             self.event.input = rounded_tokens(total * mix.input)?;
@@ -638,6 +725,7 @@ fn session_ids(record: &RawRecord, root_session: &str) -> (String, Option<String
 fn transform_record(
     record: &RawRecord,
     context: &mut FileContext,
+    edition: Edition,
 ) -> Result<Option<PendingTurn>, ()> {
     let value = &record.value;
     if value.is_null() {
@@ -692,15 +780,16 @@ fn transform_record(
         )?,
         credits: optional_number(usage, &["credits"])?,
     };
-    let inclusive_input = usage
-        .get("input_tokens_include_cache")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let inclusive_input = edition == Edition::China
+        || usage
+            .get("input_tokens_include_cache")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
     let is_turn_start = std::mem::take(&mut context.pending_turn_start);
     Ok(Some(PendingTurn {
         event: UsageEvent {
             event_key: String::new(),
-            client: CLIENT_ID.to_owned(),
+            client: edition.client_id().to_owned(),
             session_id,
             parent_session_id,
             model_id: model.to_owned(),
@@ -797,6 +886,41 @@ mod tests {
         assert_eq!((events[1].cache_write, events[1].cache_write_1h), (50, 20));
         assert_eq!(events[1].reasoning, 10);
         assert_eq!(events[1].credits, Some(1.0));
+    }
+
+    #[test]
+    fn qoder_cn_transcripts_are_measured_and_credits_never_invent_tokens() {
+        let home = tempfile::tempdir().expect("home");
+        let root = home.path().join(".qoder-cn/projects/synthetic-cn");
+        std::fs::create_dir_all(&root).expect("CN root");
+        std::fs::write(
+            root.join("session.jsonl"),
+            concat!(
+                r#"{"type":"assistant","sessionId":"synthetic-cn-session","timestamp":"2026-11-01T10:00:00Z","message":{"id":"synthetic-cn-1","model":"qwen3-coder","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":80,"credits":1.0}}}"#,
+                "\n",
+                r#"{"type":"assistant","sessionId":"synthetic-cn-session","timestamp":"2026-11-01T10:01:00Z","message":{"id":"synthetic-cn-2","model":"qwen3-coder","usage":{"input_tokens":0,"output_tokens":0,"cache_read_input_tokens":0,"credits":2.0}}}"#,
+                "\n"
+            ),
+        )
+        .expect("CN fixture");
+        let output =
+            scan_home_cn(home.path(), false, crate::DateRange::all_history()).expect("CN scan");
+        assert_eq!(output.events.len(), 1);
+        let event = &output.events[0];
+        assert_eq!(event.client, CLIENT_CN);
+        assert_eq!((event.input, event.cache_read, event.output), (20, 80, 10));
+        assert_eq!(event.precision, Precision::Measured);
+        assert_eq!(event.credits, Some(1.0));
+        assert_ne!(
+            event.event_key,
+            qoder_event_key(
+                "synthetic-cn-session",
+                Some("msg:synthetic-cn-1"),
+                event.ts,
+                "qwen3-coder",
+                0
+            )
+        );
     }
 
     #[test]

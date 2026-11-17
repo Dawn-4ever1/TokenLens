@@ -19,7 +19,7 @@ pub mod worker_cli;
 pub const TOKSCALE_REV: &str = "e9cf1041af784bdaa4e217978f89f2168e731b69";
 /// Changes whenever parsing, mapping, Qoder handling or `event_key` rules
 /// change; a new value makes every event queue for upload once more.
-pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-3.qoder-2.key-1";
+pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-3.qoder-3.key-1";
 
 pub use mapping::{
     EventKeySetDigest, MappingError, canonical_json, event_key_set_digest, event_value_digest,
@@ -307,7 +307,7 @@ pub fn scan(config: &Config, range: DateRange) -> Result<ScanReport, Error> {
 }
 
 pub const QODER_CLIENT: &str = "qoder-intl";
-pub const QODER_CN_IDE_CLIENT: &str = "qoder-cn-ide";
+pub const QODER_CN_CLIENT: &str = "qoder-cn";
 
 #[derive(Debug, Clone)]
 pub struct ScanOptions {
@@ -403,16 +403,36 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
     if !config
         .exclude
         .iter()
-        .any(|id| normalize_id(id) == QODER_CN_IDE_CLIENT)
+        .any(|id| normalize_id(id) == QODER_CN_CLIENT)
         && options
             .clients
             .as_ref()
-            .is_none_or(|subset| subset.contains(QODER_CN_IDE_CLIENT))
+            .is_none_or(|subset| subset.contains(QODER_CN_CLIENT))
     {
         let cn_ide = qoder_ide::scan_home_cn(&options.home, options.use_env_roots, range)?;
-        combined.extend(cn_ide.iter().map(qoder_message_for_summary));
-        events.extend(cn_ide);
-        listed.push(QODER_CN_IDE_CLIENT.to_owned());
+        let cn_projects = qoder::scan_home_cn(&options.home, options.use_env_roots, range)?;
+        // Old bridge copies of international sessions may still sit under
+        // ~/.qoder-cn/projects. Session + time + model identify a copied row;
+        // skip it instead of counting it as CN a second time. Even when the
+        // international client is filtered out, read it for this comparison.
+        let mut seen: std::collections::HashSet<_> = events
+            .iter()
+            .filter(|event| event.client == QODER_CLIENT)
+            .map(qoder_fingerprint)
+            .collect();
+        if !include_qoder {
+            let international = qoder::scan_home(&options.home, range)?;
+            seen.extend(international.events.iter().map(qoder_fingerprint));
+        }
+        let mut cn_events = Vec::new();
+        for event in cn_ide.into_iter().chain(cn_projects.events) {
+            if seen.insert(qoder_fingerprint(&event)) {
+                cn_events.push(event);
+            }
+        }
+        combined.extend(cn_events.iter().map(qoder_message_for_summary));
+        events.extend(cn_events);
+        listed.push(QODER_CN_CLIENT.to_owned());
     }
     let mut report = summarize(
         combined,
@@ -434,6 +454,10 @@ pub fn upstream_cache_is_exact(clients: &[String]) -> bool {
     !clients
         .iter()
         .any(|client| HISTORY_RETAINING_CLIENTS.contains(&client.as_str()))
+}
+
+fn qoder_fingerprint(event: &usage_event::UsageEvent) -> (String, i64, String) {
+    (event.session_id.clone(), event.ts, event.model_id.clone())
 }
 
 fn qoder_message_for_summary(event: &usage_event::UsageEvent) -> UnifiedMessage {
@@ -741,6 +765,62 @@ mod tests {
             until: NaiveDate::from_ymd_opt(2026, 11, 9),
         };
         assert!(range.validate().is_err());
+    }
+
+    #[test]
+    fn qoder_cn_skips_bridge_copies_of_international_sessions() {
+        let home = tempfile::tempdir().expect("home");
+        let line = concat!(
+            r#"{"type":"assistant","sessionId":"synthetic-bridge-session","timestamp":"2026-11-01T10:00:00Z","message":{"id":"synthetic-bridge-1","model":"qwen3-coder","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":80}}}"#,
+            "\n"
+        );
+        for path in [
+            home.path().join(".qoder/projects/session.jsonl"),
+            home.path().join(".qoder-cn/projects/session.jsonl"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).expect("fixture dir");
+            std::fs::write(path, line).expect("fixture");
+        }
+        let report = scan_with(
+            &Config::default(),
+            &ScanOptions {
+                home: home.path().to_path_buf(),
+                use_env_roots: false,
+                clients: Some(BTreeSet::from([
+                    QODER_CLIENT.to_owned(),
+                    QODER_CN_CLIENT.to_owned(),
+                ])),
+                range: DateRange::all_history(),
+                upstream_cache: false,
+            },
+        )
+        .expect("deduplicated scan");
+        assert_eq!(
+            report
+                .events
+                .iter()
+                .filter(|event| event.client == QODER_CLIENT)
+                .count(),
+            1
+        );
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.client != QODER_CN_CLIENT)
+        );
+        let only_cn = scan_with(
+            &Config::default(),
+            &ScanOptions {
+                home: home.path().to_path_buf(),
+                use_env_roots: false,
+                clients: Some(BTreeSet::from([QODER_CN_CLIENT.to_owned()])),
+                range: DateRange::all_history(),
+                upstream_cache: false,
+            },
+        )
+        .expect("CN-only scan");
+        assert!(only_cn.events.is_empty(), "bridge copy must stay filtered");
     }
 
     #[test]

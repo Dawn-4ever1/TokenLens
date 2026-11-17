@@ -210,9 +210,41 @@ pub fn qoder_event_key(
     model_id: &str,
     ordinal: u64,
 ) -> String {
+    qoder_key(
+        "qoder-intl",
+        session_id,
+        turn_key,
+        timestamp,
+        model_id,
+        ordinal,
+    )
+}
+
+/// Qoder CN uses its own namespace so a bridge copy of an international
+/// session can never collide with the real CN row.
+pub fn qoder_cn_event_key(
+    session_id: &str,
+    turn_key: Option<&str>,
+    timestamp: i64,
+    model_id: &str,
+    ordinal: u64,
+) -> String {
+    qoder_key(
+        "qoder-cn", session_id, turn_key, timestamp, model_id, ordinal,
+    )
+}
+
+fn qoder_key(
+    client: &str,
+    session_id: &str,
+    turn_key: Option<&str>,
+    timestamp: i64,
+    model_id: &str,
+    ordinal: u64,
+) -> String {
     match turn_key.filter(|key| !key.is_empty()) {
-        Some(turn_key) => sha256_hex(format!("qoder-intl:{session_id}:{turn_key}").as_bytes()),
-        None => fallback_event_key("qoder-intl", session_id, timestamp, model_id, ordinal),
+        Some(turn_key) => sha256_hex(format!("{client}:{session_id}:{turn_key}").as_bytes()),
+        None => fallback_event_key(client, session_id, timestamp, model_id, ordinal),
     }
 }
 

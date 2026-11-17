@@ -53,7 +53,8 @@ export function isBrandIcon(icon: IdentityIconName): icon is BrandName {
 const CLIENTS: Record<string, { label: string; color: string }> = {
   claude: { label: "Claude Code", color: "#D97757" },
   codex: { label: "Codex", color: "#4F6BED" },
-  "qoder-intl": { label: "Qoder", color: "#14A38B" },
+  "qoder-intl": { label: "Qoder 国际版", color: "#14A38B" },
+  "qoder-cn": { label: "Qoder CN", color: "#2F8F83" },
   "qoder-cn-ide": { label: "Qoder CN IDE", color: "#2F8F83" },
   dsh: { label: "DSH", color: "#8B5CF6" },
   zcode: { label: "ZCode", color: "#2F9BD8" },
@@ -87,6 +88,7 @@ const CLIENT_ICONS: Record<string, IdentityIconName> = {
   claude: "claude",
   codex: "openai",
   "qoder-intl": "qoder",
+  "qoder-cn": "qoder",
   "qoder-cn-ide": "qoder",
   dsh: "deepseek",
   zcode: "zcode",
@@ -176,7 +178,7 @@ export function clientLabel(id: string, fallback?: string): string {
  */
 export const CLIENT_POPULARITY: readonly string[] = [
   "claude", "codex", "cursor", "copilot", "gemini",
-  "openclaw", "cline", "trae", "roocode", "kilocode", "opencode", "antigravity", "qoder-intl", "qoder-cn-ide", "kiro", "qwen",
+  "openclaw", "cline", "trae", "roocode", "kilocode", "opencode", "antigravity", "qoder-intl", "qoder-cn", "qoder-cn-ide", "kiro", "qwen",
   "codebuddy", "workbuddy", "augment", "amp", "droid", "zed", "warp", "kimi", "kilo", "goose", "junie", "crush",
   "grok", "devin-desktop", "devin-cli", "antigravity-cli", "antigravity-extension", "lmstudio", "cherrystudio",
   "hermes", "pi", "codebuff", "zcode", "dsh",

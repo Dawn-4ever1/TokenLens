@@ -58,5 +58,5 @@ Raster additions are used at their published size rather than being recompressed
 | `pi.svg` | Pi | https://pi.dev/logo.svg (original mark retained in reference) |
 
 The same `ClientName` component is used by overview, session, filter and device
-views. Kilo CLI shares `kilo.svg`; Qoder CN IDE shares `qoder.png`. Unknown
+views. Kilo CLI shares `kilo.svg`; Qoder CN shares `qoder.png`. Unknown
 new agents retain the generic bot mark. No runtime network request is used.

@@ -49,6 +49,7 @@ pub const AGENT_ROOT_ENV_VARS: &[&str] = &[
     "QODER_DB_PATH",
     "QODER_CN_HOME",
     "QODER_CN_DB_PATH",
+    "QODERCN_CONFIG_DIR",
     "APPDATA",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",

@@ -6,7 +6,7 @@ use std::path::{Component, Path, PathBuf};
 
 use tokscale_core::ClientId;
 
-use crate::QODER_CLIENT;
+use crate::{QODER_CLIENT, QODER_CN_CLIENT};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WatchRoot {
@@ -14,9 +14,10 @@ pub struct WatchRoot {
     pub path: PathBuf,
 }
 
-fn is_forbidden(path: &Path) -> bool {
+fn is_forbidden(path: &Path, client: &str) -> bool {
     path.components()
         .any(|component| matches!(component, Component::Normal(part) if part == ".qoder-cn"))
+        && client != QODER_CN_CLIENT
 }
 
 /// Every candidate directory, whether or not it exists.
@@ -52,16 +53,20 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     // scanner.rs:3008-3013: the newer ZCode SQLite store (+ -wal/-shm).
     push("zcode", home.join(".zcode").join("cli").join("db"));
     push(QODER_CLIENT, crate::qoder::projects_root(home));
+    push(
+        QODER_CN_CLIENT,
+        crate::qoder::projects_root_cn(home, use_env_roots),
+    );
     // Qoder IDE's SQLite store is distinct from the newer Desktop transcripts.
     // Watch its parent, including -wal/-shm; reading never creates sidecars.
     if let Some(parent) = crate::qoder_ide::database_path(home, use_env_roots).parent() {
         push(QODER_CLIENT, parent.to_path_buf());
     }
     if let Some(parent) = crate::qoder_ide::database_path_cn(home, use_env_roots).parent() {
-        push(crate::QODER_CN_IDE_CLIENT, parent.to_path_buf());
+        push(crate::QODER_CN_CLIENT, parent.to_path_buf());
     }
     roots.retain(|root| {
-        !is_forbidden(&root.path)
+        !is_forbidden(&root.path, &root.client)
             // A root equal to (or above) home would mean watching everything.
             && root.path != home
             && !home.starts_with(&root.path)
@@ -131,7 +136,7 @@ impl RootMap {
 
     /// The client whose root is the longest prefix of `path`.
     pub fn client_for(&self, path: &Path) -> Option<&str> {
-        if is_forbidden(path) || self.ignored.iter().any(|own| path.starts_with(own)) {
+        if self.ignored.iter().any(|own| path.starts_with(own)) {
             return None;
         }
         self.roots
@@ -171,23 +176,30 @@ mod tests {
     }
 
     #[test]
-    fn mirror_directory_is_never_selected_even_when_present() {
+    fn cn_projects_are_watched_only_for_qoder_cn() {
         let home = tempfile::tempdir().expect("home");
-        std::fs::create_dir_all(home.path().join(".qoder-cn/projects")).expect("mirror");
+        std::fs::create_dir_all(home.path().join(".qoder-cn/projects")).expect("cn");
         std::fs::create_dir_all(home.path().join(".qoder/projects")).expect("intl");
-        let roots = watch_roots(home.path(), false, &detected(&[QODER_CLIENT, "qoder"]));
-        assert_eq!(roots.len(), 1);
-        assert_eq!(roots[0].path, home.path().join(".qoder/projects"));
-        assert!(
-            candidate_roots(home.path(), false)
-                .iter()
-                .all(|root| { !is_forbidden(&root.path) && root.client != "qoder" })
+        let roots = watch_roots(
+            home.path(),
+            false,
+            &detected(&[QODER_CLIENT, QODER_CN_CLIENT]),
         );
+        assert_eq!(roots.len(), 2);
         let map = RootMap::new(&roots, &[]);
         assert_eq!(
             map.client_for(&home.path().join(".qoder-cn/projects/a.jsonl")),
-            None
+            Some(QODER_CN_CLIENT)
         );
+        assert_eq!(
+            map.client_for(&home.path().join(".qoder/projects/a.jsonl")),
+            Some(QODER_CLIENT)
+        );
+        assert!(candidate_roots(home.path(), false).iter().all(|root| {
+            root.client != "qoder"
+                && (root.client != QODER_CLIENT
+                    || !root.path.to_string_lossy().contains(".qoder-cn"))
+        }));
     }
 
     #[test]

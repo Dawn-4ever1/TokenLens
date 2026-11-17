@@ -22,7 +22,7 @@ impl Edition {
     fn client_id(self) -> &'static str {
         match self {
             Self::International => CLIENT_ID,
-            Self::China => "qoder-cn-ide",
+            Self::China => "qoder-cn",
         }
     }
 
@@ -553,7 +553,7 @@ mod tests {
                 home: temp.path().to_path_buf(),
                 use_env_roots: false,
                 clients: Some(std::collections::BTreeSet::from([
-                    crate::QODER_CN_IDE_CLIENT.to_owned(),
+                    crate::QODER_CN_CLIENT.to_owned()
                 ])),
                 range: crate::DateRange::all_history(),
                 upstream_cache: false,
@@ -563,7 +563,7 @@ mod tests {
         let cn = report
             .client_totals
             .iter()
-            .find(|client| client.client == crate::QODER_CN_IDE_CLIENT)
+            .find(|client| client.client == crate::QODER_CN_CLIENT)
             .expect("CN IDE detected");
         assert_eq!((cn.messages, cn.tokens.total), (2, 205));
         assert!(

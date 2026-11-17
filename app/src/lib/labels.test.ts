@@ -8,7 +8,9 @@ describe("identity marks", () => {
     expect(clientIcon("openclaw")).toBe("openclaw");
     expect(clientIcon("dsh")).toBe("deepseek");
     expect(clientIcon("qoder-intl")).toBe("qoder");
+    expect(clientIcon("qoder-cn")).toBe("qoder");
     expect(clientIcon("qoder-cn-ide")).toBe("qoder");
+    expect(clientLabel("qoder-cn")).toBe("Qoder CN");
     expect(clientIcon("workbuddy")).toBe("workbuddy");
     expect(clientIcon("antigravity-extension")).toBe("antigravity");
     const expanded: Record<string, string> = {
