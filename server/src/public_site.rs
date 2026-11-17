@@ -256,7 +256,7 @@ mod tests {
         assert!(PRIVACY.contains("退出账号</strong>会撤销当前登录状态，并断开这台电脑的云端连接"));
         assert!(PRIVACY.contains("也不会删除云端设备或历史"));
         assert!(PRIVACY.contains("Google 和 GitHub 不取得你的 TokenLens 会话"));
-        assert!(PRIVACY.contains("当前采集实现不会生成或上传项目目录的哈希或项目标签"));
+        assert!(PRIVACY.contains("项目统计只保留项目名称和工作区标识的不可逆哈希"));
         assert!(PRIVACY.contains("没有「一键删除账号及全部云端历史」入口"));
         for page in [INDEX, PRIVACY] {
             assert!(!page.contains("<script"));

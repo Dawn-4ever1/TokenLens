@@ -267,6 +267,7 @@ fn event_from_values(
         event_key: qoder_event_key(&session, Some(&turn_key), ts, &model, 0),
         client: edition.client_id().to_owned(),
         session_id: session,
+        session_title: None,
         parent_session_id: None,
         model_id: model,
         provider_id: Some("qoder".to_owned()),
@@ -557,6 +558,7 @@ mod tests {
                 ])),
                 range: crate::DateRange::all_history(),
                 upstream_cache: false,
+                project_salt: None,
             },
         )
         .expect("CN IDE collector");
@@ -592,6 +594,7 @@ mod tests {
                 ])),
                 range: crate::DateRange::all_history(),
                 upstream_cache: false,
+                project_salt: None,
             },
         )
         .expect("full collector");

@@ -81,6 +81,10 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 11,
         sql: include_str!("../migrations/0011_rebind_retired_devices.sql"),
     },
+    Migration {
+        version: 12,
+        sql: include_str!("../migrations/0012_session_metadata.sql"),
+    },
 ];
 
 /// How many events carry a `counted` flag that disagrees with the D029 rule
@@ -936,7 +940,7 @@ const EVENT_VALUE_COLUMNS: &str = "client, session_id, parent_session_id, model_
      ts, input, output, cache_read, cache_write, cache_write_1h, reasoning, cost_usd, \
      cost_source, precision, credits, rate_version, project_hash, project_label, \
      message_count, is_turn_start, duration_ms, pricing_model_id, billing_provider, \
-     service_tier, scan_generation";
+     service_tier, session_title, scan_generation";
 
 fn precision_from_db(text: &str) -> Precision {
     match text {
@@ -986,8 +990,9 @@ fn stored_event(
         pricing_model_id: row.get(22)?,
         billing_provider: row.get(23)?,
         service_tier: row.get(24)?,
+        session_title: row.get(25)?,
     };
-    Ok((event, row.get(25)?))
+    Ok((event, row.get(26)?))
 }
 
 /// Upserts every event in one transaction. An event whose stored values and
@@ -1013,7 +1018,7 @@ pub fn write_batch(
                collector_version, tokscale_rev, ingested_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-               ?32, ?32)"
+               ?32, ?33, ?33)"
         ))?;
         let mut set_price = tx.prepare_cached(
             "UPDATE usage_events SET est_cost_usd = ?4, price_status = ?5, price_version = ?6
@@ -1028,7 +1033,7 @@ pub fn write_batch(
                message_count = ?22, is_turn_start = ?23, duration_ms = ?24,
                scan_generation = ?25, collector_version = ?26, tokscale_rev = ?27,
                updated_at = ?28, pricing_model_id = ?30, billing_provider = ?31,
-               service_tier = ?32
+               service_tier = ?32, session_title = ?33
              WHERE device_id = ?1 AND event_key = ?2 AND tenant_id = ?29",
         )?;
         for event in events {
@@ -1078,6 +1083,7 @@ pub fn write_batch(
                     event.pricing_model_id,
                     event.billing_provider,
                     event.service_tier,
+                    event.session_title,
                 ];
                 update.execute(update_values)?;
                 counts.updated += 1;
@@ -1111,6 +1117,7 @@ pub fn write_batch(
                     event.pricing_model_id,
                     event.billing_provider,
                     event.service_tier,
+                    event.session_title,
                     meta.scan_generation,
                     meta.collector.version,
                     meta.collector.tokscale_rev,

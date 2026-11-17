@@ -236,6 +236,7 @@ fn scan_options(
             clients: None,
             range,
             upstream_cache: false,
+            project_salt: None,
         },
         None => ScanOptions::for_current_user(range)?,
     };
@@ -320,6 +321,7 @@ fn watch_options(args: &WatchArgs) -> Result<WatchOptions, Box<dyn std::error::E
         exit_after: args.exit_after_secs.map(Duration::from_secs),
         ignored,
         upstream_cache_dir,
+        project_salt: None,
     })
 }
 
@@ -349,6 +351,7 @@ fn run_sync(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state_dir = args.store.state_dir()?;
     let mut options = watch_options(&args.watch)?;
     options.ignored.push(state_dir.clone());
+    options.project_salt = Some(collector_core::state::ensure_project_salt_in(&state_dir)?);
     let (sender, receiver) = watch::channel();
     stop_on_ctrl_c(&sender)?;
     let sink_sender = sender.clone();

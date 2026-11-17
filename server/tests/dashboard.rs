@@ -496,6 +496,56 @@ async fn sessions_group_subagents_sort_and_page() {
 }
 
 #[tokio::test]
+async fn sessions_expose_titles_and_projects_and_filter_them() {
+    let w = world().await;
+    let mut named = event(
+        "named-session",
+        "codex",
+        "named",
+        None,
+        "m1",
+        "2027-01-15T03:00:00Z",
+        [10, 2, 3],
+        Some(0.01),
+        "measured",
+        true,
+    );
+    named["sessionTitle"] = json!("整理本地日记");
+    named["projectHash"] = json!("a".repeat(64));
+    named["projectLabel"] = json!("TokenLens");
+    let (status, _) =
+        w.h.ingest(
+            &w.a.ingest,
+            &envelope(&w.a.id, "metadata", "g1", vec![named]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, page) =
+        w.h.get("/api/dashboard/sessions?q=日记", Some(&w.a.read))
+            .await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["sessions"][0]["title"], "整理本地日记");
+    assert_eq!(page["sessions"][0]["projectLabel"], "TokenLens");
+
+    let (_, filtered) =
+        w.h.get(
+            &format!("/api/dashboard/sessions?projects={}", "a".repeat(64)),
+            Some(&w.a.read),
+        )
+        .await;
+    assert_eq!(filtered["total"], 1);
+    let (_, options) = w.h.get("/api/dashboard/filters", Some(&w.a.read)).await;
+    assert!(
+        options["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|project| project["label"] == "TokenLens")
+    );
+}
+
+#[tokio::test]
 async fn session_detail_lists_turns_without_content() {
     let w = world().await;
     let (_, page) =
@@ -880,7 +930,7 @@ async fn health_and_filter_options() {
     let (_, health) = w.h.get("/api/dashboard/health", Some(&w.a.read)).await;
     assert_eq!(health["eventCount"], 6);
     assert_eq!(health["deviceCount"], 2);
-    assert_eq!(health["schemaVersion"], 11);
+    assert_eq!(health["schemaVersion"], 12);
     assert_eq!(health["timeZone"], "Asia/Shanghai");
     assert!(
         health.get("databaseBytes").is_none(),

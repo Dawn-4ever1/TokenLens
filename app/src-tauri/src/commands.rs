@@ -1465,6 +1465,29 @@ pub async fn revoke_device(app: AppHandle, device_id: String) -> CmdResult<AppSt
 mod tests {
     use super::*;
 
+    fn wait_for_path(path: &std::path::Path) {
+        for _ in 0..100 {
+            if path.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("test path was not created: {}", path.display());
+    }
+
+    fn prepare_queue(dir: &std::path::Path, device_id: &str) {
+        for _ in 0..100 {
+            match State::open(dir).and_then(|mut state| {
+                state.prepare(device_id, "generation-test")?;
+                Ok(())
+            }) {
+                Ok(()) => return,
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            }
+        }
+        panic!("test queue stayed busy: {}", dir.display());
+    }
+
     #[test]
     fn account_refresh_updates_the_current_profile_and_keeps_it_when_offline() {
         let dir = tempfile::tempdir().unwrap();
@@ -1943,15 +1966,15 @@ mod tests {
             ..server
         };
         adopt(&app, server.clone(), false).unwrap();
-        let mut queue = State::open(dir.path()).unwrap();
-        queue.prepare(&server.device_id, "generation-test").unwrap();
-        drop(queue);
+        prepare_queue(dir.path(), &server.device_id);
         std::fs::write(dir.path().join("account-device-binding"), b"binding").unwrap();
         *lock(&state.account_session) = Some("tls_old".into());
         *lock(&state.account_email) = Some("old@example.test".into());
         *lock(&state.account_space) = Some("Old space".into());
         let local_queue = dir.path().join("local-queue");
         let local_database = local::database_path(dir.path());
+        wait_for_path(&local_queue);
+        wait_for_path(&local_database);
         assert!(local_queue.exists());
         assert!(local_database.exists());
 
@@ -2026,9 +2049,7 @@ mod tests {
         *lock(&state.account_space) = Some("Fixture space".into());
         let binding = dir.path().join("account-device-binding");
         std::fs::write(&binding, b"stable-fixture-binding").unwrap();
-        let mut queue = State::open(dir.path()).unwrap();
-        queue.prepare(&cloud.device_id, "generation-test").unwrap();
-        drop(queue);
+        prepare_queue(dir.path(), &cloud.device_id);
 
         // Keep real cloud events and another device in the registry. Returning
         // to local must not turn either into a revoked or deleted cloud record.

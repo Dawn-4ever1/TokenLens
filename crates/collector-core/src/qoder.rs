@@ -791,6 +791,7 @@ fn transform_record(
             event_key: String::new(),
             client: edition.client_id().to_owned(),
             session_id,
+            session_title: None,
             parent_session_id,
             model_id: model.to_owned(),
             provider_id: Some("qoder".to_owned()),

@@ -1,9 +1,11 @@
 //! Local collector state (architecture 5.6): the persisted snapshot of events
 //! already handed to the outbox (`known`) and the upload outbox itself.
 //!
-//! Only whitelisted canonical event JSON is stored; no paths, titles or
-//! content. The file lives in this project's own data directory.
+//! Only whitelisted canonical event JSON and the local project salt are
+//! stored; no prompts, responses, code, or full paths. The file lives in this
+//! project's own data directory.
 
+use std::fmt::Write as FmtWrite;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -48,6 +50,7 @@ pub mod meta {
     pub const LAST_UPLOAD_AT: &str = "last_upload_at";
     pub const LAST_HEARTBEAT_AT: &str = "last_heartbeat_at";
     pub const SERVER_STORE_ID: &str = "server_store_id";
+    pub const PROJECT_SALT: &str = "project_salt";
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +59,8 @@ pub enum StateError {
     Sqlite(#[from] rusqlite::Error),
     #[error("the local collector state directory could not be prepared")]
     Io(#[from] std::io::Error),
+    #[error("the local collector state could not create a project salt: {0}")]
+    Random(String),
     #[error("the local collector state was written by a newer collector")]
     TooNew,
     #[error(
@@ -198,6 +203,22 @@ impl State {
         Ok(())
     }
 
+    pub fn ensure_project_salt(&self) -> Result<String, StateError> {
+        if let Some(value) = self.meta(meta::PROJECT_SALT)?
+            && !value.is_empty()
+        {
+            return Ok(value);
+        }
+        let mut bytes = [0_u8; 32];
+        getrandom::fill(&mut bytes).map_err(|error| StateError::Random(error.to_string()))?;
+        let mut salt = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            let _ = write!(salt, "{byte:02x}");
+        }
+        self.set_meta(meta::PROJECT_SALT, &salt)?;
+        Ok(salt)
+    }
+
     /// A different device drops everything; a different parser generation
     /// drops `known` so every event is queued again, but keeps queued rows.
     pub fn prepare(&mut self, device_id: &str, generation: &str) -> Result<Prepared, StateError> {
@@ -213,7 +234,7 @@ impl State {
         if device_changed {
             tx.execute_batch(
                 "DELETE FROM known; DELETE FROM outbox;
-                 DELETE FROM meta WHERE key IN ('full_scan_generation', 'rejected_total',
+                DELETE FROM meta WHERE key IN ('full_scan_generation', 'rejected_total', 'project_salt',
                      'upload_state', 'last_upload_at', 'last_heartbeat_at', 'server_store_id');",
             )?;
         } else if generation_changed {
@@ -419,6 +440,10 @@ impl State {
     }
 }
 
+pub fn ensure_project_salt_in(dir: &Path) -> Result<String, StateError> {
+    State::open(dir)?.ensure_project_salt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -455,6 +480,21 @@ mod tests {
             .expect("bump");
         drop(state);
         assert!(matches!(State::open(&state_dir), Err(StateError::TooNew)));
+    }
+
+    #[test]
+    fn project_salt_is_random_stable_and_rotates_with_device_identity() {
+        let dir = tempfile::tempdir().expect("dir");
+        let mut state = State::open(dir.path()).expect("open");
+        state.prepare("dev_a", "g1").expect("prepare");
+        let first = state.ensure_project_salt().expect("salt");
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+        assert_eq!(state.ensure_project_salt().expect("stable salt"), first);
+        state.prepare("dev_b", "g1").expect("rotate device");
+        let second = state.ensure_project_salt().expect("new salt");
+        assert_eq!(second.len(), 64);
+        assert_ne!(second, first);
     }
 
     #[test]

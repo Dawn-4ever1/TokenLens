@@ -19,7 +19,7 @@ export function SessionDrawer({ sessionKey, onClose }: { sessionKey: string | nu
     <Sheet
       open={sessionKey !== null}
       onOpenChange={(open) => !open && onClose()}
-      title={s ? <ClientName id={s.client} label={clientLabel(s.client)} /> : "会话详情"}
+      title={s?.title || (s ? <ClientName id={s.client} label={clientLabel(s.client)} /> : "会话详情")}
       description={s ? <span className="num">{s.deviceName} · 会话 {shortId(s.sessionId, 12)}{s.projectLabel ? ` · ${s.projectLabel}` : ""}</span> : undefined}
     >
       {!detail && error ? (
@@ -131,7 +131,7 @@ function SessionBody({ detail }: { detail: SessionDetail }) {
           </div>
         </section>
       )}
-      <p className="text-xs leading-5 text-ink-3">这里只有数字。采集端从不上传提示词、回答、代码或会话标题。</p>
+      <p className="text-xs leading-5 text-ink-3">这里显示数字、会话标题和项目名；采集端不上传提示词、回答、代码或完整路径。</p>
     </div>
   );
 }

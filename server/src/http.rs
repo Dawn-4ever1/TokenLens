@@ -612,6 +612,7 @@ fn event_is_storable(event: &UsageEvent) -> bool {
         event.rate_version.as_deref(),
         event.project_hash.as_deref(),
         event.project_label.as_deref(),
+        event.session_title.as_deref(),
         event.pricing_model_id.as_deref(),
         event.billing_provider.as_deref(),
         event.service_tier.as_deref(),

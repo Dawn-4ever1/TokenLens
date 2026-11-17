@@ -1,7 +1,7 @@
-import { Search, X } from "lucide-react";
+import { Check, ChevronDown, Folder, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { ClientName, LoadError, ModelName, Num } from "@/components/common";
-import { Badge, Button, Card, EmptyState, Segmented, Skeleton, Tip, cn, inputClass } from "@/components/ui";
+import { Badge, Button, Card, EmptyState, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, Tip, cn, inputClass } from "@/components/ui";
 import { dashboardGet, errorMessage } from "@/lib/api";
 import { useData, useDashboard } from "@/lib/data";
 import { dateTime, exact, relativeTime, shortId, usd } from "@/lib/format";
@@ -82,7 +82,7 @@ export function Sessions() {
             type="search"
             value={text}
             onChange={(event) => setText(event.target.value)}
-            placeholder="搜索会话 ID、模型或项目"
+            placeholder="搜索标题、会话 ID、模型或项目"
             aria-label="搜索会话"
             maxLength={100}
             className={cn(inputClass, "pl-9 pr-8")}
@@ -93,6 +93,7 @@ export function Sessions() {
             </button>
           )}
         </div>
+        <ProjectPicker />
         <Segmented label="排序" value={sort} options={SORTS} onChange={setSort} />
         <span className="ml-auto text-xs text-ink-3">
           {first.data ? `${rangeLabel(filters, span)} · 共 ${exact(first.data.total)} 个会话` : ""}
@@ -115,7 +116,7 @@ export function Sessions() {
             title={search ? "没有匹配的会话" : "这个范围内没有会话"}
             hint={
               search
-                ? "搜索只匹配会话 ID、模型名和项目名；会话标题和内容不会上传，所以搜不到。"
+                ? "搜索会匹配会话标题、ID、模型名和项目名。"
                 : filtered
                   ? "当前筛选条件下没有会话，可以清除筛选或换一个时间范围。"
                   : "换一个时间范围试试。如果刚配对，第一次上传可能需要几分钟。"
@@ -143,7 +144,7 @@ export function Sessions() {
         </div>
       )}
       <p className="text-center text-[11px] leading-5 text-ink-3">
-        只显示数字统计；会话标题、提示词和回答都不会离开你的电脑。
+        只显示数字统计、会话标题和项目名；提示词、回答和代码不会上传。
       </p>
     </div>
   );
@@ -185,6 +186,11 @@ function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; time
               <td className={cn(td, "max-w-[280px] pl-5")}>
                 <div className="flex min-w-0 items-center gap-1.5">
                   <ClientName id={session.client} className="font-medium text-ink" />
+                  {session.title ? (
+                    <Tip content={session.title}>
+                      <span className="min-w-0 truncate font-medium text-ink">{session.title}</span>
+                    </Tip>
+                  ) : null}
                 </div>
                 <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-ink-3">
                   <Tip content={`会话 ID：${session.sessionId}`}>
@@ -224,5 +230,67 @@ function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; time
         </tbody>
       </table>
     </div>
+  );
+}
+
+function ProjectPicker() {
+  const { filters, setFilters, options } = useData();
+  const selected = filters.projects;
+  const label = selected.length === 0
+    ? "所有项目"
+    : selected.length === 1
+      ? options?.projects.find((option) => option.key === selected[0])?.label ?? "已选项目"
+      : `已选 ${selected.length} 个项目`;
+  const toggle = (key: string) => setFilters((previous) => ({
+    ...previous,
+    projects: previous.projects.includes(key)
+      ? previous.projects.filter((item) => item !== key)
+      : [...previous.projects, key],
+  }));
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button aria-label="按项目筛选" className="max-w-52">
+          <Folder className="h-3.5 w-3.5" aria-hidden />
+          <span className="truncate">{label}</span>
+          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0" aria-hidden />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-64 p-2">
+        <div className="flex items-center justify-between px-2 pb-1 text-xs text-ink-3">
+          <span>项目</span>
+          {selected.length > 0 ? (
+            <button type="button" className="text-primary hover:underline" onClick={() => setFilters((previous) => ({ ...previous, projects: [] }))}>
+              清除
+            </button>
+          ) : null}
+        </div>
+        {!options ? <p className="px-2 py-4 text-center text-xs text-ink-3">正在读取项目…</p> : options.projects.length === 0 ? (
+          <p className="px-2 py-4 text-center text-xs text-ink-3">暂无项目</p>
+        ) : (
+          <ul className="max-h-64 space-y-px overflow-y-auto">
+            {options.projects.map((option) => {
+              const checked = selected.includes(option.key);
+              return (
+                <li key={option.key}>
+                  <button
+                    type="button"
+                    role="checkbox"
+                    aria-checked={checked}
+                    onClick={() => toggle(option.key)}
+                    className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[13px] hover:bg-surface-2"
+                  >
+                    <span className={cn("flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border", checked ? "border-primary bg-primary text-primary-ink" : "border-line")}>
+                      {checked ? <Check className="h-3 w-3" strokeWidth={3} aria-hidden /> : null}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{option.key === NO_PROJECT_KEY ? "未标记项目" : option.label}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </PopoverContent>
+    </Popover>
   );
 }

@@ -8,7 +8,7 @@ pub mod envelope;
 pub const SCHEMA_JSON: &str = include_str!("../../../schema/usage-event.v1.json");
 
 /// Every property permitted by architecture section 6.2.
-pub const UPLOAD_FIELDS: [&str; 26] = [
+pub const UPLOAD_FIELDS: [&str; 27] = [
     "eventKey",
     "client",
     "sessionId",
@@ -35,6 +35,7 @@ pub const UPLOAD_FIELDS: [&str; 26] = [
     "pricingModelId",
     "billingProvider",
     "serviceTier",
+    "sessionTitle",
 ];
 
 pub const REQUIRED_FIELDS: [&str; 15] = [
@@ -80,6 +81,9 @@ pub struct UsageEvent {
     pub event_key: String,
     pub client: String,
     pub session_id: String,
+    /// Optional human-readable title supplied by the source client.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session_id: Option<String>,
     pub model_id: String,
@@ -257,6 +261,7 @@ mod tests {
             event_key: event_key_from_dedup("synthetic", "message-1"),
             client: "synthetic".into(),
             session_id: "synthetic-session".into(),
+            session_title: None,
             parent_session_id: None,
             model_id: "synthetic-model".into(),
             provider_id: None,
@@ -366,7 +371,7 @@ mod tests {
     #[test]
     fn serde_rejects_unknown_fields() {
         let mut value = serde_json::to_value(fixture_event()).expect("serialize event");
-        value["sessionTitle"] = serde_json::Value::String("not-allowed".into());
+        value["workspaceLabel"] = serde_json::Value::String("not-allowed".into());
         assert!(serde_json::from_value::<UsageEvent>(value).is_err());
     }
 }

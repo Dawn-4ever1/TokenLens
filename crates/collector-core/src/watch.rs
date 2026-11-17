@@ -70,6 +70,8 @@ pub struct WatchOptions {
     /// Upstream persistent cache directory for workers (`TOKSCALE_CONFIG_DIR`).
     /// `None` keeps the uncached upstream API.
     pub upstream_cache_dir: Option<PathBuf>,
+    /// Per-device salt passed to workers for project hashing.
+    pub project_salt: Option<String>,
 }
 
 pub enum Msg {
@@ -196,6 +198,9 @@ pub fn worker_command(options: &WatchOptions, scope: &Scope) -> Command {
     }
     if let Some(until) = scope.range.until {
         command.arg("--until").arg(until.to_string());
+    }
+    if let Some(salt) = &options.project_salt {
+        command.arg("--project-salt").arg(salt);
     }
     // Upstream's recovery overlay reads a ledger from its shared config dir;
     // workers must only ever see raw agent logs.
@@ -543,6 +548,7 @@ mod tests {
             exit_after: None,
             ignored: Vec::new(),
             upstream_cache_dir: cache,
+            project_salt: None,
         }
     }
 

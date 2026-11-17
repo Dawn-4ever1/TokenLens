@@ -27,6 +27,7 @@ struct Args {
     since: Option<NaiveDate>,
     until: Option<NaiveDate>,
     upstream_cache: bool,
+    project_salt: Option<String>,
 }
 
 fn value(args: &mut impl Iterator<Item = OsString>, name: &str) -> Result<OsString, String> {
@@ -52,6 +53,9 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Args, String> {
             Some("--home") => parsed.home = Some(PathBuf::from(value(&mut args, "--home")?)),
             Some("--no-env-roots") => parsed.no_env_roots = true,
             Some("--upstream-cache") => parsed.upstream_cache = true,
+            Some("--project-salt") => {
+                parsed.project_salt = Some(text(value(&mut args, "--project-salt")?)?);
+            }
             Some("--clients") => {
                 let list = text(value(&mut args, "--clients")?)?;
                 parsed.clients = Some(list.split(',').map(str::to_owned).collect());
@@ -94,6 +98,7 @@ pub fn serve(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn std
             clients: None,
             range,
             upstream_cache: false,
+            project_salt: args.project_salt,
         },
         None => ScanOptions::for_current_user(range)?,
     };

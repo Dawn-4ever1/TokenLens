@@ -139,6 +139,7 @@ fn run_once(home: &Path, state_dir: &Path, paired: &Credentials, seconds: u64) -
         exit_after: Some(Duration::from_secs(seconds)),
         ignored: vec![state_dir.to_owned()],
         upstream_cache_dir: None,
+        project_salt: None,
     };
     let (sender, receiver) = watch::channel();
     let sink = sender.clone();

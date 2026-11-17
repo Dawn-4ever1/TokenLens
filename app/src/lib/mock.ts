@@ -30,6 +30,7 @@ interface Ev {
   cost: number | null;
   credits: number | null;
   precision: Precision;
+  title?: string;
   project?: string;
 }
 
@@ -119,6 +120,7 @@ function rawEvents(): Ev[] {
             cost: client.priced ? (input * 3 + output * 15 + cr * 0.3 + cw * 3.75 + reasoning * 15) / 1e6 : null,
             credits: client.precision === "estimated" ? Math.round(tokens / 9_000 * 10) / 10 : null,
             precision: client.precision,
+            title: t === 0 && m === 0 ? `${client.id} 示例会话 ${root}` : undefined,
             project,
           });
         }
@@ -393,6 +395,7 @@ function summarize(key: string, group: Ev[]): SessionSummary {
   return {
     sessionKey: key,
     sessionId: first.root,
+    title: first.title,
     deviceId: first.device,
     deviceName: DEVICES.find((d) => d.id === first.device)?.name ?? first.device,
     client: first.client,
@@ -412,7 +415,7 @@ function sessions(q: Q): SessionPage {
   const needle = q.q?.trim().toLowerCase();
   if (needle) {
     rows = rows.filter((s) =>
-      s.sessionId.toLowerCase().includes(needle) || s.models.some((m) => m.toLowerCase().includes(needle)) || (s.projectLabel ?? "").includes(needle),
+      (s.title ?? "").toLowerCase().includes(needle) || s.sessionId.toLowerCase().includes(needle) || s.models.some((m) => m.toLowerCase().includes(needle)) || (s.projectLabel ?? "").toLowerCase().includes(needle),
     );
   }
   const sort = q.sort ?? "recent";

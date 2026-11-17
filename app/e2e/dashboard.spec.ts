@@ -366,6 +366,24 @@ test("session drawer opens from a row and closes with Escape", async ({ page }) 
   expect(errors).toEqual([]);
 });
 
+test("sessions show source titles and can filter by project", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await open(page, { view: "sessions" });
+  await settle(page, "会话");
+  await expect(page.getByText(/示例会话/).first()).toBeVisible();
+
+  const picker = page.getByRole("button", { name: "按项目筛选" });
+  await picker.click();
+  const project = page.getByRole("checkbox").first();
+  await expect(project).toBeVisible();
+  await project.click();
+  await expect(picker).not.toHaveText("所有项目");
+
+  const search = page.getByRole("searchbox", { name: "搜索会话" });
+  await search.fill("示例会话");
+  await expect(page.getByText(/示例会话/).first()).toBeVisible();
+});
+
 test("a Qoder session keeps credits without a precision badge", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page, { view: "sessions" });

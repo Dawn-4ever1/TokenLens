@@ -123,6 +123,7 @@ export interface Heatmap {
 export interface SessionSummary extends Measures {
   sessionKey: string;
   sessionId: string;
+  title?: string;
   deviceId: string;
   deviceName: string;
   client: string;

@@ -197,47 +197,63 @@ impl Collector {
         let live = Arc::clone(&self.live);
         let spawned = std::thread::Builder::new()
             .name("collector".to_owned())
-            .spawn(move || match mode {
-                RunMode::LocalFirst {
-                    local,
-                    server,
-                    legacy_local_queue,
-                } => {
-                    let Some(mut syncer) = Fanout::start(
-                        &state_dir,
-                        FanoutDestinations {
-                            local: &local,
-                            server: server.as_ref(),
-                            legacy_local_queue,
-                        },
-                        &loop_sender,
-                        &receiver,
-                        &live,
-                        &notify,
-                        expired.as_ref(),
-                    ) else {
+            .spawn(move || {
+                let salt_dir = match &mode {
+                    RunMode::LocalFirst { .. } => state_dir.join("local-queue"),
+                    #[cfg(test)]
+                    RunMode::Single(_) => state_dir.clone(),
+                };
+                let project_salt = match collector_core::state::ensure_project_salt_in(&salt_dir) {
+                    Ok(salt) => Some(salt),
+                    Err(_) => {
+                        lock(&live).last_error = Some(QUEUE_ERROR.to_owned());
                         return;
-                    };
-                    let mut out = StatusSink::new(live, notify);
-                    watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
-                    syncer.stop();
-                }
-                #[cfg(test)]
-                RunMode::Single(destination) => {
-                    let Some(mut syncer) = start_syncer(
-                        &state_dir,
-                        &destination,
-                        &loop_sender,
-                        &receiver,
-                        &live,
-                        &*notify,
-                        BUSY_RETRY,
-                    ) else {
-                        return;
-                    };
-                    let mut out = StatusSink::new(live, notify);
-                    watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
-                    syncer.stop();
+                    }
+                };
+                let mut options = options;
+                options.project_salt = project_salt;
+                match mode {
+                    RunMode::LocalFirst {
+                        local,
+                        server,
+                        legacy_local_queue,
+                    } => {
+                        let Some(mut syncer) = Fanout::start(
+                            &state_dir,
+                            FanoutDestinations {
+                                local: &local,
+                                server: server.as_ref(),
+                                legacy_local_queue,
+                            },
+                            &loop_sender,
+                            &receiver,
+                            &live,
+                            &notify,
+                            expired.as_ref(),
+                        ) else {
+                            return;
+                        };
+                        let mut out = StatusSink::new(live, notify);
+                        watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
+                        syncer.stop();
+                    }
+                    #[cfg(test)]
+                    RunMode::Single(destination) => {
+                        let Some(mut syncer) = start_syncer(
+                            &state_dir,
+                            &destination,
+                            &loop_sender,
+                            &receiver,
+                            &live,
+                            &*notify,
+                            BUSY_RETRY,
+                        ) else {
+                            return;
+                        };
+                        let mut out = StatusSink::new(live, notify);
+                        watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
+                        syncer.stop();
+                    }
                 }
             });
         match spawned {
@@ -710,6 +726,7 @@ pub fn watch_options(paths: &Paths) -> Result<WatchOptions, &'static str> {
         upstream_cache_dir: Some(
             collector_core::roots::own_upstream_dir(paths.home.as_deref()).ok_or(SETUP_ERROR)?,
         ),
+        project_salt: None,
     })
 }
 
@@ -1400,6 +1417,7 @@ mod tests {
                 exit_after: Some(Duration::from_secs(1)),
                 ignored: vec![],
                 upstream_cache_dir: Some(root.join("isolated-cache")),
+                project_salt: None,
             },
             root.join("queue"),
             Destination {

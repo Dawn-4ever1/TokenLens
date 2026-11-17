@@ -19,11 +19,12 @@ pub mod worker_cli;
 pub const TOKSCALE_REV: &str = "e9cf1041af784bdaa4e217978f89f2168e731b69";
 /// Changes whenever parsing, mapping, Qoder handling or `event_key` rules
 /// change; a new value makes every event queue for upload once more.
-pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-3.qoder-3.key-1";
+pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-4.qoder-3.key-1";
 
 pub use mapping::{
     EventKeySetDigest, MappingError, canonical_json, event_key_set_digest, event_value_digest,
-    event_value_hash, map_message, map_messages, value_digest_of_pairs,
+    event_value_hash, map_message, map_message_with_salt, map_messages, map_messages_with_salt,
+    value_digest_of_pairs,
 };
 
 use chrono::NaiveDate;
@@ -320,6 +321,8 @@ pub struct ScanOptions {
     /// Use upstream's persistent source cache. Only workers whose parent set
     /// `TOKSCALE_CONFIG_DIR` to this project's own directory may enable it.
     pub upstream_cache: bool,
+    /// Persisted per-device salt used to hash workspace keys.
+    pub project_salt: Option<String>,
 }
 
 impl ScanOptions {
@@ -330,6 +333,7 @@ impl ScanOptions {
             clients: None,
             range,
             upstream_cache: false,
+            project_salt: None,
         })
     }
 }
@@ -386,7 +390,8 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
             )
         })?
     };
-    let mut events = map_messages(&messages).map_err(Error::EventMapping)?;
+    let mut events = map_messages_with_salt(&messages, options.project_salt.as_deref())
+        .map_err(Error::EventMapping)?;
     let scanned_clients = upstream.len();
     let mut listed = upstream;
     let mut combined = messages;
@@ -792,6 +797,7 @@ mod tests {
                 ])),
                 range: DateRange::all_history(),
                 upstream_cache: false,
+                project_salt: None,
             },
         )
         .expect("deduplicated scan");
@@ -817,6 +823,7 @@ mod tests {
                 clients: Some(BTreeSet::from([QODER_CN_CLIENT.to_owned()])),
                 range: DateRange::all_history(),
                 upstream_cache: false,
+                project_salt: None,
             },
         )
         .expect("CN-only scan");

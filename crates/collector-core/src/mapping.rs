@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 
 use sha2::{Digest, Sha256};
-use tokscale_core::{UnifiedMessage, sessions::CostSource};
+use tokscale_core::{
+    UnifiedMessage,
+    sessions::{CostSource, workspace_label_from_key},
+};
 use usage_event::{FallbackKey, Precision, UsageEvent};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +14,39 @@ pub enum MappingError {
     NegativeTimestamp,
     NegativeTokenCount,
     InvalidCost,
+}
+
+const METADATA_MAX_BYTES: usize = 512;
+
+fn metadata_text(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty() && value.len() <= METADATA_MAX_BYTES && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
+}
+
+fn project_metadata(
+    message: &UnifiedMessage,
+    project_salt: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let Some(project_salt) = project_salt.filter(|value| !value.is_empty()) else {
+        return (None, None);
+    };
+    let key = message
+        .workspace_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let fallback_label = key.and_then(workspace_label_from_key);
+    let label = metadata_text(message.workspace_label.as_deref())
+        .or_else(|| metadata_text(fallback_label.as_deref()));
+    let hash = key.map(|value| {
+        let mut hasher = Sha256::new();
+        hasher.update(project_salt.as_bytes());
+        hasher.update([0]);
+        hasher.update(value.as_bytes());
+        format!("{:x}", hasher.finalize())
+    });
+    (hash, label)
 }
 
 /// Token precision at upstream e9cf1041. Cost provenance is deliberately not
@@ -54,11 +90,21 @@ pub fn token_precision(message: &UnifiedMessage) -> Precision {
     }
 }
 
-/// Map only fields explicitly present in UsageEvent v1. In particular, this
-/// never copies workspace data, titles, agents, or source dates. The pricing
+/// Map only fields explicitly present in UsageEvent v1. Workspace paths are
+/// reduced to a one-way project hash and display basename; titles are copied
+/// only when the source client already supplies a bounded plain-text title.
+/// Agents and source dates are never copied. The pricing
 /// model, billing channel and service tier are copied only so the server can
 /// price the event the way tokscale would (D042); they name no content.
 pub fn map_message(message: &UnifiedMessage, ordinal: u64) -> Result<UsageEvent, MappingError> {
+    map_message_with_salt(message, ordinal, None)
+}
+
+pub fn map_message_with_salt(
+    message: &UnifiedMessage,
+    ordinal: u64,
+    project_salt: Option<&str>,
+) -> Result<UsageEvent, MappingError> {
     let client = message.client.as_str();
     if client == "qoder" {
         return Err(MappingError::ForbiddenUpstreamQoder);
@@ -93,10 +139,12 @@ pub fn map_message(message: &UnifiedMessage, ordinal: u64) -> Result<UsageEvent,
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .ok_or(MappingError::InvalidCost)?;
+    let (project_hash, project_label) = project_metadata(message, project_salt);
     Ok(UsageEvent {
         event_key,
         client: client.to_owned(),
         session_id: message.session_id.to_string(),
+        session_title: metadata_text(message.session_title.as_deref()),
         parent_session_id: message.parent_session_id.as_ref().map(ToString::to_string),
         model_id: message.model_id.to_string(),
         provider_id: (!message.provider_id.is_empty()).then(|| message.provider_id.to_string()),
@@ -112,9 +160,8 @@ pub fn map_message(message: &UnifiedMessage, ordinal: u64) -> Result<UsageEvent,
         precision: token_precision(message),
         credits: None,
         rate_version: None,
-        // No device salt or project-label configuration is available in T3.
-        project_hash: None,
-        project_label: None,
+        project_hash,
+        project_label,
         message_count: i64::from(message.message_count),
         is_turn_start: message.is_turn_start,
         duration_ms: message.duration_ms,
@@ -134,6 +181,13 @@ pub fn map_message(message: &UnifiedMessage, ordinal: u64) -> Result<UsageEvent,
 }
 
 pub fn map_messages(messages: &[UnifiedMessage]) -> Result<Vec<UsageEvent>, MappingError> {
+    map_messages_with_salt(messages, None)
+}
+
+pub fn map_messages_with_salt(
+    messages: &[UnifiedMessage],
+    project_salt: Option<&str>,
+) -> Result<Vec<UsageEvent>, MappingError> {
     // Client is part of the group so that a scan of a client subset assigns
     // the same ordinals as a scan of every client (D023 revision).
     let mut ordinals = BTreeMap::<(String, String, i64, String), u64>::new();
@@ -149,7 +203,7 @@ pub fn map_messages(messages: &[UnifiedMessage]) -> Result<Vec<UsageEvent>, Mapp
             let ordinal = ordinals.entry(group).or_insert(0);
             let current = *ordinal;
             *ordinal = ordinal.saturating_add(1);
-            map_message(message, current)
+            map_message_with_salt(message, current, project_salt)
         })
         .collect()
 }
@@ -339,7 +393,8 @@ mod tests {
 
     #[test]
     fn maps_allowed_fields_and_drops_every_non_allowlisted_source_field() {
-        let event = map_message(&synthetic_message(), 0).expect("synthetic message");
+        let event = map_message_with_salt(&synthetic_message(), 0, Some("synthetic-salt"))
+            .expect("synthetic message");
         assert_eq!(event.client, "synthetic-client");
         assert_eq!(
             event.parent_session_id.as_deref(),
@@ -358,9 +413,6 @@ mod tests {
         assert_eq!(event.service_tier.as_deref(), Some("priority"));
         let serialized = serde_json::to_string(&event).expect("serialize mapped event");
         for source_value in [
-            "workspace-key-must-not-survive",
-            "workspace-label-must-not-survive",
-            "session-title-must-not-survive",
             "agent-must-not-survive",
             "synthetic-date-must-not-survive",
             "machine-label-must-not-survive",
@@ -374,14 +426,28 @@ mod tests {
                 .keys()
                 .all(|key| usage_event::UPLOAD_FIELDS.contains(&key.as_str()))
         );
-        for key in [
-            "sessionTitle",
-            "workspaceKey",
-            "workspaceLabel",
-            "projectLabel",
-        ] {
+        for key in ["workspaceKey", "workspaceLabel"] {
             assert!(!object.contains_key(key));
         }
+        assert_eq!(
+            object
+                .get("sessionTitle")
+                .and_then(serde_json::Value::as_str),
+            Some("session-title-must-not-survive")
+        );
+        assert_eq!(
+            object
+                .get("projectLabel")
+                .and_then(serde_json::Value::as_str),
+            Some("workspace-label-must-not-survive")
+        );
+        assert_eq!(
+            object
+                .get("projectHash")
+                .and_then(serde_json::Value::as_str)
+                .map(str::len),
+            Some(64)
+        );
     }
 
     #[test]

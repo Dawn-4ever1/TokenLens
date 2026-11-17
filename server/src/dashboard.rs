@@ -1216,6 +1216,8 @@ pub struct SessionSummary {
     pub client: String,
     pub models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub project_label: Option<String>,
     pub started_at: String,
     pub last_used_at: String,
@@ -1276,11 +1278,12 @@ pub fn sessions(
     let having = match &request.search {
         Some(search) => {
             let pattern = like_pattern(search);
-            values.extend(std::iter::repeat_n(SqlValue::Text(pattern), 4));
+            values.extend(std::iter::repeat_n(SqlValue::Text(pattern), 5));
             "HAVING SUM(session_id LIKE ? ESCAPE '\\'
                      OR COALESCE(parent_session_id, '') LIKE ? ESCAPE '\\'
                      OR model_id LIKE ? ESCAPE '\\'
-                     OR COALESCE(project_label, '') LIKE ? ESCAPE '\\') > 0"
+                     OR COALESCE(project_label, '') LIKE ? ESCAPE '\\'
+                     OR COALESCE(session_title, '') LIKE ? ESCAPE '\\') > 0"
         }
         None => "",
     };
@@ -1314,7 +1317,8 @@ pub fn sessions(
            COUNT(DISTINCT CASE WHEN parent_session_id IS NOT NULL THEN session_id END),
            group_concat(DISTINCT model_id), MAX(project_label),
            SUM(input + output + cache_read + cache_write + reasoning) AS total_tokens,
-           COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0.0) AS cost
+           COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0.0) AS cost,
+           MAX(session_title)
          {grouped_sql}
          ORDER BY {order}, device_id, client, root
          LIMIT ? OFFSET ?"
@@ -1344,6 +1348,7 @@ pub fn sessions(
                 device_id,
                 client,
                 models,
+                title: row.get(base + 8)?,
                 project_label: row.get(base + 5)?,
                 started_at: iso(row.get(base)?).unwrap_or_default(),
                 last_used_at: iso(row.get(base + 1)?).unwrap_or_default(),
@@ -1412,6 +1417,7 @@ struct DetailEvent {
     is_turn_start: bool,
     duration_ms: Option<i64>,
     project_label: Option<String>,
+    title: Option<String>,
 }
 
 fn event_totals(row: &Row<'_>) -> rusqlite::Result<Totals> {
@@ -1473,7 +1479,8 @@ pub fn session_detail(
     let mut statement = conn.prepare(
         "SELECT session_id, parent_session_id, model_id, ts, input, output, cache_read,
            cache_write, reasoning, COALESCE(cost_usd, est_cost_usd), precision, credits,
-           message_count, is_turn_start, duration_ms, project_label, price_status
+           message_count, is_turn_start, duration_ms, project_label, price_status,
+           session_title
          FROM counted_events
           WHERE tenant_id = ?1 AND device_id = ?2 AND client = ?3
             AND ((session_id = ?4 AND parent_session_id IS NULL) OR parent_session_id = ?4)
@@ -1498,6 +1505,7 @@ pub fn session_detail(
                     is_turn_start: row.get(13)?,
                     duration_ms: row.get(14)?,
                     project_label: row.get(15)?,
+                    title: row.get(17)?,
                 })
             },
         )?
@@ -1511,6 +1519,7 @@ pub fn session_detail(
     let mut overall = Totals::default();
     let mut models = BTreeSet::new();
     let mut project = None;
+    let mut title = None;
     let mut turns = Vec::<TurnAcc>::new();
     let mut open = HashMap::<Option<String>, usize>::new();
     let mut subagents = BTreeMap::<String, (i64, i64, BTreeSet<String>, usize, Totals)>::new();
@@ -1520,6 +1529,9 @@ pub fn session_detail(
         models.insert(event.model.clone());
         if event.project_label.is_some() {
             project.clone_from(&event.project_label);
+        }
+        if event.title.is_some() {
+            title.clone_from(&event.title);
         }
         let stream = event.parent.as_ref().map(|_| event.session_id.clone());
         let current = match open.get(&stream) {
@@ -1582,6 +1594,7 @@ pub fn session_detail(
         device_id,
         client,
         models: models.into_iter().collect(),
+        title,
         project_label: project,
         started_at: iso(first).unwrap_or_default(),
         last_used_at: iso(last).unwrap_or_default(),

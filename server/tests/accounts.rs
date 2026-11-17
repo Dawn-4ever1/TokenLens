@@ -652,7 +652,7 @@ fn upgrading_binding_history_keeps_active_and_retired_identities_unchanged() {
     assert!(upgraded.backup.is_some());
     assert_eq!(
         tokenlens_server::db::schema_version(&upgraded.conn).unwrap(),
-        11
+        12
     );
     let binding_after: Vec<(String, String, String, i64)> = upgraded
         .conn

@@ -847,7 +847,7 @@ async fn upgrading_puts_existing_data_in_the_personal_tenant() {
     assert_eq!(summary["totalTokens"], 345);
     assert_eq!(
         read(&h, "/api/dashboard/health", read_token.expose()).await["schemaVersion"],
-        11
+        12
     );
     let old_pc = Device {
         id: device.clone(),
