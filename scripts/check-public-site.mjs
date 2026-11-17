@@ -52,6 +52,11 @@ for (const [name, type, options] of [
         }));
         if (result.width > width) throw new Error(`${name} ${width} ${path}: overflow ${result.width}`);
         if (result.scripts || result.cookies) throw new Error(`${path}: scripts or cookies found`);
+        if (path === "/") {
+          const nav = page.locator(".site-nav .nav-download");
+          if (await nav.textContent() !== "GitHub ↗") throw new Error("Top navigation must say GitHub");
+          if (await nav.getAttribute("href") !== "https://github.com/Dawn-4ever1/TokenLens") throw new Error("Top navigation must link to the public GitHub project");
+        }
         if (screenshots && [1440, 390].includes(width)) {
           const slug = path === "/" ? "index" : "privacy";
           await page.screenshot({ path: join(screenshots, `${name}-${width}-${slug}.png`), fullPage: true });

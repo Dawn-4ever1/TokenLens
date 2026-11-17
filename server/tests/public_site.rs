@@ -53,6 +53,12 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
         );
         assert!(response.headers().get(header::SET_COOKIE).is_none());
         let body = response.text().await.expect("body");
+        if path == "/" {
+            assert!(body.contains(
+                "class=\"nav-download\" href=\"https://github.com/Dawn-4ever1/TokenLens\" rel=\"noopener noreferrer\">GitHub <span aria-hidden=\"true\">↗</span></a>"
+            ));
+            assert!(!body.contains("href=\"#download-title\">下载应用"));
+        }
         assert!(body.contains(expected), "{path}");
         assert!(!body.contains("tls_"), "{path}");
     }
