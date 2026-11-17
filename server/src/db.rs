@@ -77,6 +77,10 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 10,
         sql: include_str!("../migrations/0010_account_device_bindings.sql"),
     },
+    Migration {
+        version: 11,
+        sql: include_str!("../migrations/0011_rebind_retired_devices.sql"),
+    },
 ];
 
 /// How many events carry a `counted` flag that disagrees with the D029 rule

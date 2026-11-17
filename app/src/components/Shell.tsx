@@ -1,4 +1,4 @@
-import { LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
+import { Cloud as CloudIcon, LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
 import { lazy, Suspense, useState, type ReactNode } from "react";
 import { relativeTime } from "@/lib/format";
 import { PAGES, useNav, type Page } from "@/lib/nav";
@@ -16,6 +16,7 @@ import { ConnectServer } from "@/pages/Pairing";
 const Trends = lazy(() => import("@/pages/Trends").then((m) => ({ default: m.Trends })));
 const Sessions = lazy(() => import("@/pages/Sessions").then((m) => ({ default: m.Sessions })));
 const Devices = lazy(() => import("@/pages/Devices").then((m) => ({ default: m.Devices })));
+const Cloud = lazy(() => import("@/pages/Cloud").then((m) => ({ default: m.Cloud })));
 const Settings = lazy(() => import("@/pages/Settings").then((m) => ({ default: m.Settings })));
 
 const ICONS: Record<Page, LucideIcon> = {
@@ -23,6 +24,7 @@ const ICONS: Record<Page, LucideIcon> = {
   trends: TrendingUp,
   sessions: MessagesSquare,
   devices: MonitorSmartphone,
+  cloud: CloudIcon,
   settings: SettingsIcon,
 };
 
@@ -78,6 +80,8 @@ function PageView({ page }: { page: Page }): ReactNode {
       return <Sessions />;
     case "devices":
       return <Devices />;
+    case "cloud":
+      return <Cloud />;
     case "settings":
       return <Settings />;
   }
@@ -220,7 +224,7 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
           title="退出登录"
         >
           <div className="space-y-4">
-            <p className="text-sm leading-6 text-ink-2">退出后，这台电脑会继续采集用量；同步、配对码等账号功能需要重新登录才能使用。</p>
+            <p className="text-sm leading-6 text-ink-2">退出后，这台电脑会继续采集用量，看板只显示本机数据，并停止同步到这个云端账号。云端设备与历史不会删除；重新登录会重新连接云端，显示云端当时的设备与用量。</p>
             <div className="flex justify-end gap-2">
               <Button variant="ghost" onClick={() => setConfirming(false)}>取消</Button>
               <Button

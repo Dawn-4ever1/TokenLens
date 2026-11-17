@@ -296,6 +296,34 @@ async fn signing_out_and_back_in_reuses_the_same_account_device_binding() {
     let (_, first) = h
         .post("/api/account/devices", Some(&session), payload(), None)
         .await;
+    h.add_device_with_session(&session).await;
+    let another = h.add_device_with_session(&session).await;
+    let (status, _) = h
+        .post(
+            &format!("/api/dashboard/devices/{}/revoke", another.id),
+            first["readToken"].as_str(),
+            serde_json::to_vec(&json!({})).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, devices) = h
+        .get("/api/dashboard/devices", first["readToken"].as_str())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 2);
+    let (status, body) = h
+        .ingest(
+            first["ingestToken"].as_str().unwrap(),
+            &envelope(
+                first["deviceId"].as_str().unwrap(),
+                "account-logout-event",
+                "g1",
+                vec![event("account-logout-session", 7)],
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
     let (status, _) = h
         .post(
             "/api/auth/logout",
@@ -305,14 +333,130 @@ async fn signing_out_and_back_in_reuses_the_same_account_device_binding() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    // Logging out revokes the account session only. The desktop app discards
+    // its own cloud connection; neither cloud device nor its events disappear.
+    let (status, devices) = h
+        .get("/api/dashboard/devices", first["readToken"].as_str())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    assert_eq!(devices["devices"].as_array().unwrap().len(), 2);
+    let (status, summary) = h.get(summary_path(), first["readToken"].as_str()).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["inputTokens"], 7);
+    assert_eq!(h.count("SELECT COUNT(*) FROM usage_events"), 1);
     let (next, status, _) = h.login("relogin@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    // Changes made from another computer while this one is signed out are
+    // authoritative. Do not restore the old device list or its old name.
+    let added = h.add_device_with_session(&next).await;
+    let (status, _) = h
+        .post(
+            &format!("/api/dashboard/devices/{}/rename", added.id),
+            Some(&added.read),
+            serde_json::to_vec(&json!({"displayName": "Added and renamed elsewhere"})).unwrap(),
+            None,
+        )
+        .await;
     assert_eq!(status, StatusCode::OK);
     let (_, second) = h
         .post("/api/account/devices", Some(&next), payload(), None)
         .await;
     assert_eq!(second["deviceId"], first["deviceId"]);
-    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 1);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 4);
     assert_eq!(h.count("SELECT COUNT(*) FROM account_device_bindings"), 1);
+    let (status, devices) = h
+        .get("/api/dashboard/devices", second["readToken"].as_str())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    let devices = devices["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 3);
+    assert!(
+        !devices
+            .iter()
+            .any(|device| device["deviceId"] == another.id)
+    );
+    assert!(devices.iter().any(|device| device["deviceId"] == added.id
+        && device["displayName"] == "Added and renamed elsewhere"));
+    let (status, summary) = h.get(summary_path(), second["readToken"].as_str()).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    assert_eq!(summary["inputTokens"], 7);
+}
+
+#[tokio::test]
+async fn reconnecting_after_this_computer_was_removed_registers_a_current_device() {
+    let h = Harness::start().await;
+    let (session, status, _) = h.login("reconnect-current@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let payload = || {
+        serde_json::to_vec(&json!({
+            "platform": "macos", "formFactor": "desktop", "displayName": "Mac mini",
+            "clientBindingId": "stable-but-removed-computer-0001"
+        }))
+        .unwrap()
+    };
+    let (status, first) = h
+        .post("/api/account/devices", Some(&session), payload(), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let other = h.add_device_with_session(&session).await;
+    let (status, _) = h
+        .post(
+            "/api/auth/logout",
+            Some(&session),
+            serde_json::to_vec(&json!({})).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Another computer manages the shared space while this one is disconnected.
+    let (status, _) = h
+        .post(
+            &format!(
+                "/api/dashboard/devices/{}/revoke",
+                first["deviceId"].as_str().unwrap()
+            ),
+            Some(&other.read),
+            serde_json::to_vec(&json!({})).unwrap(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (next, status, _) = h.login("reconnect-current@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, second) = h
+        .post("/api/account/devices", Some(&next), payload(), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{second}");
+    assert_ne!(second["deviceId"], first["deviceId"]);
+    let (status, devices) = h
+        .get("/api/dashboard/devices", second["readToken"].as_str())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    let devices = devices["devices"].as_array().unwrap();
+    assert_eq!(devices.len(), 2);
+    assert!(
+        !devices
+            .iter()
+            .any(|device| device["deviceId"] == first["deviceId"])
+    );
+    assert!(
+        devices
+            .iter()
+            .any(|device| device["deviceId"] == second["deviceId"])
+    );
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 3);
+    let (status, third) = h
+        .post("/api/account/devices", Some(&next), payload(), None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{third}");
+    assert_eq!(third["deviceId"], second["deviceId"]);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 3);
+    assert_eq!(h.count("SELECT COUNT(*) FROM account_device_bindings"), 2);
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM devices WHERE revoked_at IS NULL"),
+        2
+    );
 }
 
 #[tokio::test]
@@ -448,6 +592,93 @@ async fn the_database_never_stores_a_plain_login_or_pairing_secret() {
             .iter()
             .all(|value| !value.contains(&code.replace('-', ""))),
         "neither the hash nor the ciphertext contains the code"
+    );
+}
+
+#[test]
+fn upgrading_binding_history_keeps_active_and_retired_identities_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("server.sqlite");
+    let v10 = tokenlens_server::db::open_with(&path, &tokenlens_server::db::MIGRATIONS[..10])
+        .expect("v10");
+    let mut conn = v10.conn;
+    let login = tokenlens_server::accounts::stage_code(&conn, "upgrade-binding@example.com", 1)
+        .expect("stage");
+    let login = tokenlens_server::accounts::login(
+        &mut conn,
+        "upgrade-binding@example.com",
+        login.expose(),
+        2,
+    )
+    .expect("login");
+    let device = tokenlens_server::db::NewDevice {
+        platform: "macos",
+        form_factor: "desktop",
+        display_name: "Old identity",
+    };
+    let active = tokenlens_server::accounts::create_device_for_account(
+        &mut conn,
+        &login.account.id,
+        &login.account.tenant_id,
+        3,
+        &device,
+        Some("upgrade-active-binding-0001"),
+    )
+    .expect("active");
+    let retired = tokenlens_server::accounts::create_device_for_account(
+        &mut conn,
+        &login.account.id,
+        &login.account.tenant_id,
+        4,
+        &device,
+        Some("upgrade-retired-binding-0001"),
+    )
+    .expect("retired");
+    conn.execute(
+        "UPDATE devices SET revoked_at = 5 WHERE id = ?1",
+        [&retired.device_id],
+    )
+    .expect("retire");
+    let binding_before: Vec<(String, String, String, i64)> = conn
+        .prepare("SELECT account_id, client_binding_id, device_id, created_at FROM account_device_bindings ORDER BY client_binding_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    drop(conn);
+
+    let upgraded = tokenlens_server::db::open(&path).expect("upgrade binding history");
+    assert!(upgraded.backup.is_some());
+    assert_eq!(
+        tokenlens_server::db::schema_version(&upgraded.conn).unwrap(),
+        11
+    );
+    let binding_after: Vec<(String, String, String, i64)> = upgraded
+        .conn
+        .prepare("SELECT account_id, client_binding_id, device_id, created_at FROM account_device_bindings ORDER BY client_binding_id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(binding_after, binding_before);
+    assert_eq!(
+        upgraded.conn.query_row(
+            "SELECT COUNT(*) FROM devices WHERE id = ?1 AND revoked_at IS NOT NULL",
+            [&retired.device_id],
+            |row| row.get::<_, i64>(0),
+        ),
+        Ok(1)
+    );
+    assert!(
+        tokenlens_server::db::authenticate(
+            &upgraded.conn,
+            active.read_token.expose(),
+            tokenlens_server::secrets::TokenKind::Read,
+            6,
+        )
+        .is_ok()
     );
 }
 

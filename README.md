@@ -48,12 +48,13 @@ The app runs the same sync server code in process and keeps local data in
 SQLite. It downloads public price catalogs daily and, if enabled, checks for
 application updates.
 
-For several computers, open Devices → 添加设备. The hosted service
-[https://tokenlens.online](https://tokenlens.online) is preselected: authorize
-with GitHub to create or return to your own space, with no password to remember.
-The space's replaceable pairing code is available after signing in. You may
-choose your own server instead; see [deploy/README.md](deploy/README.md).
-One-time operator codes remain supported for existing installations.
+For several computers, open the free Cloud page and connect
+[https://tokenlens.online](https://tokenlens.online). Sign in with GitHub,
+Google or an email code to create or return to your own space; use the same
+account on each computer. Signing out returns this computer to its local
+dashboard without deleting cloud devices or history. You may choose your own
+server instead; see [deploy/README.md](deploy/README.md). One-time operator
+codes remain supported for existing installations.
 
 Local history is preserved and backfilled after connecting. Device ingest/read
 tokens remain separate from the account session, which never reaches the web

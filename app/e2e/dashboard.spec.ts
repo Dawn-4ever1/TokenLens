@@ -1,12 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 
-type View = "overview" | "trends" | "sessions" | "devices" | "settings";
+type View = "overview" | "trends" | "sessions" | "devices" | "cloud" | "settings";
 
 const VIEWS: { key: View; label: string }[] = [
   { key: "overview", label: "总览" },
   { key: "trends", label: "趋势" },
   { key: "sessions", label: "会话" },
   { key: "devices", label: "设备" },
+  { key: "cloud", label: "云端" },
   { key: "settings", label: "设置" },
 ];
 const WIDTHS = [1440, 1200, 900];
@@ -306,13 +307,19 @@ async function signIn(dialog: import("@playwright/test").Locator, email = "user@
   await dialog.getByRole("button", { name: "登录并连接", exact: true }).click();
 }
 
+/** The cloud plan page owns sign-in; Add Device remains explanatory only. */
+async function openCloudLogin(page: Page, query = "") {
+  const errors = await open(page, { view: "cloud", query });
+  await settle(page, "云端");
+  await page.getByRole("button", { name: "免费使用云服务", exact: true }).click();
+  return errors;
+}
+
 test("signing in never leaves the code or a session in web storage or the URL", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await openCloudLogin(page);
   await signIn(page.getByRole("dialog"));
-  await settle(page, "设备");
+  await settle(page, "云端");
   for (const view of VIEWS) {
     await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: view.label, exact: true }).click();
     await settle(page, view.label);
@@ -333,19 +340,16 @@ test("signing in never leaves the code or a session in web storage or the URL", 
 
 test("a clipboard failure is visible and the login code stays selectable", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
   await page.addInitScript(() => {
     Object.defineProperty(Navigator.prototype, "clipboard", {
       value: { writeText: () => Promise.reject(new Error("clipboard denied")) },
       configurable: true,
     });
   });
-  await page.reload();
-  await settle(page, "设备");
-  expect(await page.evaluate(() => typeof navigator.clipboard?.writeText)).toBe("function");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
+  await expect(dialog).toBeVisible();
+  expect(await page.evaluate(() => typeof navigator.clipboard?.writeText)).toBe("function");
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
   await expect(dialog.getByText("ABCD-1234", { exact: true })).toBeVisible();
@@ -357,9 +361,7 @@ test("a clipboard failure is visible and the login code stays selectable", async
 
 test("the code input and the request button sit on the same aligned row", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
   const input = await dialog.getByLabel("验证码", { exact: true }).boundingBox();
@@ -378,9 +380,7 @@ test("the code input and the request button sit on the same aligned row", async 
 
 test("a self-hosted server offers only the email code, never GitHub or Google", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toBeVisible();
@@ -402,9 +402,7 @@ test("a self-hosted server offers only the email code, never GitHub or Google", 
 
 test("GitHub sign-in shows a device code and finishes without any email", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
@@ -419,16 +417,14 @@ test("GitHub sign-in shows a device code and finishes without any email", async 
   }
   // The mock approves on the second poll, so the dialog closes by itself.
   await expect(dialog).toBeHidden({ timeout: 15_000 });
-  await settle(page, "设备");
+  await settle(page, "云端");
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
   expect(errors).toEqual([]);
 });
 
 test("GitHub sign-in shows the server failure reason instead of silently returning", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "?github-failure" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?github-failure");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
@@ -441,9 +437,7 @@ test("GitHub sign-in shows the server failure reason instead of silently returni
 
 test("GitHub poll errors leave the waiting state and can be retried", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "?github-poll-error" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?github-poll-error");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
@@ -455,9 +449,7 @@ test("GitHub poll errors leave the waiting state and can be retried", async ({ p
 
 test("Google sign-in finishes in the browser without any code or email", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
@@ -467,7 +459,7 @@ test("Google sign-in finishes in the browser without any code or email", async (
   await expect(dialog.getByRole("button", { name: "重新打开授权页", exact: true })).toBeVisible();
   // The mock approves on the second poll, so the dialog closes by itself.
   await expect(dialog).toBeHidden({ timeout: 15_000 });
-  await settle(page, "设备");
+  await settle(page, "云端");
   const account = page.getByRole("group", { name: "Google 账号 G User", exact: true });
   await expect(account).toBeVisible();
   await expect(account).toContainText("G User");
@@ -482,9 +474,7 @@ test("Google sign-in finishes in the browser without any code or email", async (
 
 test("Google browser failures stay visible and retry preserves the sign-in flow", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "?google-open-fail=2" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?google-open-fail=2");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
@@ -521,9 +511,7 @@ test("Google authorization links show copy failures and copy the complete URL on
       configurable: true,
     });
   });
-  const errors = await open(page, { view: "devices", query: "?google-open-fail=1&google-pending" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?google-open-fail=1&google-pending");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
@@ -545,9 +533,7 @@ test("Google authorization links show copy failures and copy the complete URL on
 
 test("Google ignores a slow browser failure after cancelling and starting a new sign-in", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
-  const errors = await open(page, { view: "devices", query: "?google-pending&google-open-slow=2" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?google-pending&google-open-slow=2");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
@@ -578,9 +564,7 @@ test("Google ignores a slow clipboard result after cancelling and starting a new
       configurable: true,
     });
   });
-  const errors = await open(page, { view: "devices", query: "?google-pending" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?google-pending");
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用 Google 继续", exact: true }).click();
   await dialog.getByRole("button", { name: "继续前往 Google", exact: true }).click();
@@ -595,6 +579,43 @@ test("Google ignores a slow clipboard result after cancelling and starting a new
   await page.waitForTimeout(1800);
   await expect(failure).toBeVisible();
   await expect(dialog.getByText("已复制授权链接，请粘贴到浏览器打开。", { exact: true })).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("local and cloud plans are both free, with the cloud plan highlighted", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "cloud", query: "" });
+  await settle(page, "云端");
+  const local = page.locator('[data-plan="local"]');
+  const cloud = page.locator('[data-plan="cloud"]');
+  await expect(local).toContainText("免费本地版");
+  await expect(local).toContainText("完整本地功能，目前免费。");
+  await expect(local).toContainText("当前使用");
+  await expect(cloud).toContainText("TokenLens 云服务");
+  await expect(cloud).toContainText("完整云端功能，目前免费。");
+  await expect(cloud).toContainText("推荐");
+  await expect(cloud).toContainText("不限设备数量，跨设备汇总同步");
+  await expect(page.getByRole("button", { name: "免费使用云服务", exact: true })).toBeVisible();
+  const accent = await cloud.evaluate((card) => getComputedStyle(card).borderColor);
+  const neutral = await local.evaluate((card) => getComputedStyle(card).borderColor);
+  expect(accent).not.toBe(neutral);
+  await page.getByRole("button", { name: "免费使用云服务", exact: true }).click();
+  await expect(page.getByRole("dialog")).toBeVisible();
+  await page.keyboard.press("Escape");
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("a connected cloud plan links to device management", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "cloud", query: "?server" });
+  await settle(page, "云端");
+  await expect(page.locator('[data-plan="local"]')).toContainText("本机保留");
+  await expect(page.locator('[data-plan="cloud"]')).toContainText("已连接");
+  await page.getByRole("button", { name: "管理我的设备", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });
 
@@ -692,7 +713,7 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   expect(errors).toEqual([]);
 });
 
-test("signing out and back in keeps the same cloud device and collection", async ({ page }) => {
+test("signing out shows only this computer; signing back in reads the cloud's current devices", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page, { query: "" });
   await settle(page, "总览");
@@ -709,12 +730,45 @@ test("signing out and back in keeps the same cloud device and collection", async
     const { app } = await import(modulePath);
     return (await app.status()).deviceId;
   });
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设备", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Windows 台式机", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Windows 台式机/ }).check();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Windows 台式机", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "旧笔记本", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
+  // Other computers keep managing the cloud space while this one is signed
+  // out. Reconnecting must not resurrect this browser's old device snapshot.
+  await page.evaluate(async () => {
+    const modulePath = performance.getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((url) => new URL(url).pathname === "/src/lib/api.ts");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    const { app } = await import(modulePath);
+    // These are cloud-space mutations by another computer, not local deletes.
+    await app.revokeDevice("dev_mock_mini");
+    await app.renameDevice("dev_mock_win", "改名后的 Windows");
+  });
   await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
   dialog = page.getByRole("dialog");
   await signIn(dialog);
   await expect(dialog).toBeHidden();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Windows 台式机", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "改名后的 Windows", exact: true })).toBeVisible();
   const again = await page.evaluate(async () => {
     const modulePath = performance.getEntriesByType("resource")
       .map((entry) => entry.name)
@@ -818,9 +872,7 @@ test("first run opens local data directly without asking for a server or a mode"
 
 test("a failed or cancelled sign-in keeps local collection and data available", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 800 });
-  const errors = await open(page, { view: "devices", query: "?pairfail" });
-  await settle(page, "设备");
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const errors = await openCloudLogin(page, "?pairfail");
   const dialog = page.getByRole("dialog");
   await signIn(dialog);
   await expect(dialog.getByRole("alert")).toContainText("连不上服务器");
@@ -828,8 +880,10 @@ test("a failed or cancelled sign-in keeps local collection and data available", 
   await expect(dialog).toBeHidden();
   await expect(page.getByText("本机数据", { exact: true })).toHaveCount(0);
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看本机设备", exact: true }).click();
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
-  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "云端", exact: true }).click();
+  await page.getByRole("button", { name: "免费使用云服务", exact: true }).click();
   await dialog.getByRole("button", { name: "使用邮箱继续", exact: true }).click();
   await expect(dialog.getByLabel("验证码")).toHaveValue("");
   await expect(dialog.getByLabel("邮箱")).toHaveValue("");
@@ -839,14 +893,48 @@ test("a failed or cancelled sign-in keeps local collection and data available", 
   expect(errors).toEqual([]);
 });
 
-test("signing in from Devices shows every device without a redundant source switch", async ({ page }) => {
-  await page.setViewportSize({ width: 900, height: 900 });
-  const errors = await open(page, { view: "devices", query: "" });
+test("adding a device never requests a pair code, even with an existing cloud account", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { view: "devices", query: "?server" });
   await settle(page, "设备");
+  await page.evaluate(async () => {
+    sessionStorage.setItem("tokenlens.test.pair-code-reads", "0");
+    const modulePath = performance.getEntriesByType("resource").map((entry) => entry.name)
+      .find((url) => new URL(url).pathname === "/src/lib/api.ts");
+    if (!modulePath) throw new Error("The app API module was not loaded");
+    const { app } = await import(modulePath);
+    app.accountPairCode = async () => {
+      const reads = Number(sessionStorage.getItem("tokenlens.test.pair-code-reads")) + 1;
+      sessionStorage.setItem("tokenlens.test.pair-code-reads", String(reads));
+      throw new Error("The explanatory Add Device dialog must not request a pair code");
+    };
+  });
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("在另一台电脑上安装并打开 TokenLens。");
+  await expect(dialog).toContainText("GitHub、Google 或邮箱账号");
+  await expect(dialog.getByLabel("服务器地址")).toHaveCount(0);
+  await expect(dialog.getByLabel("配对码")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "复制配对码" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "换一个配对码" })).toHaveCount(0);
+  expect(await page.evaluate(() => Number(sessionStorage.getItem("tokenlens.test.pair-code-reads")))).toBe(0);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("cloud sign-in shows every device; adding a device is instructions only", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await signIn(dialog);
   await expect(dialog).toBeHidden();
+  await settle(page, "云端");
+  await expect(page.getByRole("heading", { name: "TokenLens 云服务", exact: true })).toBeVisible();
+  await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "管理我的设备", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "管理我的设备", exact: true }).click();
   await settle(page, "设备");
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
@@ -857,8 +945,15 @@ test("signing in from Devices shows every device without a redundant source swit
   await page.keyboard.press("Escape");
   await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
-  await expect(dialog.getByRole("button", { name: "复制配对码" })).toBeVisible();
-  await expect(dialog.getByText("K7QM-4XPR", { exact: true })).toBeVisible();
+  await expect(dialog).toContainText("在另一台电脑上安装并打开 TokenLens。");
+  await expect(dialog).toContainText("使用与这台电脑相同的账号登录。");
+  await expect(dialog).toContainText("GitHub、Google 或邮箱账号");
+  await expect(dialog.getByLabel("服务器地址")).toHaveCount(0);
+  await expect(dialog.getByLabel("配对码")).toHaveCount(0);
+  await expect(dialog.getByText("K7QM-4XPR", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "复制配对码" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "换一个配对码" })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "完成", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);

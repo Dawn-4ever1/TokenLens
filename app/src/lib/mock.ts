@@ -134,7 +134,11 @@ function rawEvents(): Ev[] {
 /** The local store contains this computer only; server views share the tenant's devices. */
 function events(): Ev[] {
   const all = rawEvents();
-  return state.mode === "local" ? all.filter((event) => event.device === "dev_mock_mbp") : all;
+  // The local store always remains intact. While signed out it is the only
+  // readable source; after reconnecting, current cloud membership controls
+  // visibility just as it does for the device list and filter options.
+  if (state.mode === "local") return all.filter((event) => event.device === "dev_mock_mbp");
+  return all.filter((event) => event.device === "dev_mock_mbp" || !revoked.has(event.device));
 }
 
 const localDate = (ts: number) => new Date(ts + OFFSET_MS).toISOString().slice(0, 10);
@@ -818,11 +822,15 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       if (!state.accountEmail) throw new ApiError("not_signed_in");
       return { code: args.rotate ? "NEWW-CODE-0002" : "K7QM-4XPR", replaceable: true };
     case "logout_account":
+      // Signing out retires this computer's cloud connection, not its local
+      // device or the synthetic cloud registry. A later login restores it.
       state.accountEmail = null;
       state.accountProvider = null;
       state.accountDisplayName = null;
       state.accountAvatarUrl = null;
       state.accountSpace = null;
+      state.mode = "local";
+      state.server = null;
       return { ...state, collector: { ...state.collector } };
     case "create_pair_code":
       if (!state.server) throw new ApiError("bad_request", 400);

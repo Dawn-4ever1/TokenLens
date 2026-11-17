@@ -454,7 +454,8 @@ pub fn create_device_for_account(
                 "SELECT b.device_id FROM account_device_bindings b
              JOIN devices d ON d.id = b.device_id
              WHERE b.account_id = ?1 AND b.client_binding_id = ?2
-               AND d.tenant_id = ?3 AND d.revoked_at IS NULL",
+               AND d.tenant_id = ?3 AND d.revoked_at IS NULL
+             ORDER BY b.created_at DESC, b.device_id DESC LIMIT 1",
                 params![account_id, binding, tenant_id],
                 |row| row.get::<_, String>(0),
             )
@@ -497,9 +498,22 @@ pub fn create_device_for_account(
         db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Ingest, now)?;
     let read = db::insert_device_token(&tx, tenant_id, &device_id, secrets::TokenKind::Read, now)?;
     if let Some(binding) = client_binding_id {
+        // Keep every identity registration immutable. A revoked device is not
+        // revived and its old binding is not edited; this is a new current
+        // registration for the same local request. The lookup above selects
+        // the newest live row, making same-millisecond retries idempotent.
+        let next_created_at = tx.query_row(
+            "SELECT COALESCE(MAX(created_at), 0) + 1
+             FROM account_device_bindings
+             WHERE account_id = ?1 AND client_binding_id = ?2",
+            params![account_id, binding],
+            |row| row.get::<_, i64>(0),
+        )?;
+        let created_at = now.max(next_created_at);
         tx.execute(
-            "INSERT INTO account_device_bindings (account_id, client_binding_id, device_id, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![account_id, binding, device_id, now],
+            "INSERT INTO account_device_bindings (account_id, client_binding_id, device_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![account_id, binding, device_id, created_at],
         )?;
     }
     tx.commit()?;

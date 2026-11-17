@@ -253,7 +253,8 @@ mod tests {
         assert!(INDEX.contains("界面示意，数据为虚构"));
         assert!(INDEX.contains("无需先注册"));
         assert!(PRIVACY.contains("不保存你的 Google 密码或长期 Google 授权令牌"));
-        assert!(PRIVACY.contains("退出账号</strong>只撤销当前登录状态"));
+        assert!(PRIVACY.contains("退出账号</strong>会撤销当前登录状态，并断开这台电脑的云端连接"));
+        assert!(PRIVACY.contains("也不会删除云端设备或历史"));
         assert!(PRIVACY.contains("Google 和 GitHub 不取得你的 TokenLens 会话"));
         assert!(PRIVACY.contains("当前采集实现不会生成或上传项目目录的哈希或项目标签"));
         assert!(PRIVACY.contains("没有「一键删除账号及全部云端历史」入口"));

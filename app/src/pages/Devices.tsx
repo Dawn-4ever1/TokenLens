@@ -1,16 +1,14 @@
-import { Check, Copy, KeyRound, Laptop, MoreHorizontal, Pencil, Plus, ShieldOff } from "lucide-react";
+import { Check, KeyRound, Laptop, MoreHorizontal, Pencil, Plus, ShieldOff } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { CaveatList, ClientName, LoadError, Num, ShareBar } from "@/components/common";
 import { Badge, Button, Card, Dialog, EmptyState, Field, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, StatusDot, Tip, cn, inputClass } from "@/components/ui";
 import { app, errorMessage } from "@/lib/api";
-import { copyText } from "@/lib/clipboard";
 import { useData, useDashboard } from "@/lib/data";
 import { compact, dateTime, duration, exact, relativeTime, shortId } from "@/lib/format";
 import { clientColor, coverageColumns, formFactorLabel, platformLabel } from "@/lib/labels";
 import { useStatus } from "@/lib/status";
 import type { DeviceStatus, DeviceUsage, Devices as DevicesData, FormFactor } from "@/lib/types";
 import { deviceTone } from "./Overview";
-import { ConnectServer } from "./Pairing";
 
 export function Devices() {
   const { query, timeZone } = useData();
@@ -26,7 +24,7 @@ export function Devices() {
         <p className="min-w-[200px] flex-1 text-xs leading-5 text-ink-3">
           {connected
             ? "这里汇总本机与同一空间的其他设备，本机记录和服务器同步会继续运行。"
-            : "正在记录这台电脑的用量。想合并查看其他电脑，点击「添加设备」连接服务器，本机记录会继续运行。"}
+            : "正在记录这台电脑的用量。想合并查看其他电脑，可在「云端」页免费连接，本机记录会继续运行。"}
         </p>
         <Button variant="primary" onClick={() => setAdding(true)}>
           <Plus className="h-4 w-4" aria-hidden /> 添加设备
@@ -61,9 +59,7 @@ export function Devices() {
           <Coverage data={data} timeZone={timeZone} />
         </>
       )}
-      {connected
-        ? <AddDevice open={adding} onOpenChange={setAdding} onDone={devices.reload} />
-        : <ConnectServer open={adding} onOpenChange={setAdding} />}
+      <AddDevice open={adding} onOpenChange={setAdding} />
     </div>
   );
 }
@@ -413,9 +409,9 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
       <div className="space-y-2 text-[13px] leading-6 text-ink-2">
         <p>这台设备会停止服务器同步，也不能再查看这个服务器上的看板。本机记录继续运行，已上传的历史用量保留。</p>
         {device.isCurrent ? (
-          <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">这是你现在正在用的电脑。移除后会自动查看本机数据；以后需要新的配对码才能重新连接服务器。</p>
+          <p className="rounded-lg bg-bad/10 px-3 py-2 text-bad">这是你现在正在用的电脑。移除后会自动回到本机看板；以后可以重新登录云端账号来添加这台电脑。</p>
         ) : (
-          <p>以后想再加入，需要在那台电脑上用新的配对码重新配对。</p>
+          <p>以后想再加入，在那台电脑上重新登录同一个云端账号即可。</p>
         )}
       </div>
       {error && <p className="mt-3 text-xs text-bad">{error}</p>}
@@ -429,104 +425,20 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
   );
 }
 
-function AddDevice({ open, onOpenChange, onDone }: { open: boolean; onOpenChange: (open: boolean) => void; onDone: () => void }) {
-  const { status } = useStatus();
-  const signedIn = Boolean(status?.accountEmail);
-  const [code, setCode] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [copied, setCopied] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
-  useEffect(() => {
-    if (!open) {
-      setCode(null);
-      setError(null);
-      setCopied(false);
-      return;
-    }
-    if (!signedIn) return;
-    let alive = true;
-    app
-      .accountPairCode(false)
-      .then((next) => alive && setCode(next.code))
-      .catch((reason: unknown) => alive && setError(errorMessage(reason)));
-    return () => {
-      alive = false;
-    };
-  }, [open, signedIn]);
-  const rotate = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const next = await app.accountPairCode(true);
-      setCode(next.code);
-      setCopied(false);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const copy = async () => {
-    if (!code) return;
-    try {
-      await copyText(code);
-      setCopied(true);
-      setError(null);
-    } catch (reason) {
-      setError(errorMessage(reason));
-    }
-  };
-  const close = (next: boolean) => {
-    onOpenChange(next);
-    if (!next) onDone();
-  };
+/** Adding another computer is an account sign-in, not a credentials hand-off. */
+function AddDevice({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   return (
-    <Dialog open={open} onOpenChange={close} title="添加设备">
-      <ol className="list-decimal space-y-1 pl-5 text-[13px] leading-6 text-ink-2">
+    <Dialog open={open} onOpenChange={onOpenChange} title="添加设备">
+      <ol className="list-decimal space-y-2 pl-5 text-sm leading-6 text-ink-2">
         <li>在另一台电脑上安装并打开 TokenLens。</li>
-        <li>选择「TokenLens 云服务」，用同一个邮箱登录。</li>
-        <li>也可以在「连接服务器」里填入下面的服务器地址和配对码。</li>
+        <li>选择「TokenLens 云服务」，使用与这台电脑相同的账号登录。</li>
       </ol>
-      <div className="mt-4">
-        <Field label="服务器地址">
-          <input className={cn(inputClass, "selectable font-mono text-xs")} readOnly value={status?.server ?? status?.cloudServer ?? ""} />
-        </Field>
+      <p className="mt-4 rounded-[var(--radius-control)] bg-surface-2 px-4 py-3 text-[13px] leading-6 text-ink-2">
+        可以使用 GitHub、Google 或邮箱账号。登录后会自动添加这台电脑，并同步到同一个空间。
+      </p>
+      <div className="mt-5 flex justify-end">
+        <Button variant="primary" onClick={() => onOpenChange(false)}>完成</Button>
       </div>
-      {!signedIn ? (
-        <div className="mt-4 space-y-3 rounded-xl bg-surface-2 px-4 py-4">
-          <p className="text-[13px] leading-6 text-ink-2">这个空间的配对码需要在登录后查看。登录后多台电脑共用同一个看板。</p>
-          <Button variant="primary" onClick={() => setSigningIn(true)}>登录查看配对码</Button>
-        </div>
-      ) : (
-        <>
-          <div className="mt-4 rounded-xl bg-surface-2 px-4 py-5 text-center">
-            {error ? (
-              <p className="text-sm text-bad">{error}</p>
-            ) : !code ? (
-              <Skeleton className="mx-auto h-9 w-48" />
-            ) : (
-              <>
-                <div className="selectable font-mono text-3xl font-semibold tracking-[0.2em] text-ink">{code}</div>
-                <div className="mt-2 text-xs text-ink-3">一直有效；每用一次只添加一台电脑。泄露时可以换一个。</div>
-              </>
-            )}
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <Button size="sm" onClick={() => void copy()} disabled={!code}>
-              {copied ? <Check className="h-3.5 w-3.5" aria-hidden /> : <Copy className="h-3.5 w-3.5" aria-hidden />}
-              {copied ? "已复制" : "复制配对码"}
-            </Button>
-            <Button size="sm" variant="danger" onClick={() => void rotate()} disabled={busy || !code}>
-              {busy ? "正在更换…" : "换一个配对码"}
-            </Button>
-          </div>
-        </>
-      )}
-      <div className="mt-5 flex justify-end gap-2">
-        <Button variant="primary" onClick={() => close(false)}>完成</Button>
-      </div>
-      <ConnectServer open={signingIn} onOpenChange={(next) => { setSigningIn(next); if (!next) onDone(); }} />
     </Dialog>
   );
 }

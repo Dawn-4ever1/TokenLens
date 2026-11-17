@@ -1191,34 +1191,60 @@ pub async fn account_pair_code(app: AppHandle, rotate: bool) -> CmdResult<Value>
     .await
 }
 
-/// Forgets the account session here. Device collection keeps running, because
-/// its upload tokens are separate; only account features need a new sign-in.
+/// Signs out of the account and disconnects this computer from its cloud space.
+/// Local collection, the local database and the stable account-device binding
+/// stay intact; no server device or event is revoked or deleted. The session
+/// revocation runs outside the connection lock; its failure cannot undo the
+/// already completed return to local data.
+fn logout_account_with<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    revoke_session: impl FnOnce(&str, &str),
+) -> CmdResult<AppStatus> {
+    let state = app.state::<AppState>();
+    let (signed_out, disconnected) = {
+        let _connection = lock(&state.connection);
+        let server = state
+            .server_credentials()
+            .map_or_else(|| crate::account::CLOUD_URL.to_owned(), |c| c.server_url);
+        let session = state.account_session();
+        let disconnected = state.server_credentials().is_some();
+        // If the cloud credentials cannot be removed, leave the account and its
+        // cloud view intact rather than pretending that sign-out succeeded.
+        if disconnected {
+            forget_pairing_locked(app)?;
+        }
+        clear_account(&state);
+        (session.map(|session| (server, session)), disconnected)
+    };
+    if let Some((server, session)) = signed_out {
+        revoke_session(&server, &session);
+    }
+    changed(
+        app,
+        if disconnected {
+            Poke::Paired
+        } else {
+            Poke::Status
+        },
+    );
+    Ok(status(app))
+}
+
+/// Account sign-out returns every dashboard to this computer. Device tokens
+/// are separate from the session, so explicitly retire this cloud connection;
+/// otherwise its read token would keep exposing the account's other devices.
 #[tauri::command]
 pub async fn logout_account(app: AppHandle) -> CmdResult<AppStatus> {
     blocking(app, |app| {
-        let state = app.state::<AppState>();
-        let signed_out = {
-            let _connection = lock(&state.connection);
-            lock(&state.account_email).take();
-            lock(&state.account_provider).take();
-            lock(&state.account_display_name).take();
-            lock(&state.account_avatar_url).take();
-            lock(&state.account_space).take();
-            lock(&state.account_session).take().map(|session| {
-                let server = state
-                    .server_credentials()
-                    .map_or_else(|| crate::account::CLOUD_URL.to_owned(), |c| c.server_url);
-                // Delete before a new sign-in can save its session. Remote
-                // logout uses only this captured session, outside the lock.
-                crate::account::delete_session(&state.paths.keychain_service);
-                (server, session)
-            })
-        };
-        if let Some((server, session)) = signed_out {
-            crate::account::logout(&server, &session);
-        }
-        changed(app, Poke::Status);
-        Ok(status(app))
+        logout_account_with(app, |server, session| {
+            // Local sign-out must not wait for a slow or offline network. The
+            // captured session is independent of any later account sign-in.
+            let server = server.to_owned();
+            let session = session.to_owned();
+            drop(tauri::async_runtime::spawn_blocking(move || {
+                crate::account::logout(&server, &session);
+            }));
+        })
     })
     .await
 }
@@ -1951,6 +1977,129 @@ mod tests {
         assert_eq!(state.account_session(), None);
         assert_eq!(state.account_email(), None);
         assert_eq!(*lock(&state.account_space), None);
+    }
+
+    #[test]
+    fn account_logout_returns_to_local_without_revoking_cloud_devices_or_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+        let local = lock(&state.local_credentials).clone().unwrap();
+        let cloud_dir = dir.path().join("cloud-fixture");
+        std::fs::create_dir_all(&cloud_dir).unwrap();
+        let cloud_server = LocalServer::open_with(&cloud_dir, None).unwrap();
+        let cloud_get = |credentials: &Credentials, path: &str| {
+            let response = local::LocalTransport(cloud_server.clone())
+                .get(
+                    &format!(
+                        "{}/api/{path}",
+                        credentials.server_url.trim_end_matches('/')
+                    ),
+                    Some(&credentials.read_token),
+                )
+                .unwrap();
+            assert_eq!(response.status, 200);
+            serde_json::from_slice::<Value>(&response.body).unwrap()
+        };
+        // Route the synthetic cloud registry through the in-process transport.
+        // Only the account-session callback is replaced; the state transition
+        // and all device/event reads are the production implementation.
+        let cloud = cloud_server
+            .pair(FormFactor::Desktop, "This computer in the cloud")
+            .unwrap();
+        let other = cloud_server
+            .pair(FormFactor::Laptop, "Another computer")
+            .unwrap();
+        adopt(&app, cloud.clone(), false).unwrap();
+        *lock(&state.account_session) = Some("tls_fixture_logout".into());
+        *lock(&state.account_email) = Some("member@example.test".into());
+        *lock(&state.account_provider) = Some("github".into());
+        *lock(&state.account_display_name) = Some("Fixture account".into());
+        *lock(&state.account_space) = Some("Fixture space".into());
+        let binding = dir.path().join("account-device-binding");
+        std::fs::write(&binding, b"stable-fixture-binding").unwrap();
+        let mut queue = State::open(dir.path()).unwrap();
+        queue.prepare(&cloud.device_id, "generation-test").unwrap();
+        drop(queue);
+
+        // Keep real cloud events and another device in the registry. Returning
+        // to local must not turn either into a revoked or deleted cloud record.
+        let events: Vec<Value> =
+            serde_json::from_str(include_str!("../../../fixtures/usage-events.json")).unwrap();
+        let envelope = json!({
+            "schemaVersion": 1,
+            "deviceId": cloud.device_id,
+            "batchId": "batch-account-logout-fixture",
+            "collector": {"version": "test", "tokscaleRev": "test", "parserGeneration": "test"},
+            "scanGeneration": "test",
+            "events": events,
+        });
+        let uploaded = cloud_server
+            .request(
+                axum::http::Method::POST,
+                "/api/ingest/events",
+                Some(&cloud.ingest_token),
+                false,
+                &serde_json::to_vec(&envelope).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(uploaded.status, 200);
+        let summary_path = "dashboard/summary?from=2023-11-01&to=2023-11-30";
+        let before = cloud_get(&cloud, summary_path);
+        assert_eq!(before["inputTokens"], 540);
+        assert_eq!(
+            cloud_get(&cloud, "dashboard/devices")["devices"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let revoked_sessions = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let captured_sessions = std::sync::Arc::clone(&revoked_sessions);
+        let result = logout_account_with(&app, move |server, session| {
+            lock(&captured_sessions).push((server.to_owned(), session.to_owned()));
+        })
+        .unwrap();
+        let revoked_sessions = lock(&revoked_sessions);
+        assert_eq!(revoked_sessions.len(), 1);
+        assert_eq!(result.mode, Some("local"));
+        assert_eq!(result.device_id, Some(local.device_id.clone()));
+        assert_eq!(result.account_email, None);
+        assert_eq!(result.account_display_name, None);
+        assert_eq!(result.account_space, None);
+        assert!(state.server_credentials().is_none());
+        assert!(state.account_session().is_none());
+        assert_eq!(local::load_credentials(dir.path()), Some(local.clone()));
+        assert_eq!(state.credentials(), Some(local.clone()));
+        assert!(binding.exists(), "re-login still reuses the cloud device");
+        assert!(
+            !State::exists_in(dir.path()),
+            "only the cloud queue is retired"
+        );
+        assert!(State::exists_in(&dir.path().join("local-queue")));
+        assert!(local::database_path(dir.path()).exists());
+        assert!(!state.is_paused());
+
+        let local_devices = state.remote.get(&local, "dashboard/devices").unwrap();
+        let local_devices = local_devices["devices"].as_array().unwrap();
+        assert_eq!(local_devices.len(), 1);
+        assert_eq!(local_devices[0]["deviceId"], local.device_id);
+
+        // The app's local sign-out does not revoke cloud device credentials.
+        // The real session endpoint is covered by the server account tests.
+        assert!(cloud_get(&cloud, "dashboard/health")["status"].is_string());
+        assert!(cloud_get(&other, "dashboard/health")["status"].is_string());
+        let after = cloud_get(&other, summary_path);
+        assert_eq!(after["inputTokens"], before["inputTokens"]);
     }
 
     #[test]

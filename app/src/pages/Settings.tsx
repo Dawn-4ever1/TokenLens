@@ -330,7 +330,7 @@ function Connection() {
       {error && !confirm && <p role="alert" className="pb-2 text-xs text-bad">{error}</p>}
       <ConnectServer open={connecting} onOpenChange={setConnecting} />
       <Dialog open={confirm} onOpenChange={setConfirm} title="断开服务器？">
-        <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，之后只显示这台电脑。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「设备 → 添加设备」重新连接。</p>
+        <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，之后只显示这台电脑。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「云端」页重新连接。</p>
         {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
           <Button onClick={() => setConfirm(false)} disabled={busy}>取消</Button>

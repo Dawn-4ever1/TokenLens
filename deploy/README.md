@@ -34,6 +34,15 @@ optional public GitHub profile fields. Migration automatically backs up an
 existing database and preserves devices, pairing credentials, accounts and
 usage history. Back up and test restoration before replacing a running server.
 
+### Upgrading to 0.5.17
+
+Back up and upgrade the server before updating connected desktop apps. Schema
+v11 preserves immutable identity-registration history, so a computer can sign
+back in after another computer retires its previous cloud identity without
+reviving or overwriting the old one. Existing devices, events, accounts,
+credentials and bindings are retained. Test restoration before replacing the
+running server.
+
 ## 1. Build and start
 
 ```sh
@@ -143,7 +152,7 @@ A computer's tenant is fixed by the code it was paired with.
 Apps can also sign in instead of using a pairing code: a first sign-in creates
 that person's own space, and later sign-ins return to it.
 
-Your own users reach this server through **Devices → 添加设备 → 自己的服务器**,
+Your own users reach this server through **Cloud → 免费使用云服务 → 自己的服务器**,
 which offers the email code (or the operator-issued pairing code). The app's
 GitHub and Google buttons only appear for the hosted `tokenlens.online` service.
 
@@ -190,7 +199,9 @@ docker compose up -d
 
 Without these values the sign-in endpoints answer "service unavailable" and the
 pairing-code flow above keeps working exactly as before. Device tokens stay
-separate from account sessions: signing out never stops usage collection.
+separate from account sessions. Signing out disconnects this computer's cloud
+connection and returns its dashboard to local data without stopping collection
+or deleting cloud devices and history.
 
 ## 4. Cost estimates
 
