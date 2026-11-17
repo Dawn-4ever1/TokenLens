@@ -8,7 +8,7 @@
   --muted: #68707d;
   --primary: #2b4069;
   --primary-hover: #1d3155;
-  --primary-soft: #e9edf5;
+  --primary-soft: #f0e8dd;
   --accent: #cf713e;
   --good: #397460;
   --shadow: 0 24px 65px rgb(35 44 59 / 9%), 0 2px 6px rgb(35 44 59 / 4%);
@@ -114,17 +114,17 @@ h2 { margin-bottom: 15px; font-size: clamp(28px, 3vw, 37px); font-weight: 650; l
 .agent-list { display: flex; flex-wrap: wrap; gap: 9px; margin-bottom: 22px; }
 .agent-list span { padding: 5px 11px; border: 1px solid var(--line); border-radius: 5px; background: var(--bg); color: var(--muted); font-size: 12px; }
 .agent-note { margin-bottom: 0; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; }
-.download-section { background: var(--primary); color: #fff; }
+.download-section { background: #1a1714; color: #f6f1e7; }
 .download-inner { display: flex; align-items: center; justify-content: space-between; gap: 40px; }
 .download-section h2 { margin-bottom: 10px; }
-.download-section p { margin-bottom: 0; color: #cbd4e4; font-size: 14px; }
-.download-section .button { flex-shrink: 0; background: #fff; color: var(--primary); border-color: #fff; }
-.download-section .button:not(.button-primary) { background: transparent; color: #fff; border-color: #8090ad; }
-.download-section .button:not(.button-primary):hover { background: rgba(255, 255, 255, .1); }
+.download-section p { margin-bottom: 0; color: #d6cec2; font-size: 14px; }
+.download-section .button { flex-shrink: 0; background: #f6f1e7; color: #1a1714; border-color: #f6f1e7; }
+.download-section .button:not(.button-primary) { background: transparent; color: #f6f1e7; border-color: #8a8378; }
+.download-section .button:not(.button-primary):hover { background: rgba(246, 241, 231, .1); }
 .download-buttons { display: flex; flex-wrap: wrap; gap: 10px; }
 .download-actions { margin-bottom: 0; }
 .download-section .button:hover { background: var(--primary-soft); }
-.download-note { margin-top: 10px; font-size: 11px; color: #b9c5d9; text-align: center; }
+.download-note { margin-top: 10px; font-size: 11px; color: #b9b0a4; text-align: center; }
 .site-footer { padding-block: 28px; color: var(--muted); font-size: 12px; }
 .footer-inner { display: flex; justify-content: space-between; gap: 20px; }
 .footer-links { display: flex; flex-wrap: wrap; gap: 22px; }

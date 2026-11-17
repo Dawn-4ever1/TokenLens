@@ -60,6 +60,19 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
             assert!(!body.contains("href=\"#download-title\">下载应用"));
         }
         assert!(body.contains(expected), "{path}");
+        if path == "/assets/tokenlens.svg" {
+            let current = include_bytes!("../../app/public/favicon.svg");
+            assert_eq!(
+                body.as_bytes(),
+                current,
+                "website icon must match the current app artwork"
+            );
+            assert!(body.contains("fill=\"#1a1714\""));
+            assert!(!body.contains("fill=\"#1e2b4a\""));
+        }
+        if path == "/assets/site.css" {
+            assert!(body.contains(".download-section { background: #1a1714; color: #f6f1e7; }"));
+        }
         assert!(!body.contains("tls_"), "{path}");
     }
 }
