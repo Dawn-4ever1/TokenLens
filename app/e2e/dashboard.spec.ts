@@ -112,7 +112,7 @@ test("sidebar buttons are reachable by name when labels are collapsed", async ({
   expect(errors).toEqual([]);
 });
 
-test("the narrow sidebar keeps its avatar centred above Settings and its first icon aligned with the page title", async ({ page }) => {
+test("the Windows sidebar aligns the brand with the page title and keeps navigation below it", async ({ page }) => {
   const avatar = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%232563eb'/%3E%3C/svg%3E";
   await page.addInitScript((url) => sessionStorage.setItem("tokenlens.mock.avatar", url), avatar);
   await page.setViewportSize({ width: 900, height: 800 });
@@ -134,17 +134,19 @@ test("the narrow sidebar keeps its avatar centred above Settings and its first i
   const narrow = await page.evaluate(() => {
     const image = document.querySelector<HTMLElement>("[data-account-identity] img");
     const settings = document.querySelector<HTMLElement>('nav button[aria-label="设置"]');
-    const first = document.querySelector<HTMLElement>('nav button[aria-label="总览"]');
+    const brand = document.querySelector<HTMLElement>("[data-sidebar-brand]");
     const title = document.querySelector<HTMLElement>("header h1");
     const nav = document.querySelector<HTMLElement>('nav[aria-label="主导航"]');
-    if (!image || !settings || !first || !title || !nav) throw new Error("Sidebar layout pieces are missing");
+    const buttons = ["总览", "趋势", "会话", "设备", "云端"].map((label) => document.querySelector<HTMLElement>(`nav button[aria-label="${label}"]`));
+    if (!image || !settings || !brand || !title || !nav || buttons.some((button) => !button)) throw new Error("Sidebar layout pieces are missing");
     const box = (element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
-      return { width: rect.width, centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2 };
+      return { width: rect.width, top: rect.top, bottom: rect.bottom, centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2 };
     };
     return {
-      avatar: box(image), settings: box(settings), first: box(first),
+      avatar: box(image), settings: box(settings), brand: box(brand),
       title: box(title), nav: box(nav),
+      buttons: buttons.map((button) => box(button!)),
       rowGap: settings.getBoundingClientRect().top - document.querySelector<HTMLElement>('[role="group"][aria-label="GitHub 账号 octocat"]')!.getBoundingClientRect().bottom,
     };
   });
@@ -152,7 +154,11 @@ test("the narrow sidebar keeps its avatar centred above Settings and its first i
   expect(Math.abs(narrow.avatar.centerX - narrow.settings.centerX)).toBeLessThanOrEqual(0.5);
   expect(narrow.settings.centerY - narrow.avatar.centerY).toBe(44);
   expect(narrow.rowGap).toBe(8);
-  expect(Math.abs(narrow.first.centerY - narrow.title.centerY)).toBeLessThanOrEqual(3);
+  expect(Math.abs(narrow.brand.centerY - narrow.title.centerY)).toBeLessThanOrEqual(3);
+  for (let index = 1; index < narrow.buttons.length; index += 1) {
+    expect(narrow.buttons[index].top).toBeGreaterThanOrEqual(narrow.buttons[index - 1].bottom);
+  }
+  expect(narrow.buttons[0].top).toBeGreaterThanOrEqual(narrow.brand.bottom);
   expect(Math.abs(narrow.avatar.centerX - narrow.nav.centerX)).toBeLessThanOrEqual(0.5);
 
   await page.setViewportSize({ width: 1100, height: 800 });

@@ -3,6 +3,9 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(windows)]
+use std::sync::OnceLock;
+
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
 
 #[cfg(windows)]
@@ -22,12 +25,40 @@ fn windows_config_without_native_title(
 }
 
 /// Tauri sets only the small icon when creating a window, and has no API to
-/// clear it afterwards. Clear the native title-bar icon while leaving the big
-/// taskbar icon and the separately-owned tray icon alone.
+/// clear it afterwards. A null `WM_SETICON` is not sufficient on Windows: it
+/// falls back to the system's default icon when the window has no class icon.
+/// Give the small-icon slot a process-lifetime transparent icon instead. This
+/// keeps the title bar blank without changing the frame style (or its system
+/// menu hit area), while the big taskbar icon and tray icon remain untouched.
 #[cfg(windows)]
 fn remove_windows_titlebar_icon(window: &tauri::WebviewWindow) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_SMALL, SendMessageW, WM_SETICON};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateIcon, ICON_SMALL, SendMessageW, WM_SETICON,
+    };
+
+    // `CreateIcon` returns a handle owned by the caller. Keep this one tiny
+    // process-lifetime handle alive and reuse it for every dashboard window;
+    // the OS reclaims the process resource when the app exits. A 1-bit AND
+    // mask full of ones makes every pixel transparent.
+    static TRANSPARENT_ICON: OnceLock<isize> = OnceLock::new();
+    let icon = *TRANSPARENT_ICON.get_or_init(|| {
+        const MASK: [u8; 32] = [0xff; 32];
+        const XOR: [u8; 32] = [0; 32];
+        // SAFETY: the bitmap buffers are valid for the duration of the call;
+        // the returned handle is retained for the process lifetime above.
+        unsafe {
+            CreateIcon(
+                std::ptr::null_mut(),
+                16,
+                16,
+                1,
+                1,
+                MASK.as_ptr(),
+                XOR.as_ptr(),
+            ) as isize
+        }
+    });
 
     let Ok(handle) = window.window_handle() else {
         return;
@@ -36,10 +67,14 @@ fn remove_windows_titlebar_icon(window: &tauri::WebviewWindow) {
         return;
     };
     // SAFETY: this runs on the window's UI thread while its HWND is alive.
-    // A null ICON_SMALL removes only the title-bar icon; it destroys no icon
-    // resource and sends no ICON_BIG change to the taskbar.
+    // Only ICON_SMALL is changed; ICON_BIG (taskbar) is left intact.
     unsafe {
-        SendMessageW(handle.hwnd.get() as _, WM_SETICON, ICON_SMALL as usize, 0);
+        SendMessageW(
+            handle.hwnd.get() as _,
+            WM_SETICON,
+            ICON_SMALL as usize,
+            icon,
+        );
     }
 }
 

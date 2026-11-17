@@ -96,7 +96,9 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
   const signedIn = Boolean(status?.accountEmail || status?.accountDisplayName);
   const brand = (
     <>
-      <AppMark className="pointer-events-none h-5 w-5 shrink-0" />
+      <span data-sidebar-brand-mark className="flex h-5 w-5 shrink-0 items-center justify-center">
+        <AppMark className="pointer-events-none h-5 w-5" />
+      </span>
       <span className="display hidden truncate text-[13px] leading-5 text-ink-2 min-[1100px]:inline">
         TokenLens
       </span>
@@ -106,7 +108,8 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
     <nav aria-label="主导航" className="flex w-[var(--sidebar-narrow)] shrink-0 flex-col border-r border-line/70 bg-surface-2/50 min-[1100px]:w-[var(--sidebar-wide)]">
       <div
         data-tauri-drag-region
-        className={cn("flex shrink-0 items-end justify-center px-2 pb-3 min-[1100px]:justify-start min-[1100px]:px-3", mac ? "h-[72px]" : "h-14")}
+        data-sidebar-brand
+        className={cn("flex shrink-0 justify-center px-2 min-[1100px]:justify-start min-[1100px]:px-3", mac ? "h-[72px] items-end pb-3" : "h-14 items-center")}
       >
         {signedIn ? (
           <div data-tauri-drag-region className="flex items-center gap-2.5">{brand}</div>
@@ -123,9 +126,9 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
           </Tip>
         )}
       </div>
-      <ul className={cn("flex flex-1 flex-col gap-0.5 px-2.5", mac ? "-mt-4" : "-mt-11")}>
-        {/* The Windows rail lifts its first row to the page title; macOS keeps
-            the native traffic-light spacing in the taller brand area. */}
+      <ul className="flex flex-1 flex-col gap-0.5 px-2.5">
+        {/* The brand occupies its own row. Windows aligns its mark with the
+            page title; the navigation then continues below it in order. */}
         {PAGES.map((item, index) => {
           const Icon = ICONS[item.key];
           const active = item.key === page;
