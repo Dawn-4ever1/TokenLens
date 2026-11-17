@@ -123,7 +123,9 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
           </Tip>
         )}
       </div>
-      <ul className="flex flex-1 flex-col gap-0.5 px-2.5">
+      <ul className={cn("flex flex-1 flex-col gap-0.5 px-2.5", mac ? "-mt-4" : "-mt-11")}>
+        {/* The Windows rail lifts its first row to the page title; macOS keeps
+            the native traffic-light spacing in the taller brand area. */}
         {PAGES.map((item, index) => {
           const Icon = ICONS[item.key];
           const active = item.key === page;
@@ -172,7 +174,7 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
 }) {
   const providerName = status?.accountDisplayName;
   // Older servers and email sign-ins have no provider profile. They still
-  // have an account session, and must keep an identifiable sign-out entry.
+  // have an account session and show the same responsive account entry.
   const name = providerName || status?.accountEmail;
   const provider = status?.accountProvider
     // Older servers report no provider; a display name still means GitHub.
@@ -185,15 +187,16 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
   if (name) {
     return (
       <div className="px-1">
-        {/* The avatar and name are display-only: only the small log-out
-            button can sign out, and it always asks for confirmation. */}
+        {/* In the collapsed rail the avatar sits directly above Settings,
+            both centred in the sidebar. The name and sign-out entry return
+            in the wide sidebar. */}
         <div
           role="group"
           aria-label={accountLabel}
-          className="group flex min-h-11 w-full items-center justify-center gap-3 rounded-lg px-1 min-[1100px]:justify-start min-[1100px]:px-2"
+          className="group flex h-9 w-full items-center justify-center gap-3 rounded-lg px-1 min-[1100px]:h-11 min-[1100px]:justify-start min-[1100px]:px-2"
         >
           <Tip content={accountLabel} side="right">
-            <span data-account-identity className="flex min-w-0 flex-1 items-center gap-2.5 min-[1100px]:gap-3">
+            <span data-account-identity className="flex min-w-0 flex-none items-center justify-center min-[1100px]:flex-1 min-[1100px]:justify-start min-[1100px]:gap-3">
               {status?.accountAvatarUrl && !imageFailed ? (
                 <img
                   src={status.accountAvatarUrl}
@@ -205,17 +208,19 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
               <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
             </span>
           </Tip>
-          <Tip content="退出登录" side="right">
-            <button
-              type="button"
-              aria-label="退出登录"
-              disabled={busy}
-              onClick={() => setConfirming(true)}
-              className="-mr-1 ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:opacity-50"
-            >
-              <LogOut className="h-3 w-3 min-[1100px]:h-3.5 min-[1100px]:w-3.5" aria-hidden />
-            </button>
-          </Tip>
+          <div className="hidden min-[1100px]:contents">
+            <Tip content="退出登录" side="right">
+              <button
+                type="button"
+                aria-label="退出登录"
+                disabled={busy}
+                onClick={() => setConfirming(true)}
+                className="-mr-1 ml-auto flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-3 transition-colors hover:bg-surface hover:text-ink disabled:opacity-50"
+              >
+                <LogOut className="h-3 w-3 min-[1100px]:h-3.5 min-[1100px]:w-3.5" aria-hidden />
+              </button>
+            </Tip>
+          </div>
         </div>
         {error && <p role="alert" className="px-2 pt-1 text-[11px] leading-4 text-bad">{error}</p>}
         <Dialog

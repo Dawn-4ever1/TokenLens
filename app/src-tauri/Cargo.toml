@@ -1,6 +1,6 @@
 [package]
 name = "tokenlens-app"
-version = "0.5.19"
+version = "0.5.20"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -39,6 +39,8 @@ url = "2"
 
 [target.'cfg(windows)'.dependencies]
 notify-rust = { version = "4.18", default-features = false }
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
 
 # Keep desktop HTTPS on the system TLS stack, like the collector (D039).
 [target.'cfg(any(windows, target_os = "macos"))'.dependencies]

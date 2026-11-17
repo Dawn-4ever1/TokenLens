@@ -652,7 +652,8 @@ const state: AppStatus = {
   },
   autostart: true,
   menuBarTotal: sessionStorage.getItem("tokenlens.mock.menubar-off") !== "true",
-  platform: "macos",
+  // Browser-only native-layout previews; the packaged app reports the real OS.
+  platform: params.get("platform") === "windows" ? "windows" : "macos",
   formFactor: "laptop",
 };
 

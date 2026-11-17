@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "collector"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "chrono",
  "clap",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -5812,7 +5812,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokenlens-app"
-version = "0.5.19"
+version = "0.5.20"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -5824,6 +5824,7 @@ dependencies = [
  "iana-time-zone",
  "keyring",
  "notify-rust",
+ "raw-window-handle",
  "serde",
  "serde_json",
  "tauri",
@@ -5841,6 +5842,7 @@ dependencies = [
  "ureq",
  "url",
  "usage-event",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

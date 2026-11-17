@@ -10,15 +10,37 @@ use crate::commands::AppState;
 
 pub const MAIN: &str = "main";
 
-/// `hiddenTitle` is macOS-only in Tauri. Windows would otherwise show a
-/// second TokenLens above the sidebar's existing brand. Keep productName and
-/// macOS untouched; the window's taskbar icon still identifies the app.
+/// `hiddenTitle` is macOS-only in Tauri. Windows would otherwise repeat both
+/// the app icon and TokenLens above the sidebar's existing brand. Keep the
+/// product name, taskbar icon and macOS appearance untouched.
 #[cfg(windows)]
 fn windows_config_without_native_title(
     mut config: tauri::utils::config::WindowConfig,
 ) -> tauri::utils::config::WindowConfig {
     config.title.clear();
     config
+}
+
+/// Tauri sets only the small icon when creating a window, and has no API to
+/// clear it afterwards. Clear the native title-bar icon while leaving the big
+/// taskbar icon and the separately-owned tray icon alone.
+#[cfg(windows)]
+fn remove_windows_titlebar_icon(window: &tauri::WebviewWindow) {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ICON_SMALL, SendMessageW, WM_SETICON};
+
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: this runs on the window's UI thread while its HWND is alive.
+    // A null ICON_SMALL removes only the title-bar icon; it destroys no icon
+    // resource and sends no ICON_BIG change to the taskbar.
+    unsafe {
+        SendMessageW(handle.hwnd.get() as _, WM_SETICON, ICON_SMALL as usize, 0);
+    }
 }
 
 // Programmatic closes (the tray's Quit item and macOS's app menu) must not
@@ -52,6 +74,8 @@ fn open_now(app: &AppHandle) {
     #[cfg(windows)]
     let config = windows_config_without_native_title(config);
     if let Ok(window) = WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+        #[cfg(windows)]
+        remove_windows_titlebar_icon(&window);
         let _ = window.set_focus();
     }
 }

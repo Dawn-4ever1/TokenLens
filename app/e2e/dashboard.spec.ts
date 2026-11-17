@@ -112,6 +112,57 @@ test("sidebar buttons are reachable by name when labels are collapsed", async ({
   expect(errors).toEqual([]);
 });
 
+test("the narrow sidebar keeps its avatar centred above Settings and its first icon aligned with the page title", async ({ page }) => {
+  const avatar = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='40' height='40'%3E%3Ccircle cx='20' cy='20' r='20' fill='%232563eb'/%3E%3C/svg%3E";
+  await page.addInitScript((url) => sessionStorage.setItem("tokenlens.mock.avatar", url), avatar);
+  await page.setViewportSize({ width: 900, height: 800 });
+  const errors = await open(page, { query: "?platform=windows" });
+  await settle(page, "总览");
+  await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true }).click();
+  await dialog.getByRole("button", { name: "继续前往 GitHub", exact: true }).click();
+  await expect(dialog).toBeHidden({ timeout: 15_000 });
+  await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "设备", exact: true }).click();
+  await settle(page, "设备");
+  const account = page.getByRole("group", { name: "GitHub 账号 octocat", exact: true });
+  await expect(account).toBeVisible();
+  await expect(account.locator("img")).toHaveAttribute("src", avatar);
+  await expect(account.locator("[data-account-name]")).toBeHidden();
+  await expect(page.getByRole("button", { name: "退出登录", exact: true })).toBeHidden();
+
+  const narrow = await page.evaluate(() => {
+    const image = document.querySelector<HTMLElement>("[data-account-identity] img");
+    const settings = document.querySelector<HTMLElement>('nav button[aria-label="设置"]');
+    const first = document.querySelector<HTMLElement>('nav button[aria-label="总览"]');
+    const title = document.querySelector<HTMLElement>("header h1");
+    const nav = document.querySelector<HTMLElement>('nav[aria-label="主导航"]');
+    if (!image || !settings || !first || !title || !nav) throw new Error("Sidebar layout pieces are missing");
+    const box = (element: HTMLElement) => {
+      const rect = element.getBoundingClientRect();
+      return { width: rect.width, centerX: rect.x + rect.width / 2, centerY: rect.y + rect.height / 2 };
+    };
+    return {
+      avatar: box(image), settings: box(settings), first: box(first),
+      title: box(title), nav: box(nav),
+      rowGap: settings.getBoundingClientRect().top - document.querySelector<HTMLElement>('[role="group"][aria-label="GitHub 账号 octocat"]')!.getBoundingClientRect().bottom,
+    };
+  });
+  expect(narrow.avatar.width).toBe(20);
+  expect(Math.abs(narrow.avatar.centerX - narrow.settings.centerX)).toBeLessThanOrEqual(0.5);
+  expect(narrow.settings.centerY - narrow.avatar.centerY).toBe(44);
+  expect(narrow.rowGap).toBe(8);
+  expect(Math.abs(narrow.first.centerY - narrow.title.centerY)).toBeLessThanOrEqual(3);
+  expect(Math.abs(narrow.avatar.centerX - narrow.nav.centerX)).toBeLessThanOrEqual(0.5);
+
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await expect(page.getByRole("button", { name: "退出登录", exact: true })).toBeVisible();
+  await expect(account.locator("[data-account-name]")).toBeVisible();
+  await expect(account.locator("img")).toBeVisible();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
 test("overview prioritizes concise KPIs and a full-width trend", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const errors = await open(page);
@@ -874,7 +925,10 @@ test("GitHub sign-in against an older server stays signed in without profile fie
   const account = page.getByRole("group", { name: "账号 octo@example.com", exact: true });
   await expect(account).toBeVisible();
   await expect(signIn).toHaveCount(0);
-  // The collapsed sidebar still exposes a named, usable sign-out control.
+  // A legacy profile still has an avatar in the collapsed rail. Sign-out
+  // returns automatically when the sidebar has room for the full account row.
+  await expect(page.getByRole("button", { name: "退出登录", exact: true })).toBeHidden();
+  await page.setViewportSize({ width: 1100, height: 800 });
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
