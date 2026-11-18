@@ -1576,7 +1576,7 @@ mod tests {
         let _held = collector_core::state::lock_queue(dir.path()).unwrap();
         let (sender, receiver) = watch::channel();
         let live = Mutex::new(Live::default());
-        sender.send(Msg::Change("ignored".into())).unwrap();
+        sender.send(Msg::Change("ignored".into(), false)).unwrap();
         sender.send(Msg::Stop).unwrap();
         let started = std::time::Instant::now();
         let syncer = start_syncer(

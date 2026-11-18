@@ -1318,7 +1318,13 @@ pub fn sessions(
            group_concat(DISTINCT model_id), MAX(project_label),
            SUM(input + output + cache_read + cache_write + reasoning) AS total_tokens,
            COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0.0) AS cost,
-           MAX(session_title)
+           (SELECT ce.session_title FROM usage_events ce
+            WHERE ce.tenant_id = counted_events.tenant_id
+              AND ce.device_id = counted_events.device_id
+              AND ce.client = counted_events.client
+              AND COALESCE(ce.parent_session_id, ce.session_id) = COALESCE(counted_events.parent_session_id, counted_events.session_id)
+              AND ce.session_title IS NOT NULL
+            ORDER BY ce.ts DESC, ce.rowid DESC LIMIT 1) AS latest_title
          {grouped_sql}
          ORDER BY {order}, device_id, client, root
          LIMIT ? OFFSET ?"

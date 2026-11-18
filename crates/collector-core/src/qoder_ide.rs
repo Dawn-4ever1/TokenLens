@@ -326,6 +326,7 @@ fn scan_database_for(
     if !table_exists {
         return Ok(Vec::new());
     }
+    let session_titles = crate::titles::qoder_session_titles(&connection);
     let mut statement = connection.prepare(
         "SELECT cm.rowid, cm.id, cm.session_id, cm.request_id, \
          cm.token_info, cm.model_info, cm.gmt_create, cr.extra \
@@ -348,9 +349,10 @@ fn scan_database_for(
             row.get::<_, rusqlite::types::Value>(6)?,
             row.get::<_, rusqlite::types::Value>(7)?,
         ];
-        let Ok(Some(event)) = event_from_values(values, edition) else {
+        let Ok(Some(mut event)) = event_from_values(values, edition) else {
             continue;
         };
+        event.session_title = session_titles.get(&event.session_id).cloned();
         if crate::qoder::in_range(event.ts, range) {
             events.push(event);
         }
@@ -393,11 +395,16 @@ mod tests {
              id TEXT, session_id TEXT, request_id TEXT, role TEXT, \
              token_info TEXT, model_info TEXT, gmt_create INTEGER, body TEXT);\
              CREATE TABLE chat_record (request_id TEXT, extra TEXT, content TEXT);\
-             CREATE TABLE chat_session (session_id TEXT, project_uri TEXT);",
+             CREATE TABLE chat_session (session_id TEXT, project_uri TEXT, title TEXT);",
         )
         .expect("synthetic schema");
         db.execute(
             "INSERT INTO chat_record VALUES ('synthetic-request', '{\"modelConfig\":{\"key\":\"fallback-model\"}}', 'not read')",
+            [],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO chat_session VALUES ('synthetic-session', '/private/path/not/read', 'Qoder session title')",
             [],
         )
         .unwrap();
@@ -463,6 +470,11 @@ mod tests {
             (90, 0, 5)
         );
         assert_eq!(events[1].model_id, "fallback-model");
+        assert!(
+            events
+                .iter()
+                .all(|event| event.session_title.as_deref() == Some("Qoder session title"))
+        );
         assert!(events.iter().all(|event| {
             event.precision == Precision::Measured
                 && event.credits.is_none()

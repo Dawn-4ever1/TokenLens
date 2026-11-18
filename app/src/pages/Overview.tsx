@@ -2,12 +2,12 @@ import { ChevronRight } from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import { Chart, baseOption, type ChartOption } from "@/components/Chart";
 import { Composition } from "@/components/Composition";
-import { ClientName, LoadError, ModelName, Num, ShareBar } from "@/components/common";
+import { ClientName, IdentityIcon, LoadError, ModelName, Num, ShareBar } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, StatusDot, Tip, cn } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
 import { bucketLabel, compact, exact, percent, relativeTime, share, usd } from "@/lib/format";
-import { clientColor, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
+import { clientColor, clientIcon, clientLabel, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { useSettings } from "@/lib/settings";
 import { daysBetween, resolveRange, todayIn, type DateSpan } from "@/lib/range";
@@ -462,8 +462,13 @@ function RecentCard({ page, error, reload }: { page: SessionPage | null; error: 
           {page.sessions.map((session) => (
             <li key={session.sessionKey}>
               <button type="button" onClick={() => openSession(session.sessionKey)} className="w-full rounded-[var(--radius-control)] px-3 py-2 text-left hover:bg-surface-2">
-                <div className="flex items-center justify-between gap-3 text-[13px]">
-                  <ClientName id={session.client} className="text-ink" />
+                <div className="flex min-w-0 items-center justify-between gap-3 text-[13px]">
+                  <Tip content={session.title || clientLabel(session.client)}>
+                    <span className="flex min-w-0 items-center gap-2 font-medium text-ink">
+                      <IdentityIcon icon={clientIcon(session.client)} color={clientColor(session.client)} label={clientLabel(session.client)} className="h-4 w-4" />
+                      <span className="truncate">{session.title || clientLabel(session.client)}</span>
+                    </span>
+                  </Tip>
                   <Num value={session.totalTokens} plain className="shrink-0 font-medium text-ink" />
                 </div>
                 <div className="mt-0.5 flex items-center justify-between gap-3 text-xs text-ink-3">

@@ -10,6 +10,7 @@ pub mod schedule;
 pub mod snapshot;
 pub mod state;
 pub mod sync;
+pub mod titles;
 pub mod transport;
 pub mod watch;
 pub mod worker;
@@ -19,7 +20,7 @@ pub mod worker_cli;
 pub const TOKSCALE_REV: &str = "e9cf1041af784bdaa4e217978f89f2168e731b69";
 /// Changes whenever parsing, mapping, Qoder handling or `event_key` rules
 /// change; a new value makes every event queue for upload once more.
-pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-4.qoder-3.key-1";
+pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-4.qoder-3.titles-1.key-1";
 
 pub use mapping::{
     EventKeySetDigest, MappingError, canonical_json, event_key_set_digest, event_value_digest,
@@ -390,6 +391,8 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
             )
         })?
     };
+    let mut messages = messages;
+    titles::enrich_messages(&mut messages, &options.home, options.use_env_roots);
     let mut events = map_messages_with_salt(&messages, options.project_salt.as_deref())
         .map_err(Error::EventMapping)?;
     let scanned_clients = upstream.len();

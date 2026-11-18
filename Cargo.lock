@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "collector"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "chrono",
  "clap",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "collector-core"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "chrono",
  "dirs 5.0.1",
@@ -842,6 +842,8 @@ dependencies = [
  "toml 0.8.2",
  "ureq",
  "usage-event",
+ "walkdir",
+ "zstd",
 ]
 
 [[package]]
@@ -5812,7 +5814,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokenlens-app"
-version = "0.5.22"
+version = "0.5.23"
 dependencies = [
  "axum",
  "base64 0.22.1",

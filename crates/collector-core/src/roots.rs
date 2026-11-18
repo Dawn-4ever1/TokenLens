@@ -12,6 +12,9 @@ use crate::{QODER_CLIENT, QODER_CN_CLIENT};
 pub struct WatchRoot {
     pub client: String,
     pub path: PathBuf,
+    /// A title-only index update must refresh historical events, not just
+    /// yesterday's and today's token range.
+    pub metadata_only: bool,
 }
 
 fn is_forbidden(path: &Path, client: &str) -> bool {
@@ -20,7 +23,6 @@ fn is_forbidden(path: &Path, client: &str) -> bool {
         && client != QODER_CN_CLIENT
 }
 
-/// Every candidate directory, whether or not it exists.
 pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     let home_text = home.to_string_lossy();
     let mut roots = Vec::new();
@@ -28,6 +30,7 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
         roots.push(WatchRoot {
             client: client.to_owned(),
             path,
+            metadata_only: false,
         });
     };
     for client in ClientId::iter() {
@@ -52,6 +55,9 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     }
     // scanner.rs:3008-3013: the newer ZCode SQLite store (+ -wal/-shm).
     push("zcode", home.join(".zcode").join("cli").join("db"));
+    // Title metadata sources live outside some usage roots and may change on
+    // their own. Keep these roots shared with the actual metadata readers.
+    push(QODER_CLIENT, crate::qoder::projects_root(home));
     push(QODER_CLIENT, crate::qoder::projects_root(home));
     push(
         QODER_CN_CLIENT,
@@ -65,6 +71,7 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     if let Some(parent) = crate::qoder_ide::database_path_cn(home, use_env_roots).parent() {
         push(crate::QODER_CN_CLIENT, parent.to_path_buf());
     }
+    roots.extend(crate::titles::metadata_watch_roots(home, use_env_roots));
     roots.retain(|root| {
         !is_forbidden(&root.path, &root.client)
             // A root equal to (or above) home would mean watching everything.
@@ -85,7 +92,9 @@ pub fn watch_roots(
 ) -> Vec<WatchRoot> {
     let existing = candidate_roots(home, use_env_roots)
         .into_iter()
-        .filter(|root| detected.contains(&root.client) && root.path.is_dir())
+        .filter(|root| {
+            detected.contains(&root.client) && (root.path.is_dir() || root.path.is_file())
+        })
         .collect::<Vec<_>>();
     existing
         .iter()
@@ -102,7 +111,7 @@ pub fn watch_roots(
 
 #[derive(Debug, Clone, Default)]
 pub struct RootMap {
-    roots: Vec<(PathBuf, String)>,
+    roots: Vec<(PathBuf, String, bool)>,
     ignored: Vec<PathBuf>,
 }
 
@@ -124,7 +133,7 @@ impl RootMap {
                 .flat_map(|root| {
                     with_canonical(&root.path)
                         .into_iter()
-                        .map(|path| (path, root.client.clone()))
+                        .map(|path| (path, root.client.clone(), root.metadata_only))
                 })
                 .collect(),
             ignored: ignored
@@ -135,15 +144,17 @@ impl RootMap {
     }
 
     /// The client whose root is the longest prefix of `path`.
-    pub fn client_for(&self, path: &Path) -> Option<&str> {
+    pub fn client_for(&self, path: &Path) -> Option<(&str, bool)> {
         if self.ignored.iter().any(|own| path.starts_with(own)) {
             return None;
         }
         self.roots
             .iter()
-            .filter(|(root, _)| path.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count())
-            .map(|(_, client)| client.as_str())
+            .filter(|(root, _, metadata_only)| {
+                path.starts_with(root) && (!*metadata_only || path == root || root.is_dir())
+            })
+            .max_by_key(|(root, _, _)| root.components().count())
+            .map(|(_, client, metadata_only)| (client.as_str(), *metadata_only))
     }
 }
 
@@ -176,6 +187,27 @@ mod tests {
     }
 
     #[test]
+    fn title_indexes_are_watched_without_watching_the_agent_home() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::create_dir_all(home.path().join(".codex/sessions")).expect("sessions");
+        std::fs::create_dir_all(home.path().join(".zcode/v2")).expect("desktop");
+        std::fs::write(home.path().join(".codex/session_index.jsonl"), "{}\n").expect("index");
+        let roots = watch_roots(home.path(), false, &detected(&["codex", "zcode"]));
+        let map = RootMap::new(&roots, &[]);
+        assert_eq!(
+            map.client_for(&home.path().join(".codex/session_index.jsonl")),
+            Some(("codex", true))
+        );
+        assert_eq!(
+            map.client_for(&home.path().join(".zcode/v2/tasks-index.sqlite-wal")),
+            Some(("zcode", true))
+        );
+        assert_eq!(
+            map.client_for(&home.path().join(".codex/unrelated-state.json")),
+            None
+        );
+    }
+    #[test]
     fn cn_projects_are_watched_only_for_qoder_cn() {
         let home = tempfile::tempdir().expect("home");
         std::fs::create_dir_all(home.path().join(".qoder-cn/projects")).expect("cn");
@@ -189,11 +221,11 @@ mod tests {
         let map = RootMap::new(&roots, &[]);
         assert_eq!(
             map.client_for(&home.path().join(".qoder-cn/projects/a.jsonl")),
-            Some(QODER_CN_CLIENT)
+            Some((QODER_CN_CLIENT, false))
         );
         assert_eq!(
             map.client_for(&home.path().join(".qoder/projects/a.jsonl")),
-            Some(QODER_CLIENT)
+            Some((QODER_CLIENT, false))
         );
         assert!(candidate_roots(home.path(), false).iter().all(|root| {
             root.client != "qoder"
@@ -211,7 +243,10 @@ mod tests {
         let roots = watch_roots(home.path(), false, &detected(&[QODER_CLIENT]));
         let map = RootMap::new(&roots, &[]);
         for sidecar in ["local.db", "local.db-wal", "local.db-shm"] {
-            assert_eq!(map.client_for(&directory.join(sidecar)), Some(QODER_CLIENT));
+            assert_eq!(
+                map.client_for(&directory.join(sidecar)),
+                Some((QODER_CLIENT, false))
+            );
         }
         assert!(
             roots
@@ -243,12 +278,12 @@ mod tests {
         for sidecar in ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"] {
             assert_eq!(
                 map.client_for(&home.path().join(".zcode/cli/db").join(sidecar)),
-                Some("zcode")
+                Some(("zcode", false))
             );
         }
         assert_eq!(
             map.client_for(&home.path().join(".codex/sessions/2026/r.jsonl")),
-            Some("codex")
+            Some(("codex", false))
         );
         assert_eq!(map.client_for(&own.join("outbox.sqlite-wal")), None);
         assert_eq!(map.client_for(&home.path().join(".bashrc")), None);
@@ -275,14 +310,22 @@ mod tests {
             WatchRoot {
                 client: "outer".into(),
                 path: PathBuf::from("/synthetic/a"),
+                metadata_only: false,
             },
             WatchRoot {
                 client: "inner".into(),
                 path: PathBuf::from("/synthetic/a/b"),
+                metadata_only: false,
             },
         ];
         let map = RootMap::new(&roots, &[]);
-        assert_eq!(map.client_for(Path::new("/synthetic/a/b/c")), Some("inner"));
-        assert_eq!(map.client_for(Path::new("/synthetic/a/c")), Some("outer"));
+        assert_eq!(
+            map.client_for(Path::new("/synthetic/a/b/c")),
+            Some(("inner", false))
+        );
+        assert_eq!(
+            map.client_for(Path::new("/synthetic/a/c")),
+            Some(("outer", false))
+        );
     }
 }

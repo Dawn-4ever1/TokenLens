@@ -448,6 +448,7 @@ async fn http_routes_support_head_fixed_urls_and_preserve_authentication() {
     mirror.sync().await.expect("sync");
     let harness = Harness::start_with_mirror(Arc::clone(&mirror)).await;
     let client = reqwest::Client::builder()
+        .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .expect("client");
@@ -457,12 +458,20 @@ async fn http_routes_support_head_fixed_urls_and_preserve_authentication() {
         .send()
         .await
         .expect("manifest");
-    assert_eq!(response.status(), StatusCode::OK);
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.text().await.expect("manifest response");
+    let health = client.get(format!("{}/healthz", harness.base)).send().await;
     assert_eq!(
-        response.headers()["cache-control"],
+        status,
+        StatusCode::OK,
+        "mirror body={body:?} headers={headers:?} health={health:?}"
+    );
+    assert_eq!(
+        headers["cache-control"],
         "public, max-age=60, must-revalidate"
     );
-    let manifest: Value = response.json().await.expect("manifest");
+    let manifest: Value = serde_json::from_str(&body).expect("manifest");
     assert!(
         manifest["platforms"]["windows-x86_64"]["url"]
             .as_str()

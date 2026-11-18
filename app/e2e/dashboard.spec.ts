@@ -366,6 +366,33 @@ test("session drawer opens from a row and closes with Escape", async ({ page }) 
   expect(errors).toEqual([]);
 });
 
+test("session titles lead each row; device names and short IDs stay available", async ({ page }) => {
+  for (const width of [1440, 900]) {
+    await page.setViewportSize({ width, height: 900 });
+    await open(page, { view: "sessions" });
+    await settle(page, "会话");
+    const firstRow = page.locator("tbody tr").first();
+    const primary = firstRow.locator("[data-session-primary]");
+    const title = primary.locator("> div").first();
+    await expect(title).toContainText("示例会话");
+    await expect(title.locator("span").last()).toHaveCSS("font-weight", "500");
+    // The full device column remains at desktop widths, while its name moves
+    // into the secondary line when the narrow layout hides that column.
+    const deviceCell = firstRow.locator("td").nth(1);
+    if (width === 1440) {
+      await expect(deviceCell).toBeVisible();
+      await expect(deviceCell).not.toBeEmpty();
+    } else {
+      await expect(deviceCell).toBeHidden();
+    }
+    await expect(primary).toContainText(width === 1440 ? /MacBook Pro|Mac mini|Windows 台式机|旧笔记本/ : / · Mac| · Windows| · 旧/);
+    await expect(primary.locator(".font-mono")).toHaveText(/^sess-/);
+    await page.locator("tbody tr").first().click();
+    await expect(page.getByRole("dialog")).toContainText("会话");
+    await page.keyboard.press("Escape");
+  }
+});
+
 test("sessions show source titles and can filter by project", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await open(page, { view: "sessions" });

@@ -546,6 +546,55 @@ async fn sessions_expose_titles_and_projects_and_filter_them() {
 }
 
 #[tokio::test]
+async fn session_list_uses_latest_event_title_not_lexicographic_maximum() {
+    let w = world().await;
+    let mut older = event(
+        "rename",
+        "codex",
+        "rename-root",
+        None,
+        "m1",
+        "2027-01-15T03:00:00Z",
+        [10, 2, 3],
+        Some(0.01),
+        "measured",
+        true,
+    );
+    older["sessionTitle"] = json!("Z older title");
+    let mut latest = event(
+        "rename-latest",
+        "codex",
+        "rename-root",
+        None,
+        "m1",
+        "2027-01-15T04:00:00Z",
+        [20, 4, 6],
+        Some(0.01),
+        "measured",
+        true,
+    );
+    latest["sessionTitle"] = json!("A latest title");
+    let (status, _) =
+        w.h.ingest(
+            &w.a.ingest,
+            &envelope(&w.a.id, "rename", "g1", vec![older, latest]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, page) =
+        w.h.get("/api/dashboard/sessions?q=rename-root", Some(&w.a.read))
+            .await;
+    assert_eq!(page["total"], 1);
+    assert_eq!(page["sessions"][0]["title"], "A latest title");
+    assert_eq!(page["sessions"][0]["totalTokens"], 45);
+    let key = page["sessions"][0]["sessionKey"].as_str().unwrap();
+    let (_, detail) =
+        w.h.get(&format!("/api/dashboard/sessions/{key}"), Some(&w.a.read))
+            .await;
+    assert_eq!(detail["session"]["title"], "A latest title");
+    assert_eq!(detail["session"]["totalTokens"], 45);
+}
+#[tokio::test]
 async fn session_detail_lists_turns_without_content() {
     let w = world().await;
     let (_, page) =

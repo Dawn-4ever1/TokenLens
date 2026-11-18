@@ -201,6 +201,7 @@ struct RawRecord {
 #[derive(Default)]
 struct FileContext {
     session_id: Option<String>,
+    session_title: Option<String>,
     pending_turn_start: bool,
 }
 
@@ -308,10 +309,15 @@ pub fn scan_root_for(
     let mut pending = Vec::<PendingTurn>::new();
     let mut ordinals = BTreeMap::<(String, i64, String), u64>::new();
     let mut turn_indices = HashMap::<(String, String), usize>::new();
+    let mut session_titles = BTreeMap::<String, String>::new();
 
     for path in paths {
         let mut context = FileContext::default();
         for record in read_records(&path, edition)? {
+            update_context(&record.value, &mut context);
+            if let (Some(id), Some(title)) = (&context.session_id, &context.session_title) {
+                session_titles.insert(id.clone(), title.clone());
+            }
             match transform_record(&record, &mut context, edition) {
                 Ok(Some(fragment)) => {
                     stats.usage_records += 1;
@@ -379,8 +385,15 @@ pub fn scan_root_for(
             .turn_key
             .clone()
             .map(|key| (fragment.event.session_id.clone(), key));
+        let root_id = fragment
+            .event
+            .parent_session_id
+            .as_deref()
+            .unwrap_or(&fragment.event.session_id);
+        let title = session_titles.get(root_id).cloned();
         match fragment.into_event(&rates, edition) {
-            Ok(Some(event)) => {
+            Ok(Some(mut event)) => {
+                event.session_title = title;
                 if let Some(group) = group {
                     measured_turns.insert(group);
                 }
@@ -543,6 +556,22 @@ fn text(value: Option<&Value>) -> Option<&str> {
 }
 
 fn update_context(value: &Value, context: &mut FileContext) {
+    let kind = value
+        .get("type")
+        .or_else(|| value.get("role"))
+        .and_then(Value::as_str);
+    let title = match kind {
+        Some("ai-title") => value.get("aiTitle").and_then(Value::as_str),
+        Some("session" | "session_meta" | "session-info" | "session_info") => value
+            .get("title")
+            .or_else(|| value.get("sessionTitle"))
+            .or_else(|| value.get("session_title"))
+            .and_then(Value::as_str),
+        _ => None,
+    };
+    if let Some(title) = crate::titles::metadata_text(title) {
+        context.session_title = Some(title);
+    }
     if context.session_id.is_none() {
         context.session_id =
             text(value.get("sessionId").or_else(|| value.get("session_id"))).map(str::to_owned);
@@ -731,7 +760,6 @@ fn transform_record(
     if value.is_null() {
         return Err(());
     }
-    update_context(value, context);
     let kind = value
         .get("type")
         .or_else(|| value.get("role"))
@@ -791,7 +819,7 @@ fn transform_record(
             event_key: String::new(),
             client: edition.client_id().to_owned(),
             session_id,
-            session_title: None,
+            session_title: context.session_title.clone(),
             parent_session_id,
             model_id: model.to_owned(),
             provider_id: Some("qoder".to_owned()),
@@ -946,6 +974,38 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         assert_eq!(keys(fixture_events()), keys(fixture_events()));
+    }
+
+    #[test]
+    fn qoder_stored_titles_follow_the_session_without_reading_message_content() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().join(".qoder/projects/synthetic-project");
+        std::fs::create_dir_all(&root).expect("project");
+        std::fs::write(
+            root.join("synthetic-session.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"sessionId\":\"synthetic-session\",\"title\":\"Stored Qoder title\"}\n",
+                "{\"type\":\"ai-title\",\"aiTitle\":\"Latest generated title\"}\n",
+                "{\"type\":\"unrelated\",\"title\":\"Never use an unrelated title\"}\n",
+                "{\"type\":\"assistant\",\"sessionId\":\"synthetic-session\",\"timestamp\":\"2026-11-01T10:00:00Z\",\"message\":{\"id\":\"synthetic-message\",\"model\":\"qmodel\",\"content\":\"never a title\",\"usage\":{\"input_tokens\":10,\"output_tokens\":2,\"credits\":1}}}\n"
+            ),
+        )
+        .expect("transcript");
+        let events = scan_home(temp.path(), crate::DateRange::all_history())
+            .expect("scan")
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].session_title.as_deref(),
+            Some("Latest generated title")
+        );
+        assert!(
+            !events[0]
+                .to_json_value()
+                .unwrap()
+                .to_string()
+                .contains("never a title")
+        );
     }
 
     #[test]

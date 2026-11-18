@@ -107,7 +107,11 @@ impl Scheduler {
         self.detected = clients;
     }
 
-    pub fn on_change(&mut self, now: Instant, client: &str) {
+    pub fn on_change(&mut self, now: Instant, client: &str, metadata_only: bool) {
+        if metadata_only {
+            self.request_full(now);
+            return;
+        }
         self.pending.insert(client.to_owned());
         self.first_change.get_or_insert(now);
         self.last_change = Some(now);
@@ -254,6 +258,14 @@ mod tests {
     }
 
     #[test]
+    fn title_only_changes_request_a_full_refresh_without_changing_token_scans() {
+        let t0 = Instant::now();
+        let mut scheduler = Scheduler::new(t0, Timing::default());
+        scheduler.on_change(t0, "codex", true);
+        assert!(matches!(scheduler.poll(t0), Some(ScanKind::Full)));
+        assert!(scheduler.pending.is_empty());
+    }
+    #[test]
     fn startup_is_a_full_scan_and_idle_waits_for_the_hourly_full() {
         let t0 = Instant::now();
         let mut scheduler = started(t0);
@@ -280,9 +292,9 @@ mod tests {
     fn every_change_restarts_the_debounce() {
         let t0 = Instant::now();
         let mut scheduler = started(t0);
-        scheduler.on_change(t0 + secs(40.0), "codex");
+        scheduler.on_change(t0 + secs(40.0), "codex", false);
         assert_eq!(scheduler.poll(t0 + secs(41.0)), None);
-        scheduler.on_change(t0 + secs(41.0), "codex");
+        scheduler.on_change(t0 + secs(41.0), "codex", false);
         assert_eq!(scheduler.next_deadline(), Some(t0 + secs(42.5)));
         assert_eq!(scheduler.poll(t0 + secs(42.0)), None);
         assert_eq!(scheduler.poll(t0 + secs(42.5)), Some(triggered(&["codex"])));
@@ -292,7 +304,7 @@ mod tests {
     fn scan_starts_are_at_least_the_cooldown_apart() {
         let t0 = Instant::now();
         let mut scheduler = started(t0);
-        scheduler.on_change(t0 + secs(2.0), "claude");
+        scheduler.on_change(t0 + secs(2.0), "claude", false);
         assert_eq!(scheduler.next_deadline(), Some(t0 + secs(30.0)));
         assert_eq!(scheduler.poll(t0 + secs(10.0)), None);
         assert_eq!(
@@ -308,7 +320,7 @@ mod tests {
         let mut fired = None;
         for second in 40..=80 {
             let now = t0 + secs(f64::from(second));
-            scheduler.on_change(now, "claude");
+            scheduler.on_change(now, "claude", false);
             if let Some(kind) = scheduler.poll(now) {
                 fired = Some((second, kind));
                 break;
@@ -322,7 +334,7 @@ mod tests {
         let t0 = Instant::now();
         let mut scheduler = Scheduler::new(t0, Timing::default());
         assert_eq!(scheduler.poll(t0), Some(ScanKind::Full));
-        scheduler.on_change(t0 + secs(0.5), "zcode");
+        scheduler.on_change(t0 + secs(0.5), "zcode", false);
         assert_eq!(scheduler.next_deadline(), None);
         scheduler.on_finished(t0 + secs(1.0), true);
         assert_eq!(scheduler.poll(t0 + secs(30.0)), Some(triggered(&["zcode"])));
@@ -334,8 +346,8 @@ mod tests {
     fn changes_for_several_clients_are_scanned_together() {
         let t0 = Instant::now();
         let mut scheduler = started(t0);
-        scheduler.on_change(t0 + secs(40.0), "codex");
-        scheduler.on_change(t0 + secs(40.2), "qoder-intl");
+        scheduler.on_change(t0 + secs(40.0), "codex", false);
+        scheduler.on_change(t0 + secs(40.2), "qoder-intl", false);
         assert_eq!(
             scheduler.poll(t0 + secs(42.0)),
             Some(triggered(&["codex", "qoder-intl"]))
@@ -382,7 +394,7 @@ mod tests {
         assert_eq!(waits, [60, 120, 240, 480, 900, 900]);
         assert_eq!(scheduler.poll(now), Some(ScanKind::Full));
         scheduler.on_finished(now, true);
-        scheduler.on_change(now + secs(40.0), "codex");
+        scheduler.on_change(now + secs(40.0), "codex", false);
         assert_eq!(scheduler.next_deadline(), Some(now + secs(41.5)));
     }
 
@@ -390,9 +402,9 @@ mod tests {
     fn a_failed_triggered_scan_is_requeued_without_losing_clients() {
         let t0 = Instant::now();
         let mut scheduler = started(t0);
-        scheduler.on_change(t0 + secs(40.0), "codex");
+        scheduler.on_change(t0 + secs(40.0), "codex", false);
         assert_eq!(scheduler.poll(t0 + secs(42.0)), Some(triggered(&["codex"])));
-        scheduler.on_change(t0 + secs(42.5), "claude");
+        scheduler.on_change(t0 + secs(42.5), "claude", false);
         scheduler.on_finished(t0 + secs(43.0), false);
         assert_eq!(scheduler.poll(t0 + secs(100.0)), None);
         assert_eq!(

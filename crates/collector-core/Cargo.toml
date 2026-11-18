@@ -1,6 +1,6 @@
 [package]
 name = "collector-core"
-version = "0.5.22"
+version = "0.5.23"
 edition.workspace = true
 license.workspace = true
 
@@ -20,6 +20,8 @@ tokio.workspace = true
 tokscale-core.workspace = true
 toml.workspace = true
 usage-event = { path = "../usage-event" }
+walkdir = "2.5"
+zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

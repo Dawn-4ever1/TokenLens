@@ -75,7 +75,7 @@ pub struct WatchOptions {
 }
 
 pub enum Msg {
-    Change(String),
+    Change(String, bool),
     WatchError,
     Done {
         kind: ScanKind,
@@ -244,8 +244,8 @@ fn build_watcher(
                     .iter()
                     .filter_map(|path| map.client_for(path))
                     .collect::<BTreeSet<_>>();
-                for client in clients {
-                    let _ = sender.send(Msg::Change(client.to_owned()));
+                for (client, metadata_only) in clients {
+                    let _ = sender.send(Msg::Change(client.to_owned(), metadata_only));
                 }
             }
             Err(_) => {
@@ -256,7 +256,18 @@ fn build_watcher(
     .map_err(|_| ())?;
     for root in roots {
         watcher
-            .watch(&root.path, RecursiveMode::Recursive)
+            .watch(
+                if root.path.is_file() {
+                    root.path.parent().unwrap_or(&root.path)
+                } else {
+                    &root.path
+                },
+                if root.path.is_file() {
+                    RecursiveMode::NonRecursive
+                } else {
+                    RecursiveMode::Recursive
+                },
+            )
             .map_err(|_| ())?;
     }
     Ok(watcher)
@@ -394,10 +405,10 @@ pub fn run(
             None => receiver.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match message {
-            Ok(Msg::Change(client)) => {
+            Ok(Msg::Change(client, metadata_only)) => {
                 summary.change_events += 1;
                 if !stopping {
-                    scheduler.on_change(Instant::now(), &client);
+                    scheduler.on_change(Instant::now(), &client, metadata_only);
                 }
             }
             Ok(Msg::WatchError) => {

@@ -1,11 +1,11 @@
 import { Check, ChevronDown, Folder, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { ClientName, LoadError, ModelName, Num } from "@/components/common";
+import { IdentityIcon, LoadError, ModelName, Num } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, Tip, cn, inputClass } from "@/components/ui";
 import { dashboardGet, errorMessage } from "@/lib/api";
 import { useData, useDashboard } from "@/lib/data";
 import { dateTime, exact, relativeTime, shortId, usd } from "@/lib/format";
-import { NO_PROJECT_KEY } from "@/lib/labels";
+import { clientColor, clientIcon, clientLabel, NO_PROJECT_KEY } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { activeFilterCount, rangeLabel, resolveRange } from "@/lib/range";
 import type { SessionPage, SessionSort, SessionSummary } from "@/lib/types";
@@ -158,7 +158,7 @@ function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; time
       <table className="w-full text-[13px]">
         <thead className="border-b border-line">
           <tr>
-            <th className={cn(th, "pl-5")}>会话</th>
+            <th className={cn(th, "min-w-[220px] pl-5")}>会话</th>
             <th className={cn(th, "hidden min-[1200px]:table-cell")}>设备</th>
             <th className={th}>模型</th>
             <th className={cn(th, "text-right")}>总 tokens</th>
@@ -183,21 +183,25 @@ function SessionTable({ rows, timeZone, onOpen }: { rows: SessionSummary[]; time
               }}
               className="cursor-default border-b border-line/60 last:border-0 hover:bg-surface-2/60 focus-visible:bg-surface-2/60"
             >
-              <td className={cn(td, "max-w-[280px] pl-5")}>
-                <div className="flex min-w-0 items-center gap-1.5">
-                  <ClientName id={session.client} className="font-medium text-ink" />
-                  {session.title ? (
-                    <Tip content={session.title}>
-                      <span className="min-w-0 truncate font-medium text-ink">{session.title}</span>
-                    </Tip>
-                  ) : null}
-                </div>
-                <div className="mt-0.5 flex min-w-0 items-center gap-1.5 text-[11px] text-ink-3">
-                  <Tip content={`会话 ID：${session.sessionId}`}>
-                    <span className="truncate font-mono">{shortId(session.sessionId, 10)}</span>
+              <td data-session-primary className={cn(td, "max-w-[320px] pl-5")}>
+                <Tip content={session.title || clientLabel(session.client)}>
+                  <div className="flex min-w-0 items-center gap-2 font-medium text-ink">
+                    <IdentityIcon icon={clientIcon(session.client)} color={clientColor(session.client)} label={clientLabel(session.client)} className="h-4 w-4" />
+                    <span className="min-w-0 truncate">{session.title || clientLabel(session.client)}</span>
+                  </div>
+                </Tip>
+                <div className="mt-1 flex min-w-0 items-center gap-x-1.5 text-[11px] leading-4 text-ink-3">
+                  <Tip content={`${clientLabel(session.client)} · ${session.deviceName} · ${session.models.join("、") || "未知模型"} · 会话 ${session.sessionId}`}>
+                    <span className="min-w-0 truncate">
+                      {session.projectLabel && session.projectLabel !== NO_PROJECT_KEY ? <span>{session.projectLabel} · </span> : null}
+                      {session.models.length ? <ModelName id={session.models[0]!} className="inline-flex" /> : clientLabel(session.client)}
+                      {session.models.length > 1 ? <span> +{session.models.length - 1}</span> : null}
+                      <span className="min-[1200px]:hidden"> · {session.deviceName}</span>
+                      <span> · </span>
+                      <span className="font-mono">{shortId(session.sessionId, 10)}</span>
+                    </span>
                   </Tip>
-                  {session.projectLabel && session.projectLabel !== NO_PROJECT_KEY ? <span className="truncate">· {session.projectLabel}</span> : null}
-                  {session.subagentCount > 0 ? <Badge className="py-0">含 {session.subagentCount} 个子代理</Badge> : null}
+                  {session.subagentCount > 0 ? <Badge className="shrink-0 py-0">含 {session.subagentCount} 个子代理</Badge> : null}
                 </div>
               </td>
               <td className={cn(td, "hidden truncate text-ink-2 min-[1200px]:table-cell")}>{session.deviceName}</td>
