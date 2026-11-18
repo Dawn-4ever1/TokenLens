@@ -60,14 +60,15 @@ describe("filterQuery", () => {
     const query = filterQuery({ ...DEFAULT_FILTERS, preset: "all", clients: ["codex", "claude"] }, "UTC");
     expect(query).toEqual({ from: undefined, to: undefined, devices: undefined, deviceScope: "all", clients: "codex,claude", models: undefined, projects: undefined });
     expect(activeFilterCount({ ...DEFAULT_FILTERS, clients: ["a"], models: ["b", "c"] })).toBe(3);
-    for (const deviceScope of ["current", "other"] as const) {
-      expect(filterQuery({ ...DEFAULT_FILTERS, deviceScope }, "UTC").deviceScope).toBe(deviceScope);
-      expect(activeFilterCount({ ...DEFAULT_FILTERS, deviceScope })).toBe(1);
-    }
+    expect(filterQuery({ ...DEFAULT_FILTERS, deviceScope: "current" }, "UTC").deviceScope).toBe("current");
+    expect(activeFilterCount({ ...DEFAULT_FILTERS, deviceScope: "current" })).toBe(1);
+    expect(filterQuery({ ...DEFAULT_FILTERS, deviceScope: "all", devices: ["dev_work"] }, "UTC").devices).toBe("dev_work");
+    expect(activeFilterCount({ ...DEFAULT_FILTERS, deviceScope: "all", devices: ["dev_work"] })).toBe(1);
   });
 
   it("restores a valid saved scope and falls back safely", () => {
-    expect(normalizeFilters({ preset: "month", deviceScope: "other" })?.deviceScope).toBe("other");
+    expect(normalizeFilters({ preset: "month", deviceScope: "current" })?.deviceScope).toBe("current");
+    expect(normalizeFilters({ preset: "month", deviceScope: "other" })?.deviceScope).toBe("all");
     expect(normalizeFilters({ preset: "month", deviceScope: "foreign" })?.deviceScope).toBe("all");
   });
 });

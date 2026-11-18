@@ -4,7 +4,7 @@ import { ClientName, ModelName } from "@/components/common";
 import { compact, relativeTime } from "@/lib/format";
 import { useDashboard, useData } from "@/lib/data";
 import { clientLabel, modelLabel, NO_PROJECT_KEY } from "@/lib/labels";
-import { DEVICE_SCOPES, RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type DeviceScope, type Filters, type RangePreset } from "@/lib/range";
+import { RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
 import { useStatus } from "@/lib/status";
 import type { FilterOption, FilterOptions, Summary } from "@/lib/types";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, Segmented, Tip, cn, inputClass } from "./ui";
@@ -90,49 +90,49 @@ function CustomDates({ filters, onChange }: { filters: Filters; onChange: (patch
 }
 
 export function DeviceScopePicker() {
-  const { filters, setFilters } = useData();
+  const { filters, setFilters, options } = useData();
   const { status } = useStatus();
   const [open, setOpen] = useState(false);
   const local = status?.mode === "local";
-  const selectedKey = local ? "current" : filters.deviceScope;
-  const selected = DEVICE_SCOPES.find(({ key }) => key === selectedKey) ?? DEVICE_SCOPES[0]!;
-  const choose = (deviceScope: DeviceScope) => {
-    if (local && deviceScope !== "current") return;
-    setFilters((previous) => ({ ...previous, deviceScope }));
+  const devices = options?.devices ?? [];
+  const selectedDevice = local ? devices.find((device) => device.isCurrent) ?? devices[0] : filters.devices.length === 1 ? devices.find((device) => device.key === filters.devices[0]) : undefined;
+  const selectedLabel = selectedDevice ? `${selectedDevice.label}${selectedDevice.isCurrent ? "（本机）" : ""}` : "全账号";
+  const choose = (deviceKey: string | null) => {
+    setFilters((previous) => ({
+      ...previous,
+      deviceScope: deviceKey ? "all" : local ? "current" : "all",
+      devices: deviceKey ? [deviceKey] : [],
+    }));
     setOpen(false);
   };
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
-        <Button aria-label={`设备范围：${selected.label}`} aria-haspopup="menu" className="min-w-[108px] justify-start">
+        <Button aria-label={`设备范围：${selectedLabel}`} aria-haspopup="menu" className="max-w-48 min-w-[108px] justify-start">
           <MonitorSmartphone className="h-3.5 w-3.5 shrink-0" aria-hidden />
-          <span>{selected.label}</span>
-          <ChevronDown className="ml-auto h-3.5 w-3.5 text-ink-3" aria-hidden />
+          <span className="truncate">{selectedLabel}</span>
+          <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-ink-3" aria-hidden />
         </Button>
       </PopoverTrigger>
       <PopoverContent className="w-64 p-1.5" align="start">
-        <div role="menu" aria-label="设备范围" className="space-y-0.5">
-          {DEVICE_SCOPES.map((scope) => {
-            const disabled = local && scope.key !== "current";
-            const hint = disabled ? "登录并连接云端后可选" : scope.hint;
+        <div role="menu" aria-label="设备范围" className="max-h-[60vh] space-y-0.5 overflow-y-auto" aria-busy={!options}>
+          {!local && (
+            <button type="button" role="menuitemradio" aria-checked={!selectedDevice} onClick={() => choose(null)} className="flex h-8 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left text-[13px] text-ink hover:bg-surface-2">
+              <span className="min-w-0 flex-1">全账号</span>
+              {!selectedDevice && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
+            </button>
+          )}
+          {devices.map((device) => {
+            const label = `${device.label}${device.isCurrent ? "（本机）" : ""}`;
+            const checked = selectedDevice?.key === device.key;
             return (
-              <button
-                type="button"
-                role="menuitemradio"
-                aria-checked={scope.key === selectedKey}
-                disabled={disabled}
-                key={scope.key}
-                onClick={() => choose(scope.key)}
-                className="flex w-full items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-left hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="block text-[13px] font-medium text-ink">{scope.label}</span>
-                  <span className="mt-0.5 block text-[11px] leading-4 text-ink-3">{hint}</span>
-                </span>
-                {scope.key === selectedKey && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
+              <button type="button" role="menuitemradio" aria-checked={checked} key={device.key} onClick={() => choose(device.key)} className="flex h-8 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left text-[13px] text-ink hover:bg-surface-2">
+                <span className="min-w-0 flex-1 truncate">{label}</span>
+                {checked && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
               </button>
             );
           })}
+          {!options && <p className="px-2.5 py-2 text-center text-xs text-ink-3">正在读取设备…</p>}
         </div>
       </PopoverContent>
     </Popover>
@@ -308,17 +308,17 @@ export function ActiveFilters() {
       return { section, value, name };
     }),
   );
-  const scope = DEVICE_SCOPES.find(({ key }) => key === filters.deviceScope);
+  const scopeLabel = filters.deviceScope === "current" ? "本机" : "全账号";
   return (
     <div role="group" aria-label="生效的筛选" className="flex flex-wrap items-center gap-1.5 border-b border-line/70 bg-surface-2/40 px-6 py-2 text-xs">
       <span className="text-ink-3">只统计</span>
       {!local && filters.deviceScope !== "all" && (
         <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 py-0.5 pl-2.5 pr-1 text-ink">
           <span className="shrink-0 text-ink-3">设备范围</span>
-          <span className="font-medium">{scope?.label}</span>
+          <span className="font-medium">{scopeLabel}</span>
           <button
             type="button"
-            aria-label={`移除设备范围：${scope?.label ?? filters.deviceScope}`}
+            aria-label={`移除设备范围：${scopeLabel}`}
             onClick={() => setFilters((previous) => ({ ...previous, deviceScope: "all" }))}
             className="rounded-full p-0.5 text-ink-3 hover:bg-primary/15 hover:text-ink"
           >

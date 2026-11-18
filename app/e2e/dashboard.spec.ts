@@ -386,7 +386,7 @@ test("session titles lead each row; device names and short IDs stay available", 
       await expect(deviceCell).toBeHidden();
     }
     await expect(primary).toContainText(width === 1440 ? /MacBook Pro|Mac mini|Windows 台式机|旧笔记本/ : / · Mac| · Windows| · 旧/);
-    await expect(primary.locator(".font-mono")).toHaveText(/^sess-/);
+    await expect(primary.locator(".font-mono")).toHaveText(/^(sess|rollout)-/);
     await page.locator("tbody tr").first().click();
     await expect(page.getByRole("dialog")).toContainText("会话");
     await page.keyboard.press("Escape");
@@ -838,7 +838,7 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
   await expect(account).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
@@ -983,7 +983,8 @@ test("GitHub sign-in against an older server stays signed in without profile fie
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
-  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await settle(page, "总览");
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

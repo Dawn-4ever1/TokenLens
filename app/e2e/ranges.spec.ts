@@ -43,7 +43,7 @@ test("five calendar ranges update the figures, including custom dates", async ({
   expect(errors).toEqual([]);
 });
 
-test("device scope sits beside dates and really narrows every page", async ({ page }) => {
+test("device picker lists every device without descriptions and filters every page", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await openOverview(page, 1440);
@@ -57,19 +57,19 @@ test("device scope sits beside dates and really narrows every page", async ({ pa
   const all = await summaryCard(page).locator(".num-fit").innerText();
   await scope.click();
   await expect(page.getByRole("menuitemradio").allTextContents()).resolves.toEqual([
-    "全账号同一账号下的全部设备，包含本机",
-    "本机只统计当前这台电脑",
-    "其他设备同一账号下除本机外的设备",
+    "全账号", "MacBook Pro（本机）", "Mac mini", "Windows 台式机", "旧笔记本",
   ]);
-  await page.getByRole("menuitemradio", { name: /^本机/ }).click();
-  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("本机");
+  const menu = page.getByRole("menu", { name: "设备范围", exact: true });
+  expect(await menu.locator("p").count()).toBe(0);
+  await page.getByRole("menuitemradio", { name: "MacBook Pro（本机）", exact: true }).click();
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("MacBook Pro");
   const currentNumber = summaryCard(page).locator(".num-fit");
   await expect(currentNumber).not.toHaveText(all);
   const current = await currentNumber.innerText();
-  await page.getByRole("button", { name: "设备范围：本机", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: /^其他设备/ }).click();
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("其他设备");
+  await page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "Mac mini", exact: true }).click();
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Mac mini");
   const otherNumber = summaryCard(page).locator(".num-fit");
   await expect(otherNumber).not.toHaveText(current);
   const other = await otherNumber.innerText();
@@ -77,27 +77,30 @@ test("device scope sits beside dates and really narrows every page", async ({ pa
   await page.getByRole("button", { name: "会话", exact: true }).click();
   await expect(page.locator("header h1")).toHaveText("会话");
   await expect(page.locator(".skeleton")).toHaveCount(0);
-  await expect(page.locator("tbody tr").first()).not.toContainText("MacBook Pro");
+  const rows = page.locator("tbody tr");
+  await expect(rows.first()).toBeVisible();
+  for (const row of await rows.all()) await expect(row).toContainText("Mac mini");
   await page.getByRole("button", { name: "设备", exact: true }).click();
   await expect(page.locator("header h1")).toHaveText("设备");
   await expect(page.locator(".skeleton")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "设备范围：其他设备", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: /^全账号/ }).click();
+  await page.getByRole("button", { name: "设备范围：Mac mini", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: "全账号", exact: true }).click();
   await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "设备范围：全账号", exact: true }).click();
-  await page.getByRole("menuitemradio", { name: /^本机/ }).click();
+  await page.getByRole("menuitemradio", { name: "MacBook Pro（本机）", exact: true }).click();
   await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("header h1")).toHaveText("设备");
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Codex/ }).click();
   await page.getByRole("button", { name: "清除全部", exact: true }).click();
   await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
-  await page.reload();
-  await expect(page.locator("header h1")).toHaveText("设备");
-  await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -112,11 +115,10 @@ test("local use still has a scope picker, without cloud data", async ({ page }) 
   await expect(page.locator(".skeleton")).toHaveCount(0);
   await page.getByRole("button", { name: "设备", exact: true }).click();
   await expect(page.locator(".skeleton")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "设备范围：本机", exact: true }).click();
-  await expect(page.getByRole("menuitemradio", { name: /^全账号/ })).toBeDisabled();
-  await expect(page.getByRole("menuitemradio", { name: /^其他设备/ })).toBeDisabled();
-  await expect(page.getByRole("menuitemradio", { name: /^本机/ })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true }).click();
+  await expect(page.getByRole("menuitemradio").allTextContents()).resolves.toEqual(["MacBook Pro（本机）"]);
+  await expect(page.getByRole("menuitemradio", { name: "MacBook Pro（本机）", exact: true })).toBeEnabled();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
@@ -124,7 +126,7 @@ test("local use still has a scope picker, without cloud data", async ({ page }) 
   await page.getByRole("checkbox", { name: /Codex/ }).click();
   await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("2");
   await page.getByRole("button", { name: "清除全部", exact: true }).click();
-  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("1");
 });
 

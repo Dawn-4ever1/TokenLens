@@ -1,11 +1,5 @@
 export type RangePreset = "today" | "week" | "month" | "all" | "custom";
-export type DeviceScope = "all" | "current" | "other";
-
-export const DEVICE_SCOPES: { key: DeviceScope; label: string; hint: string }[] = [
-  { key: "all", label: "全账号", hint: "同一账号下的全部设备，包含本机" },
-  { key: "current", label: "本机", hint: "只统计当前这台电脑" },
-  { key: "other", label: "其他设备", hint: "同一账号下除本机外的设备" },
-];
+export type DeviceScope = "all" | "current";
 
 export const RANGE_PRESETS: { key: RangePreset; label: string }[] = [
   { key: "today", label: "日" },
@@ -91,8 +85,8 @@ export function normalizeFilters(value: unknown): Filters | null {
     preset: normalizePreset(candidate.preset),
     customFrom: typeof candidate.customFrom === "string" ? candidate.customFrom : undefined,
     customTo: typeof candidate.customTo === "string" ? candidate.customTo : undefined,
-    deviceScope: DEVICE_SCOPES.some(({ key }) => key === candidate.deviceScope)
-      ? candidate.deviceScope as DeviceScope
+    deviceScope: candidate.deviceScope === "all" || candidate.deviceScope === "current"
+      ? candidate.deviceScope
       : DEFAULT_FILTERS.deviceScope,
   };
   for (const key of ["devices", "clients", "models", "projects"] as const) {
