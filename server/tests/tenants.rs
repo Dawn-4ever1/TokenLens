@@ -196,6 +196,20 @@ async fn each_tenant_sees_only_its_own_figures() {
     assert_eq!(keys(&filters["clients"], "key"), ["claude"]);
     assert_eq!(filters["firstEventDate"], "2027-01-15");
 
+    // Relative scopes are resolved from the authenticated caller on the server.
+    // They can neither select nor reveal another account's devices.
+    let current = read(h, "/api/dashboard/summary?deviceScope=current", &a.read).await;
+    assert_eq!(current["totalTokens"], 120);
+    assert_eq!(keys(&current["byDevice"], "key"), [a.id.as_str()]);
+    let other = read(h, "/api/dashboard/summary?deviceScope=other", &a.read).await;
+    assert_eq!(other["totalTokens"], 0);
+    let current = read(h, "/api/dashboard/summary?deviceScope=current", &b.read).await;
+    assert_eq!(current["totalTokens"], 7000);
+    assert_eq!(keys(&current["byDevice"], "key"), [b.id.as_str()]);
+    let other = read(h, "/api/dashboard/summary?deviceScope=other", &b.read).await;
+    assert_eq!(other["totalTokens"], 0);
+    assert_eq!(filters["devices"][0]["isCurrent"], true);
+
     let health_a = read(h, "/api/dashboard/health", &a.read).await;
     let health_b = read(h, "/api/dashboard/health", &b.read).await;
     assert_eq!(

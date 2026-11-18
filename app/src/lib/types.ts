@@ -227,6 +227,7 @@ export interface FilterOption {
   key: string;
   label: string;
   totalTokens: number;
+  isCurrent?: boolean;
 }
 
 export interface FilterOptions {

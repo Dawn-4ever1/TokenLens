@@ -1,10 +1,11 @@
-import { CalendarRange, Check, ListFilter, RefreshCw, X } from "lucide-react";
+import { CalendarRange, Check, ChevronDown, ListFilter, MonitorSmartphone, RefreshCw, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { ClientName, ModelName } from "@/components/common";
 import { compact, relativeTime } from "@/lib/format";
 import { useDashboard, useData } from "@/lib/data";
 import { clientLabel, modelLabel, NO_PROJECT_KEY } from "@/lib/labels";
-import { RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
+import { DEVICE_SCOPES, RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type DeviceScope, type Filters, type RangePreset } from "@/lib/range";
+import { useStatus } from "@/lib/status";
 import type { FilterOption, FilterOptions, Summary } from "@/lib/types";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, Segmented, Tip, cn, inputClass } from "./ui";
 
@@ -88,8 +89,60 @@ function CustomDates({ filters, onChange }: { filters: Filters; onChange: (patch
   );
 }
 
+export function DeviceScopePicker() {
+  const { filters, setFilters } = useData();
+  const { status } = useStatus();
+  const [open, setOpen] = useState(false);
+  const local = status?.mode === "local";
+  const selectedKey = local ? "current" : filters.deviceScope;
+  const selected = DEVICE_SCOPES.find(({ key }) => key === selectedKey) ?? DEVICE_SCOPES[0]!;
+  const choose = (deviceScope: DeviceScope) => {
+    if (local && deviceScope !== "current") return;
+    setFilters((previous) => ({ ...previous, deviceScope }));
+    setOpen(false);
+  };
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button aria-label={`设备范围：${selected.label}`} aria-haspopup="menu" className="min-w-[108px] justify-start">
+          <MonitorSmartphone className="h-3.5 w-3.5 shrink-0" aria-hidden />
+          <span>{selected.label}</span>
+          <ChevronDown className="ml-auto h-3.5 w-3.5 text-ink-3" aria-hidden />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-64 p-1.5" align="start">
+        <div role="menu" aria-label="设备范围" className="space-y-0.5">
+          {DEVICE_SCOPES.map((scope) => {
+            const disabled = local && scope.key !== "current";
+            const hint = disabled ? "登录并连接云端后可选" : scope.hint;
+            return (
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={scope.key === selectedKey}
+                disabled={disabled}
+                key={scope.key}
+                onClick={() => choose(scope.key)}
+                className="flex w-full items-center gap-2.5 rounded-[var(--radius-control)] px-2.5 py-2 text-left hover:bg-surface-2 disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[13px] font-medium text-ink">{scope.label}</span>
+                  <span className="mt-0.5 block text-[11px] leading-4 text-ink-3">{hint}</span>
+                </span>
+                {scope.key === selectedKey && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function FilterMenu() {
   const { filters, setFilters, options, timeZone } = useData();
+  const { status } = useStatus();
+  const local = status?.mode === "local";
   const count = activeFilterCount(filters);
   return (
     <Popover>
@@ -107,7 +160,7 @@ export function FilterMenu() {
             variant="ghost"
             size="sm"
             disabled={count === 0}
-            onClick={() => setFilters((previous) => ({ ...previous, devices: [], clients: [], models: [], projects: [] }))}
+            onClick={() => setFilters((previous) => ({ ...previous, devices: [], deviceScope: local ? "current" : "all", clients: [], models: [], projects: [] }))}
           >
             清除全部
           </Button>
@@ -236,7 +289,10 @@ function FilterSection({
  */
 export function ActiveFilters() {
   const { filters, setFilters, options } = useData();
-  if (activeFilterCount(filters) === 0) return null;
+  const { status } = useStatus();
+  const local = status?.mode === "local";
+  if (filters.devices.length + filters.clients.length + filters.models.length + filters.projects.length
+    + (!local && filters.deviceScope !== "all" ? 1 : 0) === 0) return null;
   const chips = SECTIONS.flatMap((section) =>
     filters[section.key].map((value) => {
       const option = options?.[section.key].find((item) => item.key === value);
@@ -252,9 +308,24 @@ export function ActiveFilters() {
       return { section, value, name };
     }),
   );
+  const scope = DEVICE_SCOPES.find(({ key }) => key === filters.deviceScope);
   return (
     <div role="group" aria-label="生效的筛选" className="flex flex-wrap items-center gap-1.5 border-b border-line/70 bg-surface-2/40 px-6 py-2 text-xs">
       <span className="text-ink-3">只统计</span>
+      {!local && filters.deviceScope !== "all" && (
+        <span className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-primary/10 py-0.5 pl-2.5 pr-1 text-ink">
+          <span className="shrink-0 text-ink-3">设备范围</span>
+          <span className="font-medium">{scope?.label}</span>
+          <button
+            type="button"
+            aria-label={`移除设备范围：${scope?.label ?? filters.deviceScope}`}
+            onClick={() => setFilters((previous) => ({ ...previous, deviceScope: "all" }))}
+            className="rounded-full p-0.5 text-ink-3 hover:bg-primary/15 hover:text-ink"
+          >
+            <X className="h-3 w-3" aria-hidden />
+          </button>
+        </span>
+      )}
       {chips.map(({ section, value, name }) => (
         <span key={`${section.key}:${value}`} className="inline-flex max-w-60 items-center gap-1 rounded-full border border-primary/30 bg-primary/10 py-0.5 pl-2.5 pr-1 text-ink">
           <span className="shrink-0 text-ink-3">{section.label}</span>
@@ -272,7 +343,7 @@ export function ActiveFilters() {
       <button
         type="button"
         className="ml-1 text-primary hover:underline"
-        onClick={() => setFilters((previous) => ({ ...previous, devices: [], clients: [], models: [], projects: [] }))}
+        onClick={() => setFilters((previous) => ({ ...previous, devices: [], deviceScope: local ? "current" : "all", clients: [], models: [], projects: [] }))}
       >
         清除筛选
       </button>

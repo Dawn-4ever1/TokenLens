@@ -54,7 +54,15 @@ type QueryResult<T> = Result<T, QueryError>;
 
 pub type Query = HashMap<String, String>;
 
-pub const FILTER_KEYS: [&str; 6] = ["from", "to", "devices", "clients", "models", "projects"];
+pub const FILTER_KEYS: [&str; 7] = [
+    "from",
+    "to",
+    "devices",
+    "deviceScope",
+    "clients",
+    "models",
+    "projects",
+];
 
 /// Unknown or repeated keys are refused, so typos never silently widen a query.
 pub fn parse_query(raw: Option<&str>, extra: &[&str]) -> QueryResult<Query> {
@@ -141,11 +149,20 @@ pub fn choice<T: Copy>(
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceScope {
+    #[default]
+    All,
+    Current,
+    Other,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct Filters {
     pub from: Option<NaiveDate>,
     pub to: Option<NaiveDate>,
     pub devices: Vec<String>,
+    pub device_scope: DeviceScope,
     pub clients: Vec<String>,
     pub models: Vec<String>,
     pub projects: Vec<String>,
@@ -157,6 +174,16 @@ impl Filters {
             from: date(query, "from")?,
             to: date(query, "to")?,
             devices: list(query, "devices")?,
+            device_scope: choice(
+                query,
+                "deviceScope",
+                DeviceScope::All,
+                &[
+                    ("all", DeviceScope::All),
+                    ("current", DeviceScope::Current),
+                    ("other", DeviceScope::Other),
+                ],
+            )?,
             clients: list(query, "clients")?,
             models: list(query, "models")?,
             projects: list(query, "projects")?,
@@ -225,9 +252,25 @@ impl Scope {
     }
 }
 
-fn filter_clause(filters: &Filters, tz: Tz, tenant_id: &str) -> (String, Vec<SqlValue>) {
+fn filter_clause(
+    filters: &Filters,
+    tz: Tz,
+    tenant_id: &str,
+    caller: &str,
+) -> (String, Vec<SqlValue>) {
     let mut clause = String::from("WHERE tenant_id = ?");
     let mut values = vec![SqlValue::Text(tenant_id.to_owned())];
+    match filters.device_scope {
+        DeviceScope::All => {}
+        DeviceScope::Current => {
+            clause.push_str(" AND device_id = ?");
+            values.push(SqlValue::Text(caller.to_owned()));
+        }
+        DeviceScope::Other => {
+            clause.push_str(" AND device_id != ?");
+            values.push(SqlValue::Text(caller.to_owned()));
+        }
+    }
     if let Some(from) = filters.from {
         clause.push_str(" AND ts >= ?");
         values.push(SqlValue::Integer(day_start_ms(tz, from)));
@@ -261,9 +304,10 @@ fn scope(
     tz: Tz,
     filters: &Filters,
     tenant_id: &str,
+    caller: &str,
     now: i64,
 ) -> QueryResult<Scope> {
-    let (clause, values) = filter_clause(filters, tz, tenant_id);
+    let (clause, values) = filter_clause(filters, tz, tenant_id, caller);
     let today = local_date(tz, now).ok_or(QueryError::Bad)?;
     let (from, to) = if let (Some(from), Some(to)) = (filters.from, filters.to) {
         (from, to)
@@ -777,10 +821,11 @@ pub fn summary(
     tz: Tz,
     filters: &Filters,
     tenant_id: &str,
+    caller: &str,
     pricing: Option<PricingInfo>,
     now: i64,
 ) -> QueryResult<Summary> {
-    let scope = scope(conn, tz, filters, tenant_id, now)?;
+    let scope = scope(conn, tz, filters, tenant_id, caller, now)?;
     let names = device_names(conn, tenant_id)?;
     let overall = totals(conn, &scope)?;
     let (session_count, turn_count) = conn.query_row(
@@ -802,7 +847,11 @@ pub fn summary(
     let mut caveats = data_caveats(&overall, pricing.as_ref());
     let devices = device_statuses(conn, tenant_id, now, None)?
         .into_iter()
-        .filter(|device| filters.devices.is_empty() || filters.devices.contains(&device.device_id))
+        .filter(|device| {
+            (filters.devices.is_empty() || filters.devices.contains(&device.device_id))
+                && (filters.device_scope != DeviceScope::Current || device.device_id == caller)
+                && (filters.device_scope != DeviceScope::Other || device.device_id != caller)
+        })
         .collect::<Vec<_>>();
     caveats.extend(device_caveats(&devices));
     Ok(Summary {
@@ -942,6 +991,7 @@ pub fn timeseries(
     filters: &Filters,
     request: SeriesQuery,
     tenant_id: &str,
+    caller: &str,
     now: i64,
 ) -> QueryResult<Timeseries> {
     let SeriesQuery {
@@ -949,7 +999,7 @@ pub fn timeseries(
         group_by,
         limit,
     } = request;
-    let scope = scope(conn, tz, filters, tenant_id, now)?;
+    let scope = scope(conn, tz, filters, tenant_id, caller, now)?;
     let labels = bucket.labels(scope.from, scope.to)?;
     let index = labels
         .iter()
@@ -1101,9 +1151,10 @@ pub fn heatmap(
     filters: &Filters,
     kind: HeatmapKind,
     tenant_id: &str,
+    caller: &str,
     now: i64,
 ) -> QueryResult<Heatmap> {
-    let scope = scope(conn, tz, filters, tenant_id, now)?;
+    let scope = scope(conn, tz, filters, tenant_id, caller, now)?;
     let slots = slots(conn, &scope, "''")?;
     let (days, cells, max) = match kind {
         HeatmapKind::Calendar => {
@@ -1270,9 +1321,10 @@ pub fn sessions(
     filters: &Filters,
     request: &SessionQuery,
     tenant_id: &str,
+    caller: &str,
     now: i64,
 ) -> QueryResult<SessionPage> {
-    let scope = scope(conn, tz, filters, tenant_id, now)?;
+    let scope = scope(conn, tz, filters, tenant_id, caller, now)?;
     let names = device_names(conn, tenant_id)?;
     let mut values = scope.values.clone();
     let having = match &request.search {
@@ -1831,8 +1883,15 @@ pub fn devices(
     caller: &str,
     now: i64,
 ) -> QueryResult<Devices> {
-    let devices = device_statuses(conn, tenant_id, now, Some(caller))?;
-    let scope = scope(conn, tz, filters, tenant_id, now)?;
+    let devices = device_statuses(conn, tenant_id, now, Some(caller))?
+        .into_iter()
+        .filter(|device| {
+            (filters.devices.is_empty() || filters.devices.contains(&device.device_id))
+                && (filters.device_scope != DeviceScope::Current || device.device_id == caller)
+                && (filters.device_scope != DeviceScope::Other || device.device_id != caller)
+        })
+        .collect::<Vec<_>>();
+    let scope = scope(conn, tz, filters, tenant_id, caller, now)?;
     let mut statement = conn.prepare(&format!(
         "SELECT device_id, client, {TOTALS_SQL} FROM counted_events {} GROUP BY 1, 2",
         scope.clause
@@ -1898,6 +1957,8 @@ pub struct FilterOption {
     pub key: String,
     pub label: String,
     pub total_tokens: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_current: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1913,7 +1974,12 @@ pub struct FilterOptions {
 }
 
 /// Every value ever seen, for the filter pickers; independent of filters.
-pub fn filter_options(conn: &Connection, tz: Tz, tenant_id: &str) -> QueryResult<FilterOptions> {
+pub fn filter_options(
+    conn: &Connection,
+    tz: Tz,
+    tenant_id: &str,
+    caller: &str,
+) -> QueryResult<FilterOptions> {
     let names = device_names(conn, tenant_id)?;
     let options = |column: &str,
                    label: &dyn Fn(String, Option<String>) -> String|
@@ -1930,14 +1996,18 @@ pub fn filter_options(conn: &Connection, tz: Tz, tenant_id: &str) -> QueryResult
                     label: label(key.clone(), row.get(1)?),
                     key,
                     total_tokens: row.get(2)?,
+                    is_current: (column == "device_id").then_some(false),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     };
-    let devices = options("device_id", &|key, _| {
+    let mut devices = options("device_id", &|key, _| {
         names.get(&key).cloned().unwrap_or(key)
     })?;
+    for device in &mut devices {
+        device.is_current = Some(device.key == caller);
+    }
     let clients = options("client", &|key, _| key)?;
     let models = options("model_id", &|key, _| key)?;
     let projects = options("project_hash", &|key, label| project_label(&key, label))?;
@@ -2080,6 +2150,14 @@ mod tests {
         assert!(parse_query(Some("from=2026-01-01&clients=a,b"), &[]).is_ok());
         assert!(parse_query(Some("form=2026-01-01"), &[]).is_err());
         assert!(parse_query(Some("from=2026-01-01&from=2026-01-02"), &[]).is_err());
+        let query = parse_query(Some("deviceScope=other"), &[]).expect("parse scope");
+        assert_eq!(
+            Filters::from_query(&query).expect("scope").device_scope,
+            DeviceScope::Other
+        );
+        let query = parse_query(Some("deviceScope=foreign"), &[]).expect("known key");
+        assert!(Filters::from_query(&query).is_err());
+        assert!(parse_query(Some("deviceScope=all&deviceScope=other"), &[]).is_err());
         let query = parse_query(Some("from=2026-02-01&to=2026-01-01"), &[]).expect("parse");
         assert!(Filters::from_query(&query).is_err());
         let query = parse_query(Some("from=1999-12-31"), &[]).expect("parse");

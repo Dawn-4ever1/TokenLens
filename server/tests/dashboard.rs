@@ -360,6 +360,90 @@ async fn filters_narrow_every_figure() {
 }
 
 #[tokio::test]
+async fn device_scope_filters_every_dashboard_and_composes_with_explicit_devices() {
+    let w = world().await;
+    for (scope, total) in [("current", 1098), ("other", 1000)] {
+        let (_, summary) =
+            w.h.get(
+                &format!("/api/dashboard/summary?deviceScope={scope}"),
+                Some(&w.a.read),
+            )
+            .await;
+        assert_eq!(summary["totalTokens"], total, "{scope}");
+        let (_, sessions) =
+            w.h.get(
+                &format!("/api/dashboard/sessions?deviceScope={scope}"),
+                Some(&w.a.read),
+            )
+            .await;
+        assert!(
+            sessions["sessions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|session| (session["deviceId"] == w.a.id) == (scope == "current")),
+            "{scope}: {sessions}"
+        );
+        let (_, devices) =
+            w.h.get(
+                &format!("/api/dashboard/devices?deviceScope={scope}"),
+                Some(&w.a.read),
+            )
+            .await;
+        let listed = devices["devices"].as_array().unwrap();
+        assert_eq!(listed.len(), 1, "{scope}: {devices}");
+        assert_eq!((listed[0]["deviceId"] == w.a.id), scope == "current");
+        assert_eq!(devices["usage"][0]["totalTokens"], total);
+        let (_, series) =
+            w.h.get(
+                &format!("/api/dashboard/timeseries?deviceScope={scope}"),
+                Some(&w.a.read),
+            )
+            .await;
+        assert_eq!(
+            series["series"][0]["points"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|point| point["totalTokens"].as_i64().unwrap())
+                .sum::<i64>(),
+            total
+        );
+        let (_, heat) =
+            w.h.get(
+                &format!("/api/dashboard/heatmap?deviceScope={scope}"),
+                Some(&w.a.read),
+            )
+            .await;
+        assert_eq!(
+            heat["days"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|day| day["totalTokens"].as_i64().unwrap())
+                .sum::<i64>(),
+            total
+        );
+    }
+    let (_, summary) =
+        w.h.get("/api/dashboard/summary?deviceScope=all", Some(&w.a.read))
+            .await;
+    assert_eq!(summary["totalTokens"], 2098);
+    let path = format!(
+        "/api/dashboard/summary?deviceScope=other&devices={}",
+        w.b.id
+    );
+    let (_, other) = w.h.get(&path, Some(&w.a.read)).await;
+    assert_eq!(other["totalTokens"], 1000);
+    let path = format!(
+        "/api/dashboard/summary?deviceScope=current&devices={}",
+        w.b.id
+    );
+    let (_, impossible) = w.h.get(&path, Some(&w.a.read)).await;
+    assert_eq!(impossible["totalTokens"], 0);
+}
+
+#[tokio::test]
 async fn timeseries_buckets_are_dense_and_ranked() {
     let w = world().await;
     let (status, t) =

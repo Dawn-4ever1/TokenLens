@@ -6,7 +6,7 @@ import { useStatus } from "@/lib/status";
 import type { AppStatus } from "@/lib/types";
 import { app, errorMessage } from "@/lib/api";
 import { AppMark } from "./AppMark";
-import { ActiveFilters, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
+import { ActiveFilters, DeviceScopePicker, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
 import { Button, Dialog, StatusDot, Tip, cn } from "./ui";
@@ -50,6 +50,7 @@ export function Shell() {
           {FILTERED.includes(page) && (
             <div className="flex flex-wrap items-center gap-2">
               <RangePicker />
+              <DeviceScopePicker />
               <FilterMenu />
               <RefreshStatus />
             </div>

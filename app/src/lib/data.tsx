@@ -28,12 +28,23 @@ function initialFilters(sourceKey: string): Filters {
     const restored = normalizeFilters(previous);
     // Do not carry another computer's device/project filters into this one.
     // The previous provider may still be flushing its storage while unmounting.
-    if (localStorage.getItem("tokenlens.source.v1") === sourceKey && restored) return restored;
-    if (restored) return { ...restored, devices: [], clients: [], models: [], projects: [] };
+    if (sourceKey.startsWith("local:") && restored) {
+      return { ...restored, devices: [], deviceScope: "current" };
+    }
+    const savedSource = localStorage.getItem("tokenlens.source.v1");
+    if (savedSource === sourceKey && restored) return restored;
+    if (restored) return {
+      ...restored,
+      devices: [],
+      deviceScope: sourceKey.startsWith("server:") && savedSource?.startsWith("local:") ? "all" : "current",
+      clients: [],
+      models: [],
+      projects: [],
+    };
   } catch {
     // Storage is optional.
   }
-  return DEFAULT_FILTERS;
+  return sourceKey.startsWith("local:") ? { ...DEFAULT_FILTERS, deviceScope: "current" } : DEFAULT_FILTERS;
 }
 
 export function DataProvider({ children, enabled, sourceKey }: { children: ReactNode; enabled: boolean; sourceKey: string }) {

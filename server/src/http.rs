@@ -915,7 +915,15 @@ async fn dashboard_summary(
             let pricing = pricer.as_deref().and_then(|pricer| {
                 dashboard::PricingInfo::new(tz, pricer.as_of_ms(), pricer.version())
             });
-            dashboard::summary(conn, tz, &filters, &caller.tenant_id, pricing, now)
+            dashboard::summary(
+                conn,
+                tz,
+                &filters,
+                &caller.tenant_id,
+                &caller.device_id,
+                pricing,
+                now,
+            )
         })
         .await
 }
@@ -948,7 +956,15 @@ async fn dashboard_timeseries(
     };
     state
         .query(move |conn, tz, now| {
-            dashboard::timeseries(conn, tz, &filters, request, &caller.tenant_id, now)
+            dashboard::timeseries(
+                conn,
+                tz,
+                &filters,
+                request,
+                &caller.tenant_id,
+                &caller.device_id,
+                now,
+            )
         })
         .await
 }
@@ -969,7 +985,15 @@ async fn dashboard_heatmap(
     .map_err(bad)?;
     state
         .query(move |conn, tz, now| {
-            dashboard::heatmap(conn, tz, &filters, kind, &caller.tenant_id, now)
+            dashboard::heatmap(
+                conn,
+                tz,
+                &filters,
+                kind,
+                &caller.tenant_id,
+                &caller.device_id,
+                now,
+            )
         })
         .await
 }
@@ -1001,7 +1025,15 @@ async fn dashboard_sessions(
     };
     state
         .query(move |conn, tz, now| {
-            dashboard::sessions(conn, tz, &filters, &request, &caller.tenant_id, now)
+            dashboard::sessions(
+                conn,
+                tz,
+                &filters,
+                &request,
+                &caller.tenant_id,
+                &caller.device_id,
+                now,
+            )
         })
         .await
 }
@@ -1057,7 +1089,9 @@ async fn dashboard_filters(
 ) -> Result<Response, ApiError> {
     let caller = authenticate(&state, &headers, TokenKind::Read).await?;
     state
-        .query(move |conn, tz, _| dashboard::filter_options(conn, tz, &caller.tenant_id))
+        .query(move |conn, tz, _| {
+            dashboard::filter_options(conn, tz, &caller.tenant_id, &caller.device_id)
+        })
         .await
 }
 

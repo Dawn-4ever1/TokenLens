@@ -1,6 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { command } from "./mock";
-import type { Breakdown, SessionPage, Summary, Timeseries } from "./types";
+import { describe, expect, it, vi } from "vitest";
+import type { Breakdown, Devices, SessionPage, Summary, Timeseries } from "./types";
+
+vi.hoisted(() => {
+  history.replaceState(null, "", "/?server");
+});
+
+const { command } = await import("./mock");
 
 const get = <T,>(path: string, query: Record<string, string> = {}) => command("dashboard_get", { path, query }) as Promise<T>;
 
@@ -32,6 +37,24 @@ describe("mock backend keeps the API invariants", () => {
       expect(s.cacheReadTokens).toBeLessThanOrEqual(s.totalTokens);
       expect(s.startedAt <= s.lastUsedAt).toBe(true);
     }
+  });
+
+  it("device scopes include, exclude and combine with other filters", async () => {
+    const range = { from: "2026-06-01", to: "2026-11-30" };
+    const all = await get<Summary>("summary", { ...range, deviceScope: "all" });
+    const current = await get<Summary>("summary", { ...range, deviceScope: "current" });
+    const other = await get<Summary>("summary", { ...range, deviceScope: "other" });
+    expect(current.totalTokens).toBeGreaterThan(0);
+    expect(other.totalTokens).toBeGreaterThan(0);
+    expect(current.totalTokens + other.totalTokens).toBe(all.totalTokens);
+    expect(current.byDevice.every((device) => device.key === "dev_mock_mbp")).toBe(true);
+    expect(other.byDevice.every((device) => device.key !== "dev_mock_mbp")).toBe(true);
+    const combined = await get<Summary>("summary", { ...range, deviceScope: "other", clients: "codex" });
+    expect(combined.byClient.map((client) => client.key)).toEqual(["codex"]);
+    expect(combined.byDevice.every((device) => device.key !== "dev_mock_mbp")).toBe(true);
+    const devices = await get<Devices>("devices", { deviceScope: "other" });
+    expect(devices.devices.length).toBeGreaterThan(0);
+    expect(devices.devices.every((device) => !device.isCurrent)).toBe(true);
   });
 
   it("pagination walks every session exactly once", async () => {

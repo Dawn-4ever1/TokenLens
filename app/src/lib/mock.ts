@@ -208,6 +208,8 @@ function filtered(q: Q, ignoreRange = false) {
   const base = events().filter(
     (e) =>
       (!devices.length || devices.includes(e.device)) &&
+      (q.deviceScope !== "current" || e.device === state.deviceId) &&
+      (q.deviceScope !== "other" || e.device !== state.deviceId) &&
       (!clients.length || clients.includes(e.client)) &&
       (!models.length || models.includes(e.model)) &&
       (!projects.length || projects.includes(e.project ?? "__none__")),
@@ -542,7 +544,11 @@ function deviceStatuses(): DeviceStatus[] {
 
 function devices(q: Q): Devices {
   const { items, range } = filtered(q);
-  const statuses = deviceStatuses();
+  const selected = list(q.devices);
+  const statuses = deviceStatuses().filter((device) =>
+    (!selected.length || selected.includes(device.deviceId))
+    && (q.deviceScope !== "current" || device.deviceId === state.deviceId)
+    && (q.deviceScope !== "other" || device.deviceId !== state.deviceId));
   const deviceCaveats = caveats([], statuses).filter((c) => c.deviceId);
   for (const d of statuses) {
     if (d.outdated) deviceCaveats.push({ code: "collector_outdated", severity: "warning", deviceId: d.deviceId, message: `${d.displayName} 的采集端版本过旧，请更新应用` });
@@ -566,7 +572,7 @@ function devices(q: Q): Devices {
 
 function filters(): FilterOptions {
   const all = events();
-  const options = (by: string) => slices(all, by).map((s) => ({ key: s.key, label: s.label, totalTokens: s.totalTokens }));
+  const options = (by: string) => slices(all, by).map((s) => ({ key: s.key, label: s.label, totalTokens: s.totalTokens, ...(by === "device" ? { isCurrent: s.key === state.deviceId } : {}) }));
   return {
     devices: options("device"),
     clients: options("client"),

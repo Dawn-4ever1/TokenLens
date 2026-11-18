@@ -838,7 +838,7 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
   await expect(account).toHaveCount(0);
-  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
@@ -910,7 +910,7 @@ test("signing out shows only this computer; signing back in reads the cloud's cu
   });
   expect(again).toBe(deviceId);
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
-  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -983,7 +983,7 @@ test("GitHub sign-in against an older server stays signed in without profile fie
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await expect(signIn).toBeVisible();
-  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -1073,7 +1073,7 @@ test("cloud sign-in shows every device; adding a device is instructions only", a
   await expect(page.getByRole("group", { name: "查看范围", exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
-  await expect(page.getByText("全部设备", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Windows 台式机/ }).click();
   await page.keyboard.press("Escape");

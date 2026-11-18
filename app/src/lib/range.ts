@@ -1,4 +1,11 @@
 export type RangePreset = "today" | "week" | "month" | "all" | "custom";
+export type DeviceScope = "all" | "current" | "other";
+
+export const DEVICE_SCOPES: { key: DeviceScope; label: string; hint: string }[] = [
+  { key: "all", label: "全账号", hint: "同一账号下的全部设备，包含本机" },
+  { key: "current", label: "本机", hint: "只统计当前这台电脑" },
+  { key: "other", label: "其他设备", hint: "同一账号下除本机外的设备" },
+];
 
 export const RANGE_PRESETS: { key: RangePreset; label: string }[] = [
   { key: "today", label: "日" },
@@ -13,6 +20,7 @@ export interface Filters {
   customFrom?: string;
   customTo?: string;
   devices: string[];
+  deviceScope: DeviceScope;
   clients: string[];
   models: string[];
   projects: string[];
@@ -21,6 +29,7 @@ export interface Filters {
 export const DEFAULT_FILTERS: Filters = {
   preset: "month",
   devices: [],
+  deviceScope: "all",
   clients: [],
   models: [],
   projects: [],
@@ -82,6 +91,9 @@ export function normalizeFilters(value: unknown): Filters | null {
     preset: normalizePreset(candidate.preset),
     customFrom: typeof candidate.customFrom === "string" ? candidate.customFrom : undefined,
     customTo: typeof candidate.customTo === "string" ? candidate.customTo : undefined,
+    deviceScope: DEVICE_SCOPES.some(({ key }) => key === candidate.deviceScope)
+      ? candidate.deviceScope as DeviceScope
+      : DEFAULT_FILTERS.deviceScope,
   };
   for (const key of ["devices", "clients", "models", "projects"] as const) {
     if (candidate[key] !== undefined) {
@@ -135,6 +147,7 @@ export function filterQuery(filters: Filters, timeZone: string, overrides: Parti
     from: span.from,
     to: span.to,
     devices: join(merged.devices),
+    deviceScope: merged.deviceScope,
     clients: join(merged.clients),
     models: join(merged.models),
     projects: join(merged.projects),
@@ -142,5 +155,6 @@ export function filterQuery(filters: Filters, timeZone: string, overrides: Parti
 }
 
 export function activeFilterCount(filters: Filters): number {
-  return filters.devices.length + filters.clients.length + filters.models.length + filters.projects.length;
+  return filters.devices.length + filters.clients.length + filters.models.length + filters.projects.length
+    + (filters.deviceScope === "all" ? 0 : 1);
 }

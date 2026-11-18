@@ -43,6 +43,91 @@ test("five calendar ranges update the figures, including custom dates", async ({
   expect(errors).toEqual([]);
 });
 
+test("device scope sits beside dates and really narrows every page", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await openOverview(page, 1440);
+  const scope = page.getByRole("button", { name: "设备范围：全账号", exact: true });
+  await expect(scope).toBeVisible();
+  await expect(scope).toHaveAttribute("aria-haspopup", "menu");
+  const order = await page.evaluate(() => ["时间范围", "设备范围：全账号", "筛选"].map((label) =>
+    document.querySelector(`[aria-label="${label}"]`)!.getBoundingClientRect().left));
+  expect(order[0]).toBeLessThan(order[1]!);
+  expect(order[1]).toBeLessThan(order[2]!);
+  const all = await summaryCard(page).locator(".num-fit").innerText();
+  await scope.click();
+  await expect(page.getByRole("menuitemradio").allTextContents()).resolves.toEqual([
+    "全账号同一账号下的全部设备，包含本机",
+    "本机只统计当前这台电脑",
+    "其他设备同一账号下除本机外的设备",
+  ]);
+  await page.getByRole("menuitemradio", { name: /^本机/ }).click();
+  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("本机");
+  const currentNumber = summaryCard(page).locator(".num-fit");
+  await expect(currentNumber).not.toHaveText(all);
+  const current = await currentNumber.innerText();
+  await page.getByRole("button", { name: "设备范围：本机", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: /^其他设备/ }).click();
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("其他设备");
+  const otherNumber = summaryCard(page).locator(".num-fit");
+  await expect(otherNumber).not.toHaveText(current);
+  const other = await otherNumber.innerText();
+  expect(other).not.toBe(all);
+  await page.getByRole("button", { name: "会话", exact: true }).click();
+  await expect(page.locator("header h1")).toHaveText("会话");
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await expect(page.locator("tbody tr").first()).not.toContainText("MacBook Pro");
+  await page.getByRole("button", { name: "设备", exact: true }).click();
+  await expect(page.locator("header h1")).toHaveText("设备");
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备范围：其他设备", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: /^全账号/ }).click();
+  await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备范围：全账号", exact: true }).click();
+  await page.getByRole("menuitemradio", { name: /^本机/ }).click();
+  await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await page.getByRole("button", { name: "清除全部", exact: true }).click();
+  await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator("header h1")).toHaveText("设备");
+  await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("local use still has a scope picker, without cloud data", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.addInitScript(() => {
+    localStorage.clear();
+    localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ theme: "light", direction: "editorial", refreshSeconds: 0 }));
+    localStorage.setItem("tokenlens.filters.v1", JSON.stringify({ preset: "month", deviceScope: "other", devices: [], clients: [], models: [], projects: [] }));
+  });
+  await page.goto("/");
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await page.getByRole("button", { name: "设备", exact: true }).click();
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "设备范围：本机", exact: true }).click();
+  await expect(page.getByRole("menuitemradio", { name: /^全账号/ })).toBeDisabled();
+  await expect(page.getByRole("menuitemradio", { name: /^其他设备/ })).toBeDisabled();
+  await expect(page.getByRole("menuitemradio", { name: /^本机/ })).toBeEnabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("2");
+  await page.getByRole("button", { name: "清除全部", exact: true }).click();
+  await expect(page.getByRole("button", { name: "设备范围：本机", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("1");
+});
+
 for (const width of [1440, 1200, 1100, 1000, 900]) {
   test(`headline token text stays left-aligned throughout format changes @${width}`, async ({ page }) => {
     await openOverview(page, width);
