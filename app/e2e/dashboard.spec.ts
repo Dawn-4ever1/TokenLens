@@ -228,7 +228,9 @@ test("overview keeps equal KPIs until Tokens needs more room, then stacks tools 
   expect(medium.boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
   expect(medium.boxes[0]!.width).toBeGreaterThan(medium.boxes[1]!.width);
   expect(medium.boxes[0]!.width).toBeLessThan(medium.boxes[1]!.width * 1.5);
-  expect(medium.toolModelStacked).toBe(true);
+  // At this window width the tool/model cards stay side by side. A wider
+  // Tokens value only changes the KPI columns, not the cards below.
+  expect(medium.toolModelStacked).toBe(false);
 
   // The medium layout grows only the Tokens column to fit a 12-digit exact total.
   const display = page.getByTestId("overview-kpis").locator("section.card").first().locator(".display");
@@ -252,6 +254,43 @@ test("overview keeps equal KPIs until Tokens needs more room, then stacks tools 
   expect(narrow.boxes[2]!.y).toBeGreaterThan(narrow.boxes[0]!.y + narrow.boxes[0]!.height - 1);
   expect(narrow.toolModelStacked).toBe(true);
 
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("tool and model cards switch only once in either resize direction", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const errors = await open(page, { exactNumbers: true });
+  await settle(page, "总览");
+
+  // A longer, valid token total makes the KPI text measurement change while
+  // resizing. It must never be reused as a second breakpoint for these cards.
+  await page.getByTestId("overview-kpis").locator("section.card").first().locator(".display button")
+    .evaluate((element) => { element.textContent = "123,456,789,012"; });
+  const isStacked = () => page.evaluate(() => {
+    const cards = [...document.querySelectorAll<HTMLElement>("main section.card")];
+    const tool = cards.find((card) => card.querySelector("h2")?.textContent === "工具")!.getBoundingClientRect();
+    const model = cards.find((card) => card.querySelector("h2")?.textContent === "模型")!.getBoundingClientRect();
+    return model.y > tool.y + tool.height - 1;
+  });
+
+  const narrowing: boolean[] = [];
+  for (let width = 1440; width >= 900; width -= 1) {
+    await page.setViewportSize({ width, height: 900 });
+    narrowing.push(await isStacked());
+  }
+  expect(narrowing.at(0)).toBe(false);
+  expect(narrowing.at(-1)).toBe(true);
+  expect(narrowing.filter((stacked, index) => index > 0 && stacked !== narrowing[index - 1])).toEqual([true]);
+
+  const widening: boolean[] = [];
+  for (let width = 900; width <= 1440; width += 1) {
+    await page.setViewportSize({ width, height: 900 });
+    widening.push(await isStacked());
+  }
+  expect(widening.at(0)).toBe(true);
+  expect(widening.at(-1)).toBe(false);
+  expect(widening.filter((stacked, index) => index > 0 && stacked !== widening[index - 1])).toEqual([false]);
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });

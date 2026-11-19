@@ -83,7 +83,9 @@ export function Overview() {
         </Card>
       ) : (
         <>
-          <div className={cn("grid grid-cols-1 gap-[var(--grid-gap)]", kpiLayout === "wide" && "min-[1100px]:grid-cols-2")}>
+          {/* Tool/model placement depends only on the window breakpoint. KPI
+              text measurement must not reverse it when the sidebar narrows. */}
+          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
             <ToolCard summary={s} />
             <ModelCard summary={s} />
           </div>
@@ -241,7 +243,8 @@ type KpiLayout = "wide" | "medium";
 /**
  * Keep the four KPIs equal while an exact Tokens total fits. Once it cannot
  * fit at the shared type size, switch to the medium layout early: Tokens gets
- * only the width its text needs, and the tool/model cards stack below.
+ * only the width its text needs. This measurement does not control the
+ * tool/model cards; their window breakpoint is independent of sidebar width.
  */
 function useKpiLayout(
   rowRef: RefObject<HTMLDivElement | null>,
@@ -267,8 +270,7 @@ function useKpiLayout(
       const padding = Number.parseFloat(styles.getPropertyValue("--card-px")) || 20;
       const gap = Number.parseFloat(styles.getPropertyValue("--grid-gap")) || 16;
       const equalInner = (rowWidth - gap * 3) / 4 - padding * 2;
-      const canSplitModules = window.innerWidth >= 1100;
-      const mode = canSplitModules && textWidth <= equalInner ? "wide" : "medium";
+      const mode = textWidth <= equalInner ? "wide" : "medium";
       setLayout((previous) => (previous === mode ? previous : mode));
     };
     measure();
