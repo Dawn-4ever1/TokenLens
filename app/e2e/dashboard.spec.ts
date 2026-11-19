@@ -191,24 +191,50 @@ test("overview prioritizes concise KPIs and a full-width trend", async ({ page }
   expect(errors).toEqual([]);
 });
 
-test("overview gives Tokens a wider card without shrinking its number", async ({ page }) => {
-  await page.setViewportSize({ width: 1200, height: 900 });
+test("overview keeps equal KPIs until Tokens needs more room, then stacks tools and models", async ({ page }) => {
+  const measure = () => page.evaluate(() => {
+    const row = document.querySelector<HTMLElement>('[data-testid="overview-kpis"]')!;
+    const cards = [...row.querySelectorAll<HTMLElement>(":scope > section")];
+    const boxes = cards.map((card) => {
+      const rect = card.getBoundingClientRect();
+      const value = card.querySelector<HTMLElement>(".display")!;
+      return { width: rect.width, height: rect.height, x: rect.x, y: rect.y, fontSize: getComputedStyle(value).fontSize };
+    });
+    const sections = [...document.querySelectorAll<HTMLElement>("main section.card")];
+    const byHeading = (name: string) => sections.find((section) => section.querySelector("h2")?.textContent === name)!;
+    const tool = byHeading("工具").getBoundingClientRect();
+    const model = byHeading("模型").getBoundingClientRect();
+    return {
+      layout: row.dataset.layout,
+      boxes,
+      toolModelStacked: model.y > tool.y + tool.height - 1,
+    };
+  });
+
+  await page.setViewportSize({ width: 1440, height: 900 });
   const errors = await open(page, { exactNumbers: true });
   await settle(page, "总览");
-  const kpis = page.getByTestId("overview-kpis");
-  await expect(kpis.locator("h2")).toHaveText(["TOKENS", "成本", "缓存命中率", "会话"]);
-  const boxes = await kpis.locator("section.card").evaluateAll((cards) => cards.map((card) => {
-    const rect = card.getBoundingClientRect();
-    const value = card.querySelector<HTMLElement>(".display")!;
-    return { width: rect.width, height: rect.height, fontSize: getComputedStyle(value).fontSize };
-  }));
-  // Tokens is clearly wider; all four cards keep one height and one number size.
-  expect(boxes[0]!.width).toBeGreaterThan(boxes[1]!.width * 1.5);
-  expect(new Set(boxes.map((box) => box.height)).size).toBe(1);
-  expect(boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
-  // A 12-digit exact total still fits at that size instead of shrinking.
-  const display = kpis.locator("section.card").first().locator(".display");
+  const wide = await measure();
+  expect(wide.layout).toBe("wide");
+  expect(wide.boxes.map((box) => box.fontSize)).toEqual(["36px", "36px", "36px", "36px"]);
+  expect(wide.boxes.every((box) => Math.abs(box.width - wide.boxes[0]!.width) < 1)).toBe(true);
+  expect(wide.toolModelStacked).toBe(false);
+
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.reload();
+  await settle(page, "总览");
+  const medium = await measure();
+  expect(medium.layout).toBe("medium");
+  expect(medium.boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
+  expect(medium.boxes[0]!.width).toBeGreaterThan(medium.boxes[1]!.width);
+  expect(medium.boxes[0]!.width).toBeLessThan(medium.boxes[1]!.width * 1.5);
+  expect(medium.toolModelStacked).toBe(true);
+
+  // The medium layout grows only the Tokens column to fit a 12-digit exact total.
+  const display = page.getByTestId("overview-kpis").locator("section.card").first().locator(".display");
   await display.locator("button").evaluate((element) => { element.textContent = "123,456,789,012"; });
+  await page.evaluate(() => window.dispatchEvent(new Event("resize")));
+  await page.waitForTimeout(100);
   const fits = await display.evaluate((element) => {
     const range = document.createRange();
     range.selectNodeContents(element.querySelector("button")!);
@@ -216,6 +242,16 @@ test("overview gives Tokens a wider card without shrinking its number", async ({
   });
   expect(fits).toBe(true);
   await expect(display.locator("button")).toHaveCSS("font-size", "32px");
+
+  await page.setViewportSize({ width: 900, height: 900 });
+  await page.reload();
+  await settle(page, "总览");
+  const narrow = await measure();
+  expect(narrow.boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
+  expect(Math.abs(narrow.boxes[0]!.width - narrow.boxes[1]!.width)).toBeLessThan(1);
+  expect(narrow.boxes[2]!.y).toBeGreaterThan(narrow.boxes[0]!.y + narrow.boxes[0]!.height - 1);
+  expect(narrow.toolModelStacked).toBe(true);
+
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });

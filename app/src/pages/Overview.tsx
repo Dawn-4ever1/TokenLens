@@ -1,5 +1,5 @@
 import { ChevronRight } from "lucide-react";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Chart, baseOption, type ChartOption } from "@/components/Chart";
 import { Composition } from "@/components/Composition";
 import { ClientName, IdentityIcon, LoadError, ModelName, Num, ShareBar } from "@/components/common";
@@ -33,6 +33,9 @@ export function Overview() {
   const trend = useDashboard<Timeseries>("timeseries", { ...q, bucket, groupBy: "none" });
   const recent = useDashboard<SessionPage>("sessions", { ...q, sort: "recent", limit: "5" });
   const devices = useDashboard<Devices>("devices", q);
+  const kpiRow = useRef<HTMLDivElement>(null);
+  const tokensValue = useRef<HTMLDivElement>(null);
+  const kpiLayout = useKpiLayout(kpiRow, tokensValue, summary.data?.totalTokens ?? 0, settings.exactNumbers, settings.direction);
 
   if (!summary.data) {
     if (summary.error) return <LoadError error={summary.error} onRetry={summary.reload} />;
@@ -62,8 +65,13 @@ export function Overview() {
   return (
     <div className="space-y-[var(--stack-space)]">
       {errorBanner}
-      <div data-testid="overview-kpis" className="overview-kpis">
-        <Kpi label="TOKENS" value={<Num value={s.totalTokens} />} primary />
+      <div
+        ref={kpiRow}
+        data-testid="overview-kpis"
+        data-layout={kpiLayout}
+        className="overview-kpis"
+      >
+        <Kpi label="TOKENS" value={<Num value={s.totalTokens} />} valueRef={tokensValue} primary />
         <Kpi label="成本" value={<span className="num">{usd(s.costUsd)}</span>} />
         <Kpi label="缓存命中率" value={<span className="num">{percent(s.cacheHitRate)}</span>} />
         <Kpi label="会话" value={<span className="num">{exact(s.sessionCount)}</span>} />
@@ -75,7 +83,7 @@ export function Overview() {
         </Card>
       ) : (
         <>
-          <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
+          <div className={cn("grid grid-cols-1 gap-[var(--grid-gap)]", kpiLayout === "wide" && "min-[1100px]:grid-cols-2")}>
             <ToolCard summary={s} />
             <ModelCard summary={s} />
           </div>
@@ -228,11 +236,58 @@ function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket,
   );
 }
 
-function Kpi({ label, value, primary = false }: { label: string; value: ReactNode; primary?: boolean }) {
+type KpiLayout = "wide" | "medium";
+
+/**
+ * Keep the four KPIs equal while an exact Tokens total fits. Once it cannot
+ * fit at the shared type size, switch to the medium layout early: Tokens gets
+ * only the width its text needs, and the tool/model cards stack below.
+ */
+function useKpiLayout(
+  rowRef: RefObject<HTMLDivElement | null>,
+  valueRef: RefObject<HTMLDivElement | null>,
+  totalTokens: number,
+  exactNumbers: boolean,
+  direction: string,
+): KpiLayout {
+  const [layout, setLayout] = useState<KpiLayout>("wide");
+  useLayoutEffect(() => {
+    if (direction !== "editorial") return;
+    const row = rowRef.current;
+    const value = valueRef.current;
+    if (!row || !value) return;
+    const measure = () => {
+      const rowWidth = row.getBoundingClientRect().width;
+      if (rowWidth <= 0) return;
+      const text = value.querySelector<HTMLElement>("button") ?? value;
+      const range = document.createRange();
+      range.selectNodeContents(text);
+      const textWidth = range.getBoundingClientRect().width;
+      const styles = getComputedStyle(row);
+      const padding = Number.parseFloat(styles.getPropertyValue("--card-px")) || 20;
+      const gap = Number.parseFloat(styles.getPropertyValue("--grid-gap")) || 16;
+      const equalInner = (rowWidth - gap * 3) / 4 - padding * 2;
+      const canSplitModules = window.innerWidth >= 1100;
+      const mode = canSplitModules && textWidth <= equalInner ? "wide" : "medium";
+      setLayout((previous) => (previous === mode ? previous : mode));
+    };
+    measure();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    observer?.observe(row);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [rowRef, valueRef, totalTokens, exactNumbers, direction]);
+  return layout;
+}
+
+function Kpi({ label, value, primary = false, valueRef }: { label: string; value: ReactNode; primary?: boolean; valueRef?: RefObject<HTMLDivElement | null> }) {
   return (
     <section className={cn("card min-w-0 px-[var(--card-px)] py-[var(--kpi-py)]", primary && "overview-kpi-primary")}>
       <h2 className="truncate text-sm font-semibold text-ink">{label}</h2>
-      <div className={cn("display mt-[var(--kpi-gap)] text-[32px] leading-10 text-ink min-[1300px]:text-[36px]", primary ? "whitespace-nowrap" : "num-fit")}>{value}</div>
+      <div ref={valueRef} className={cn("display mt-[var(--kpi-gap)] text-[32px] leading-10 text-ink min-[1440px]:text-[36px]", primary ? "whitespace-nowrap" : "num-fit")}>{value}</div>
     </section>
   );
 }

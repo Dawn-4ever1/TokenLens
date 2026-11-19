@@ -330,8 +330,8 @@
   animation: shimmer 1.6s ease-in-out infinite;
 }
 
-/* Overview KPIs sit in one row; Tokens is wider so a 12-digit exact total
-   still fits at the shared 32/36px type size instead of shrinking. */
+/* Four equal KPIs while the exact Tokens total fits; when it does not, the
+   medium layout sizes only the Tokens column to its content. */
 .overview-kpis {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -339,12 +339,10 @@
 }
 @media (min-width: 1000px) {
   .overview-kpis {
-    grid-template-columns: minmax(340px, 1.5fr) repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
-}
-@media (min-width: 1300px) {
-  .overview-kpis {
-    grid-template-columns: minmax(380px, 1.5fr) repeat(3, minmax(0, 1fr));
+  .overview-kpis[data-layout="medium"] {
+    grid-template-columns: max-content repeat(3, minmax(0, 1fr));
   }
 }
 
