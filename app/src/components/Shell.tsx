@@ -6,7 +6,7 @@ import { useStatus } from "@/lib/status";
 import type { AppStatus } from "@/lib/types";
 import { app, errorMessage } from "@/lib/api";
 import { AppMark } from "./AppMark";
-import { ActiveFilters, DeviceScopePicker, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
+import { DeviceScopePicker, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
 import { Button, Dialog, StatusDot, Tip, cn } from "./ui";
@@ -56,7 +56,6 @@ export function Shell() {
             </div>
           )}
         </header>
-        {FILTERED.includes(page) && <ActiveFilters />}
         <main className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden">
           <div className="mx-auto max-w-[1440px] px-[var(--page-px)] pb-10 pt-5">
             <Suspense fallback={null}>

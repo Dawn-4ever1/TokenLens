@@ -16,6 +16,7 @@ pub mod pricing;
 pub mod public_site;
 pub mod release_mirror;
 pub mod secrets;
+pub mod site_stats;
 
 use std::future::Future;
 use std::net::SocketAddr;

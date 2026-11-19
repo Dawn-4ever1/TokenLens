@@ -490,7 +490,8 @@ async fn http_routes_support_head_fixed_urls_and_preserve_authentication() {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(
             response.headers()["location"],
-            format!("https://downloads.example.test/downloads/v1.2.3/{filename}").as_str()
+            format!("https://downloads.example.test/downloads/v1.2.3/{filename}?source=website")
+                .as_str()
         );
         assert_eq!(response.headers()["cache-control"], "no-cache");
     }
@@ -551,6 +552,98 @@ async fn http_routes_support_head_fixed_urls_and_preserve_authentication() {
             .status(),
         StatusCode::UNAUTHORIZED
     );
+}
+
+#[tokio::test]
+async fn website_download_clicks_and_files_are_counted_without_updater_traffic() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let upstream = upstream();
+    let mirror = open_mirror(root.path(), Arc::clone(&upstream));
+    mirror.sync().await.expect("sync");
+    let harness = Harness::start_with_mirror_and_stats(mirror, Some("test-stats-token")).await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("client");
+
+    let response = client
+        .get(format!("{}/downloads/latest/windows", harness.base))
+        .send()
+        .await
+        .expect("click");
+    assert_eq!(response.status(), StatusCode::FOUND);
+    let location = response.headers()["location"]
+        .to_str()
+        .expect("location")
+        .to_owned();
+    assert!(location.ends_with("?source=website"), "{location}");
+    assert_eq!(
+        harness
+            .count("SELECT count FROM site_daily_counts WHERE metric = 'download_click_windows'"),
+        1
+    );
+
+    // HEAD checks and direct updater downloads must not look like website
+    // downloads; only the redirect marked with source=website is counted.
+    assert_eq!(
+        client
+            .head(format!("{}/downloads/latest/windows", harness.base))
+            .send()
+            .await
+            .expect("head")
+            .status(),
+        StatusCode::FOUND
+    );
+    assert_eq!(
+        harness
+            .count("SELECT count FROM site_daily_counts WHERE metric = 'download_click_windows'"),
+        1
+    );
+
+    let path = location
+        .split("downloads.example.test")
+        .nth(1)
+        .expect("mirror path");
+    assert_eq!(
+        client
+            .get(format!("{}{}", harness.base, path))
+            .send()
+            .await
+            .expect("file")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
+        1
+    );
+    assert_eq!(
+        client
+            .get(format!(
+                "{}/downloads/v1.2.3/TokenLens_1.2.3_x64-setup.exe",
+                harness.base
+            ))
+            .send()
+            .await
+            .expect("updater file")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
+        1
+    );
+
+    let page = client
+        .get(format!("{}/stats/test-stats-token", harness.base))
+        .send()
+        .await
+        .expect("stats")
+        .text()
+        .await
+        .expect("body");
+    assert!(page.contains("官网访问统计"));
+    assert!(page.contains("<strong>1</strong>"), "{page}");
 }
 
 #[tokio::test]

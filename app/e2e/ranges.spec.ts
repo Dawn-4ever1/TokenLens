@@ -63,13 +63,15 @@ test("device picker lists every device without descriptions and filters every pa
   expect(await menu.locator("p").count()).toBe(0);
   await page.getByRole("menuitemradio", { name: "MacBook Pro（本机）", exact: true }).click();
   await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("MacBook Pro");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^筛选/ })).toContainText("1");
   const currentNumber = summaryCard(page).locator(".display");
   await expect(currentNumber).not.toHaveText(all);
   const current = await currentNumber.innerText();
   await page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true }).click();
   await page.getByRole("menuitemradio", { name: "Mac mini", exact: true }).click();
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Mac mini");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^筛选/ })).toContainText("1");
   const otherNumber = summaryCard(page).locator(".display");
   await expect(otherNumber).not.toHaveText(current);
   const other = await otherNumber.innerText();
@@ -96,11 +98,13 @@ test("device picker lists every device without descriptions and filters every pa
   await page.reload();
   await expect(page.locator("header h1")).toHaveText("设备");
   await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await page.getByRole("button", { name: /^筛选/ }).click();
   await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await expect(page.getByRole("button", { name: /^筛选/ })).toContainText("2");
   await page.getByRole("button", { name: "清除全部", exact: true }).click();
   await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 

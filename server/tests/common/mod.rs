@@ -35,12 +35,20 @@ impl Harness {
         Self::start_in(tokenlens_server::DEFAULT_TIME_ZONE).await
     }
 
+    pub async fn start_with_stats_token(token: &str) -> Self {
+        Self::start_in_with_stats(tokenlens_server::DEFAULT_TIME_ZONE, Some(token)).await
+    }
+
     pub async fn start_in(time_zone: chrono_tz::Tz) -> Self {
+        Self::start_in_with_stats(time_zone, None).await
+    }
+
+    async fn start_in_with_stats(time_zone: chrono_tz::Tz, stats_token: Option<&str>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("server.sqlite");
         let opened = db::open(&db_path).expect("open database");
         assert!(opened.backup.is_none(), "a new database needs no backup");
-        Self::serve(dir, db_path, opened.conn, time_zone).await
+        Self::serve_with_stats(dir, db_path, opened.conn, time_zone, stats_token).await
     }
 
     /// A server on a copy of `file`, as after restoring a backup.
@@ -79,15 +87,25 @@ impl Harness {
     pub async fn start_with_mirror(
         mirror: Arc<tokenlens_server::release_mirror::ReleaseMirror>,
     ) -> Self {
+        Self::start_with_mirror_and_stats(mirror, None).await
+    }
+
+    pub async fn start_with_mirror_and_stats(
+        mirror: Arc<tokenlens_server::release_mirror::ReleaseMirror>,
+        stats_token: Option<&str>,
+    ) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("server.sqlite");
         let opened = db::open(&db_path).expect("open database");
         assert!(opened.backup.is_none(), "a new database needs no backup");
         let clock = ManualClock::new(START_MS);
         let reader = db::open_reader(&db_path).expect("reader");
-        let state = AppState::new(opened.conn, Arc::new(clock.clone()))
+        let mut state = AppState::new(opened.conn, Arc::new(clock.clone()))
             .with_reader(reader)
             .with_release_mirror(mirror);
+        if let Some(token) = stats_token {
+            state = state.with_stats_token(token.to_owned());
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -237,10 +255,20 @@ impl Harness {
         conn: rusqlite::Connection,
         time_zone: chrono_tz::Tz,
     ) -> Self {
+        Self::serve_with_stats(dir, db_path, conn, time_zone, None).await
+    }
+
+    async fn serve_with_stats(
+        dir: tempfile::TempDir,
+        db_path: PathBuf,
+        conn: rusqlite::Connection,
+        time_zone: chrono_tz::Tz,
+        stats_token: Option<&str>,
+    ) -> Self {
         let clock = ManualClock::new(START_MS);
         // Same wiring as `serve` in main.rs: reads on their own connection.
         let reader = db::open_reader(&db_path).expect("reader");
-        let state = AppState::new(conn, Arc::new(clock.clone()))
+        let mut state = AppState::new(conn, Arc::new(clock.clone()))
             .with_reader(reader)
             .with_time_zone(time_zone)
             .with_pairing_cipher(
@@ -249,6 +277,9 @@ impl Harness {
                 )
                 .expect("test pairing key"),
             );
+        if let Some(token) = stats_token {
+            state = state.with_stats_token(token.to_owned());
+        }
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");

@@ -1063,7 +1063,7 @@ async fn health_and_filter_options() {
     let (_, health) = w.h.get("/api/dashboard/health", Some(&w.a.read)).await;
     assert_eq!(health["eventCount"], 6);
     assert_eq!(health["deviceCount"], 2);
-    assert_eq!(health["schemaVersion"], 12);
+    assert_eq!(health["schemaVersion"], 13);
     assert_eq!(health["timeZone"], "Asia/Shanghai");
     assert!(
         health.get("databaseBytes").is_none(),

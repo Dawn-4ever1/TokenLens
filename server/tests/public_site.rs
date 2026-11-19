@@ -135,6 +135,116 @@ async fn the_home_page_puts_the_visitors_desktop_download_first_without_scripts(
 }
 
 #[tokio::test]
+async fn site_counters_are_anonymous_and_need_the_operator_token() {
+    let h = Harness::start_with_stats_token("test-stats-token").await;
+
+    // A wrong or missing token must look exactly like an unknown route.
+    for path in ["/stats/wrong-token", "/stats/test-stats-token/extra"] {
+        let response = h
+            .http
+            .get(format!("{}{path}", h.base))
+            .send()
+            .await
+            .expect("stats page");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+
+    // GETs count; HEAD checks do not. The privacy page is counted separately.
+    for _ in 0..2 {
+        assert_eq!(
+            h.http
+                .get(format!("{}/", h.base))
+                .send()
+                .await
+                .expect("home")
+                .status(),
+            StatusCode::OK
+        );
+    }
+    assert_eq!(
+        h.http
+            .head(format!("{}/", h.base))
+            .send()
+            .await
+            .expect("head")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.http
+            .get(format!("{}/privacy", h.base))
+            .send()
+            .await
+            .expect("privacy")
+            .status(),
+        StatusCode::OK
+    );
+
+    assert_eq!(
+        h.count("SELECT count FROM site_daily_counts WHERE metric = 'home_view'"),
+        2
+    );
+    assert_eq!(
+        h.count("SELECT count FROM site_daily_counts WHERE metric = 'privacy_view'"),
+        1
+    );
+    let columns: Vec<String> = h
+        .side_db()
+        .prepare("PRAGMA table_info(site_daily_counts)")
+        .expect("table")
+        .query_map([], |row| row.get(1))
+        .expect("columns")
+        .collect::<Result<_, _>>()
+        .expect("column names");
+    assert_eq!(columns, ["day", "metric", "count"]);
+
+    let response = h
+        .http
+        .get(format!("{}/stats/test-stats-token", h.base))
+        .send()
+        .await
+        .expect("stats");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-robots-tag")
+            .and_then(|value| value.to_str().ok()),
+        Some("noindex, nofollow")
+    );
+    assert!(response.headers().get(header::SET_COOKIE).is_none());
+    let body = response.text().await.expect("body");
+    assert!(body.contains("官网访问统计"));
+    assert!(body.contains("今日首页打开"));
+    assert!(body.contains("<strong>2</strong>"));
+    assert!(!body.contains("<script"));
+    assert!(!body.contains("test-stats-token"));
+}
+
+#[tokio::test]
+async fn stats_route_is_absent_without_configuration() {
+    let h = Harness::start().await;
+    let response = h
+        .http
+        .get(format!("{}/stats/any-token", h.base))
+        .send()
+        .await
+        .expect("stats");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        h.count("SELECT COUNT(*) FROM site_daily_counts") == 0,
+        "the disabled route must not write counters"
+    );
+}
+
+#[tokio::test]
 async fn public_routes_do_not_expose_files_or_relax_private_api_authentication() {
     let h = Harness::start().await;
     // Disable redirects so normalized dot-segments cannot turn into a false

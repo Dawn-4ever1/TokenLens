@@ -30,6 +30,7 @@ use crate::db::{self, AuthContext, BatchMeta, NewDevice};
 use crate::limiter::{ClaimLimiter, IngestLimiter};
 use crate::pricing::Pricer;
 use crate::secrets::{self, TokenKind};
+use crate::site_stats::{self, DayRow};
 
 pub const MIN_COLLECTOR_VERSION: &str = "0.1.0";
 pub const MIN_APP_VERSION: &str = "0.1.0";
@@ -49,6 +50,7 @@ pub struct AppState {
     limiter: Arc<Mutex<ClaimLimiter>>,
     ingest_limiter: Arc<Mutex<IngestLimiter>>,
     time_zone: Tz,
+    stats_token: Option<Arc<str>>,
     pricer: Arc<RwLock<Option<Arc<Pricer>>>>,
     pairing_cipher: Option<Result<crate::pairing_crypto::PairingCipher, &'static str>>,
     github: Option<std::sync::Arc<crate::github::GitHub>>,
@@ -68,6 +70,7 @@ impl AppState {
             limiter: Arc::new(Mutex::new(ClaimLimiter::default())),
             ingest_limiter: Arc::new(Mutex::new(IngestLimiter::default())),
             time_zone: crate::DEFAULT_TIME_ZONE,
+            stats_token: None,
             pricer: Arc::new(RwLock::new(None)),
             pairing_cipher: None,
             github: None,
@@ -224,6 +227,58 @@ impl AppState {
         self
     }
 
+    /// Private link token for the operator-only website counters. Without it
+    /// the `/stats/{token}` route behaves as if it does not exist.
+    #[must_use]
+    pub fn with_stats_token(mut self, token: String) -> Self {
+        self.stats_token = Some(Arc::from(token));
+        self
+    }
+
+    pub fn stats_token(&self) -> Option<&str> {
+        self.stats_token.as_deref()
+    }
+
+    /// Counts one anonymous public-site event for today. The database only
+    /// sees a day and a metric name; no request metadata is passed here.
+    pub async fn record_site_metric(&self, metric: &'static str) {
+        let db = Arc::clone(&self.db);
+        let day = site_stats::day_for(self.clock.now_ms(), self.time_zone);
+        let result = tokio::task::spawn_blocking(move || {
+            let conn = db.lock().map_err(|_| "site stats database lock poisoned")?;
+            site_stats::record(&conn, &day, metric).map_err(|_| "site stats could not be written")
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(error, metric, "site metric not recorded"),
+            Err(error) => tracing::warn!(%error, metric, "site metric task failed"),
+        }
+    }
+
+    pub async fn site_stats_report(&self, days: usize) -> Option<Vec<DayRow>> {
+        let db = Arc::clone(&self.db);
+        let now = self.clock.now_ms();
+        let time_zone = self.time_zone;
+        tokio::task::spawn_blocking(move || {
+            let conn = db.lock().ok()?;
+            site_stats::report(&conn, now, time_zone, days).ok()
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    pub fn local_time_label(&self) -> String {
+        chrono::DateTime::from_timestamp_millis(self.clock.now_ms())
+            .map(|time| {
+                time.with_timezone(&self.time_zone)
+                    .format("%Y-%m-%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_else(|| "-".to_owned())
+    }
+
     fn check_ingest_budget(&self, device_id: &str) -> Result<(), ApiError> {
         self.ingest_limiter
             .lock()
@@ -311,6 +366,7 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/", get(crate::public_site::index))
         .route("/privacy", get(crate::public_site::privacy))
+        .route("/stats/{token}", get(crate::public_site::site_stats_page))
         .route("/assets/site.css", get(crate::public_site::styles))
         .route("/assets/tokenlens.svg", get(crate::public_site::logo))
         .route("/downloads/latest.json", get(download_manifest))
@@ -1170,11 +1226,12 @@ async fn latest_installer(
     let snapshot = mirror_snapshot(&state)?;
     let filename = filename(&snapshot.version());
     let location = snapshot.location(&filename).ok_or(ApiError::NotFound)?;
+    let location = format!("{location}?source=website");
     let mut response = StatusCode::FOUND.into_response();
     let headers = response.headers_mut();
     headers.insert(
         header::LOCATION,
-        HeaderValue::from_str(location).map_err(|_| ApiError::Internal)?,
+        HeaderValue::from_str(&location).map_err(|_| ApiError::Internal)?,
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
     headers.insert(
@@ -1184,21 +1241,43 @@ async fn latest_installer(
     Ok(response)
 }
 
-async fn download_latest_windows(State(state): State<AppState>) -> Result<Response, ApiError> {
-    latest_installer(state, |version| {
+async fn download_latest_windows(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+) -> Result<Response, ApiError> {
+    let response = latest_installer(state.clone(), |version| {
         format!("TokenLens_{version}_x64-setup.exe")
     })
-    .await
+    .await?;
+    if method == axum::http::Method::GET {
+        state
+            .record_site_metric(crate::site_stats::DOWNLOAD_CLICK_WINDOWS)
+            .await;
+    }
+    Ok(response)
 }
 
-async fn download_latest_macos(State(state): State<AppState>) -> Result<Response, ApiError> {
-    latest_installer(state, |version| format!("TokenLens_{version}_aarch64.dmg")).await
+async fn download_latest_macos(
+    State(state): State<AppState>,
+    method: axum::http::Method,
+) -> Result<Response, ApiError> {
+    let response = latest_installer(state.clone(), |version| {
+        format!("TokenLens_{version}_aarch64.dmg")
+    })
+    .await?;
+    if method == axum::http::Method::GET {
+        state
+            .record_site_metric(crate::site_stats::DOWNLOAD_CLICK_MACOS)
+            .await;
+    }
+    Ok(response)
 }
 
 async fn download_asset(
     State(state): State<AppState>,
     method: axum::http::Method,
     Path((version, filename)): Path<(String, String)>,
+    RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
     let snapshot = mirror_snapshot(&state)?;
     if snapshot.version() != version {
@@ -1212,6 +1291,22 @@ async fn download_asset(
         || !snapshot.checksum_matches(&filename, &bytes)
     {
         return Err(ApiError::ServiceUnavailable);
+    }
+    if method == axum::http::Method::GET
+        && query
+            .as_deref()
+            .is_some_and(|query| query.split('&').any(|pair| pair == "source=website"))
+    {
+        let metric = if filename.ends_with("_aarch64.dmg") {
+            Some(crate::site_stats::DOWNLOAD_FILE_MACOS)
+        } else if filename.ends_with("_x64-setup.exe") {
+            Some(crate::site_stats::DOWNLOAD_FILE_WINDOWS)
+        } else {
+            None
+        };
+        if let Some(metric) = metric {
+            state.record_site_metric(metric).await;
+        }
     }
     let is_json = filename == crate::release_mirror::MANIFEST_FILE;
     let bytes = if is_json {

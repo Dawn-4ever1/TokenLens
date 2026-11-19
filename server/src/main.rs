@@ -160,6 +160,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let state = AppState::new(conn, Arc::new(SystemClock))
                     .with_reader(reader)
                     .with_time_zone(config.time_zone);
+                let state = match std::env::var("TOKENLENS_STATS_TOKEN") {
+                    Ok(token) if !token.trim().is_empty() => {
+                        state.with_stats_token(token.trim().to_owned())
+                    }
+                    _ => state,
+                };
                 let state = match tokenlens_server::github::GitHub::from_env() {
                     Some(github) => state.with_github(github),
                     None => state,

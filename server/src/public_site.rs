@@ -4,8 +4,12 @@
 //! The home page uses standard browser platform hints only to put the matching
 //! installer first and emphasize it; both download choices remain available.
 
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+
+use crate::http::AppState;
+use crate::site_stats::{self, DailyCounts, DayRow};
 
 const INDEX: &str = include_str!("../public/index.html");
 const PRIVACY: &str = include_str!("../public/privacy.html");
@@ -40,7 +44,7 @@ fn page(content: &str, content_type: &'static str, cache: &'static str) -> Respo
     response
 }
 
-pub async fn index(headers: HeaderMap) -> Response {
+async fn render_index(headers: HeaderMap) -> Response {
     let macos = requested_platform(&headers) == Some(DesktopPlatform::Macos);
     let (hero_downloads, bottom_downloads) = if macos {
         (
@@ -80,6 +84,14 @@ pub async fn index(headers: HeaderMap) -> Response {
         header::VARY,
         header::HeaderValue::from_static("User-Agent, Sec-CH-UA-Platform"),
     );
+    response
+}
+
+pub async fn index(State(state): State<AppState>, method: Method, headers: HeaderMap) -> Response {
+    let response = render_index(headers).await;
+    if method == Method::GET && response.status() == StatusCode::OK {
+        state.record_site_metric(site_stats::HOME_VIEW).await;
+    }
     response
 }
 
@@ -139,8 +151,145 @@ fn requested_platform(headers: &HeaderMap) -> Option<DesktopPlatform> {
     }
 }
 
-pub async fn privacy() -> Response {
+async fn render_privacy() -> Response {
     page(PRIVACY, "text/html; charset=utf-8", "public, max-age=300")
+}
+
+pub async fn privacy(State(state): State<AppState>, method: Method) -> Response {
+    let response = render_privacy().await;
+    if method == Method::GET && response.status() == StatusCode::OK {
+        state.record_site_metric(site_stats::PRIVACY_VIEW).await;
+    }
+    response
+}
+
+pub async fn site_stats_page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+    let Some(expected) = state.stats_token() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !token_matches(expected, &token) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(rows) = state.site_stats_report(30).await else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "统计暂时不可用").into_response();
+    };
+    let content = render_stats_page(&rows, &state.local_time_label());
+    let mut response = page(&content, "text/html; charset=utf-8", "no-store");
+    let headers = response.headers_mut();
+    headers.insert(
+        "x-robots-tag",
+        header::HeaderValue::from_static("noindex, nofollow"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    response
+}
+
+fn token_matches(expected: &str, provided: &str) -> bool {
+    let expected = expected.as_bytes();
+    let provided = provided.as_bytes();
+    if expected.len() != provided.len() {
+        return false;
+    }
+    let mut difference = 0_u8;
+    for (left, right) in expected.iter().zip(provided) {
+        difference |= left ^ right;
+    }
+    difference == 0
+}
+
+fn render_stats_page(rows: &[DayRow], updated: &str) -> String {
+    let today = rows
+        .last()
+        .map_or_else(DailyCounts::default, |row| row.counts);
+    let week = rows
+        .iter()
+        .rev()
+        .take(7)
+        .fold(DailyCounts::default(), |total, row| total + row.counts);
+    let month = rows
+        .iter()
+        .fold(DailyCounts::default(), |total, row| total + row.counts);
+
+    let mut table_rows = String::new();
+    for row in rows {
+        table_rows.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            row.day,
+            row.counts.home_views,
+            row.counts.download_clicks_macos,
+            row.counts.download_clicks_windows,
+            row.counts.downloads_macos,
+            row.counts.downloads_windows,
+        ));
+    }
+
+    format!(
+        r##"<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="noindex,nofollow">
+    <meta name="theme-color" content="#f8f6f1">
+    <link rel="icon" type="image/svg+xml" href="/assets/tokenlens.svg">
+    <link rel="stylesheet" href="/assets/site.css">
+    <title>官网统计 · TokenLens</title>
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="container header-inner">
+        <a class="brand" href="/" aria-label="TokenLens 首页">
+          <img src="/assets/tokenlens.svg" alt="" width="36" height="36">
+          <span>TokenLens</span>
+        </a>
+        <nav class="site-nav" aria-label="主导航">
+          <a href="/">产品</a>
+          <a href="/privacy">隐私政策</a>
+        </nav>
+      </div>
+    </header>
+    <main class="policy-main">
+      <article class="container policy stats">
+        <header class="policy-header">
+          <p class="eyebrow">TokenLens · 仅管理员</p>
+          <h1>官网访问统计</h1>
+          <p class="policy-updated">更新至 {updated}（北京时间）· 只累计次数，不识别访客</p>
+          <p class="policy-lead">这里只记录每天官网被打开和安装包被下载的次数，不保存 IP、浏览器标识或 Cookie，无法知道具体是谁。发布验收、自动检查和镜像同步也可能计入，所以这些数字不是“人数”。</p>
+        </header>
+        <div class="stats-summary">
+          <div><small>今日首页打开</small><strong>{today_home}</strong></div>
+          <div><small>近 7 天首页打开</small><strong>{week_home}</strong></div>
+          <div><small>近 7 天下载按钮点击</small><strong>{week_clicks}</strong></div>
+          <div><small>近 7 天安装包下载</small><strong>{week_downloads}</strong></div>
+        </div>
+        <h2>最近 30 天</h2>
+        <div class="stats-table-wrap">
+          <table class="stats-table">
+            <thead><tr><th>日期</th><th>首页打开</th><th>Mac 按钮</th><th>Windows 按钮</th><th>Mac 安装包</th><th>Windows 安装包</th></tr></thead>
+            <tbody>{table_rows}</tbody>
+          </table>
+        </div>
+        <p class="policy-note">统计从 2026 年 11 月 19 日开始；在此之前官网没有记录访问数据，无法补回。近 30 天合计：首页打开 {month_home} 次，下载按钮点击 {month_clicks} 次，安装包下载 {month_downloads} 次。</p>
+      </article>
+    </main>
+    <footer class="site-footer">
+      <div class="container footer-inner"><span>TokenLens</span><span>仅管理员页面 · 不对外链接</span></div>
+    </footer>
+  </body>
+</html>
+"##,
+        today_home = today.home_views,
+        week_home = week.home_views,
+        week_clicks = week.download_clicks(),
+        week_downloads = week.downloads(),
+        table_rows = table_rows,
+        month_home = month.home_views,
+        month_clicks = month.download_clicks(),
+        month_downloads = month.downloads(),
+    )
 }
 
 pub async fn styles() -> Response {
@@ -218,7 +367,7 @@ mod tests {
             (headers(Some(WINDOWS_UA), None), "windows", "macos"),
             (headers(None, None), "windows", "macos"),
         ] {
-            let response = index(request_headers).await;
+            let response = render_index(request_headers).await;
             assert_eq!(
                 response.headers().get(header::VARY).expect("Vary"),
                 "User-Agent, Sec-CH-UA-Platform"
@@ -257,6 +406,8 @@ mod tests {
         assert!(PRIVACY.contains("也不会删除云端设备或历史"));
         assert!(PRIVACY.contains("Google 和 GitHub 不取得你的 TokenLens 会话"));
         assert!(PRIVACY.contains("项目统计只保留项目名称和工作区标识的不可逆哈希"));
+        assert!(PRIVACY.contains("只按天累加首页打开次数和各平台下载次数"));
+        assert!(PRIVACY.contains("不保存 IP 地址、浏览器标识、来源页面或 Cookie"));
         assert!(PRIVACY.contains("没有「一键删除账号及全部云端历史」入口"));
         for page in [INDEX, PRIVACY] {
             assert!(!page.contains("<script"));

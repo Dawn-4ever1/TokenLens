@@ -934,8 +934,9 @@ test("signing out shows only this computer; signing back in reads the cloud's cu
   await expect(page.getByRole("heading", { name: "Windows 台式机", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Windows 台式机/ }).check();
+  await expect(page.getByRole("button", { name: /^筛选/ })).toContainText("1");
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
   await settle(page, "设备");
@@ -1143,8 +1144,9 @@ test("cloud sign-in shows every device; adding a device is instructions only", a
   await expect(page.getByRole("button", { name: "设备范围：全账号", exact: true })).toBeVisible();
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Windows 台式机/ }).click();
+  await expect(page.getByRole("button", { name: /^筛选/ })).toContainText("1");
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Windows 台式机");
+  await expect(page.getByRole("group", { name: "生效的筛选" })).toHaveCount(0);
   await page.getByRole("button", { name: "添加设备", exact: true }).click();
   await expect(dialog).toContainText("在另一台电脑上安装并打开 TokenLens。");
   await expect(dialog).toContainText("使用与这台电脑相同的账号登录。");
@@ -1256,31 +1258,37 @@ test("server read failures keep Devices controls available without a misleading 
 /** The first KPI shows tokens, without range labels or secondary notes. */
 const tokensKpi = (page: Page) => page.getByTestId("overview-kpis").locator("section.card").first();
 
-test("a drill-down shows its filter as a chip and is undone on the way back", async ({ page }) => {
+test("a drill-down shows its filter count without a chip row and is undone on the way back", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page);
   await settle(page, "总览");
   const headline = tokensKpi(page).locator(".display");
   const whole = await headline.innerText();
   const chips = page.getByRole("group", { name: "生效的筛选" });
+  const filterButton = page.getByRole("button", { name: /^筛选/ });
   await expect(chips).toHaveCount(0);
+  await expect(filterButton).not.toContainText(/\d/);
   await page.getByRole("button", { name: /Claude Code/ }).first().click();
   await expect(page.getByRole("heading", { name: "会话", level: 1 })).toBeVisible();
-  await expect(chips).toContainText("Claude Code");
+  await expect(chips).toHaveCount(0);
+  await expect(filterButton).toContainText("1");
   // Going back restores the unfiltered numbers.
   await page.getByRole("button", { name: "总览", exact: true }).click();
-  await expect(chips).toHaveCount(0);
+  await expect(filterButton).not.toContainText(/\d/);
   await expect(headline).toHaveText(whole);
-  // A filter the user picks stays, is visible on every page, and one click removes it.
+  // Picked filters stay visible as a count on every page. Clear them in the menu.
   await page.getByRole("button", { name: /Claude Code/ }).first().click();
-  await page.getByRole("button", { name: "筛选", exact: true }).click();
+  await filterButton.click();
   await page.getByRole("checkbox", { name: /Codex/ }).click();
+  await expect(filterButton).toContainText("2");
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "总览", exact: true }).click();
-  await expect(chips).toContainText("Codex");
-  await expect(headline).not.toHaveText(whole);
-  await chips.getByRole("button", { name: "清除筛选" }).click();
   await expect(chips).toHaveCount(0);
+  await expect(filterButton).toContainText("2");
+  await expect(headline).not.toHaveText(whole);
+  await filterButton.click();
+  await page.getByRole("button", { name: "清除全部", exact: true }).click();
+  await expect(filterButton).not.toContainText(/\d/);
   await expect(headline).toHaveText(whole);
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);

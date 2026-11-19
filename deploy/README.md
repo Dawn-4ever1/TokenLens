@@ -66,6 +66,7 @@ Optional `.env` in this folder (both have defaults):
 ```sh
 DASHBOARD_TIMEZONE=Asia/Shanghai   # day buckets on the dashboard (IANA name)
 RUST_LOG=info
+# TOKENLENS_STATS_TOKEN=...        # private /stats/{token} link; leave unset to disable
 ```
 
 The listen address and database path are fixed in `compose.yaml` so `.env`
@@ -76,8 +77,10 @@ cannot expose the port to the internet.
 `/` and `/privacy` are static pages compiled into the server; their stylesheet
 and logo are under `server/public/`. They do not provide a browser dashboard,
 require a login, set cookies, run JavaScript or load third-party resources.
-Only the four explicit public GET routes are available, with a restrictive
-content-security policy; the API, account and dashboard boundaries stay as
+The four public page asset routes stay public; `/stats/{token}` is an optional
+operator-only page with the same CSP, enabled only when `TOKENLENS_STATS_TOKEN`
+is set. It shows aggregate daily page and download counts; no IP, user agent,
+referrer or cookie is stored. The API, account and dashboard boundaries stay as
 before. The home page reads standard browser platform hints to put the Mac or
 Windows download button first and emphasize it, varies its cache by those
 hints, and always keeps both choices available. It does not save the detected

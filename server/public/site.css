@@ -163,6 +163,20 @@ h2 { margin-bottom: 15px; font-size: clamp(28px, 3vw, 37px); font-weight: 650; l
 .policy-contact p:last-child { margin-bottom: 0; }
 .policy-end { margin-top: 44px; padding-top: 24px; border-top: 1px solid var(--line); }
 
+.stats { max-width: 960px; }
+.stats-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 30px 0 34px; }
+.stats-summary div { padding: 16px 18px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.stats-summary small { display: block; margin-bottom: 7px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.stats-summary strong { font-size: 28px; font-weight: 650; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+.stats h2 { margin-top: 8px; }
+.stats-table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 13px; white-space: nowrap; }
+.stats-table th, .stats-table td { padding: 11px 15px; border-bottom: 1px solid var(--line); text-align: right; font-variant-numeric: tabular-nums; }
+.stats-table th:first-child, .stats-table td:first-child { text-align: left; }
+.stats-table th { color: var(--muted); background: var(--soft); font-weight: 600; }
+.stats-table tbody tr:last-child td { border-bottom: 0; }
+.stats-table tbody tr:last-child { background: #f4f7fb; font-weight: 650; }
+
 @media (min-width: 1100px) {
   .hero { grid-template-columns: .94fr 1.06fr; }
   .preview-main { padding: 22px; }
@@ -207,10 +221,12 @@ h2 { margin-bottom: 15px; font-size: clamp(28px, 3vw, 37px); font-weight: 650; l
   .download-note { text-align: left; }
   .footer-inner { flex-direction: column; gap: 10px; }
   .policy-main { padding-block: 42px 60px; }
+  .stats-summary { grid-template-columns: repeat(2, 1fr); }
+  .stats-table { min-width: 620px; }
   .policy-toc ol { grid-template-columns: 1fr; }
-  .policy th, .policy td { display: block; width: 100%; }
-  .policy th { padding-bottom: 6px; border-bottom: 0; }
-  .policy td { padding-top: 6px; }
+  .policy table:not(.stats-table) th, .policy table:not(.stats-table) td { display: block; width: 100%; }
+  .policy table:not(.stats-table) th { padding-bottom: 6px; border-bottom: 0; }
+  .policy table:not(.stats-table) td { padding-top: 6px; }
 }
 
 @media (max-width: 440px) {
