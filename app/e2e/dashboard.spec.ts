@@ -19,10 +19,11 @@ interface Options {
   theme?: "light" | "dark";
   direction?: "editorial" | "graphite" | "paper";
   query?: string;
+  exactNumbers?: boolean;
 }
 
 /** Seeds UI state once per tab and records console errors and page errors. */
-async function open(page: Page, { view = "overview", theme = "light", direction = "editorial", query = "?server" }: Options = {}) {
+async function open(page: Page, { view = "overview", theme = "light", direction = "editorial", query = "?server", exactNumbers = false }: Options = {}) {
   await page.addInitScript(
     ([settings, initialView]) => {
       const key = new URLSearchParams(location.search).has("brand-gallery")
@@ -34,7 +35,7 @@ async function open(page: Page, { view = "overview", theme = "light", direction 
       localStorage.setItem("tokenlens.page.v1", initialView);
       sessionStorage.setItem("e2e-seeded", "1");
     },
-    [JSON.stringify({ theme, direction, refreshSeconds: 0 }), JSON.stringify(view)] as const,
+    [JSON.stringify({ theme, direction, refreshSeconds: 0, exactNumbers }), JSON.stringify(view)] as const,
   );
   const errors: string[] = [];
   page.on("console", (message) => {
@@ -174,7 +175,7 @@ test("overview prioritizes concise KPIs and a full-width trend", async ({ page }
   const errors = await open(page);
   await settle(page, "总览");
   const kpis = page.getByTestId("overview-kpis");
-  await expect(kpis.locator("h2")).toHaveText(["Tokens", "成本", "缓存命中率", "会话"]);
+  await expect(kpis.locator("h2")).toHaveText(["TOKENS", "成本", "缓存命中率", "会话"]);
   await expect(page.getByText("成本为 API 等价估算", { exact: true })).toHaveCount(0);
   await expect(page.getByText("部分未定价", { exact: true })).toHaveCount(0);
   await expect(kpis.getByText(/API 等价估算|不是账单|非缓存|今日|轮 ·/)).toHaveCount(0);
@@ -186,6 +187,35 @@ test("overview prioritizes concise KPIs and a full-width trend", async ({ page }
   expect(composition!.y).toBeGreaterThan(trend!.y + trend!.height);
   expect(recent!.y).toBe(devices!.y);
   expect(recent!.y).toBeGreaterThan(composition!.y + composition!.height);
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("overview gives Tokens a wider card without shrinking its number", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 900 });
+  const errors = await open(page, { exactNumbers: true });
+  await settle(page, "总览");
+  const kpis = page.getByTestId("overview-kpis");
+  await expect(kpis.locator("h2")).toHaveText(["TOKENS", "成本", "缓存命中率", "会话"]);
+  const boxes = await kpis.locator("section.card").evaluateAll((cards) => cards.map((card) => {
+    const rect = card.getBoundingClientRect();
+    const value = card.querySelector<HTMLElement>(".display")!;
+    return { width: rect.width, height: rect.height, fontSize: getComputedStyle(value).fontSize };
+  }));
+  // Tokens is clearly wider; all four cards keep one height and one number size.
+  expect(boxes[0]!.width).toBeGreaterThan(boxes[1]!.width * 1.5);
+  expect(new Set(boxes.map((box) => box.height)).size).toBe(1);
+  expect(boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
+  // A 12-digit exact total still fits at that size instead of shrinking.
+  const display = kpis.locator("section.card").first().locator(".display");
+  await display.locator("button").evaluate((element) => { element.textContent = "123,456,789,012"; });
+  const fits = await display.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element.querySelector("button")!);
+    return range.getBoundingClientRect().right <= element.getBoundingClientRect().right + 1;
+  });
+  expect(fits).toBe(true);
+  await expect(display.locator("button")).toHaveCSS("font-size", "32px");
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });
@@ -840,7 +870,7 @@ test("email sign-in keeps an account entry and sign-out preserves device collect
   await expect(account).toHaveCount(0);
   await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   await expect(page.getByText("后台采集中", { exact: true })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "TOKENS", exact: true })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -1194,7 +1224,7 @@ test("a drill-down shows its filter as a chip and is undone on the way back", as
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page);
   await settle(page, "总览");
-  const headline = tokensKpi(page).locator(".num-fit");
+  const headline = tokensKpi(page).locator(".display");
   const whole = await headline.innerText();
   const chips = page.getByRole("group", { name: "生效的筛选" });
   await expect(chips).toHaveCount(0);
@@ -1225,10 +1255,10 @@ test("clicking a token count switches every count to exact digits and remembers 
     await page.setViewportSize({ width, height: 900 });
     const errors = await open(page);
     await settle(page, "总览");
-    const kpi = tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: false });
+    const kpi = tokensKpi(page).locator(".display").getByRole("button", { pressed: false });
     await expect(kpi).toHaveText(/^[\d.]+[KMBT]$/);
     await kpi.click();
-    const exactKpi = tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true });
+    const exactKpi = tokensKpi(page).locator(".display").getByRole("button", { pressed: true });
     await expect(exactKpi).toHaveText(/^\d{1,3}(,\d{3})+$/);
     // The headline follows the shared exact-number preference.
     await expect(tokensKpi(page).getByRole("button", { pressed: false })).toHaveCount(0);
@@ -1238,9 +1268,9 @@ test("clicking a token count switches every count to exact digits and remembers 
     expect(fits).toBe(true);
     await page.reload();
     await settle(page, "总览");
-    await expect(tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true })).toHaveText(/,/);
-    await tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: true }).click();
-    await expect(tokensKpi(page).locator(".num-fit").getByRole("button", { pressed: false })).toHaveText(/^[\d.]+[KMBT]$/);
+    await expect(tokensKpi(page).locator(".display").getByRole("button", { pressed: true })).toHaveText(/,/);
+    await tokensKpi(page).locator(".display").getByRole("button", { pressed: true }).click();
+    await expect(tokensKpi(page).locator(".display").getByRole("button", { pressed: false })).toHaveText(/^[\d.]+[KMBT]$/);
     expect(errors).toEqual([]);
     await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); });
   }

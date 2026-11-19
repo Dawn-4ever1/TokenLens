@@ -62,8 +62,8 @@ export function Overview() {
   return (
     <div className="space-y-[var(--stack-space)]">
       {errorBanner}
-      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-[var(--grid-gap)] min-[1000px]:grid-cols-4">
-        <Kpi label="Tokens" value={<Num value={s.totalTokens} />} />
+      <div data-testid="overview-kpis" className="overview-kpis">
+        <Kpi label="TOKENS" value={<Num value={s.totalTokens} />} primary />
         <Kpi label="成本" value={<span className="num">{usd(s.costUsd)}</span>} />
         <Kpi label="缓存命中率" value={<span className="num">{percent(s.cacheHitRate)}</span>} />
         <Kpi label="会话" value={<span className="num">{exact(s.sessionCount)}</span>} />
@@ -154,7 +154,7 @@ function TerminalOverview({ summary, empty, trend, trendError, trendReload, buck
   return (
     <div className="terminal-layout space-y-[var(--stack-space)]">
       <div data-testid="overview-kpis" className="grid grid-cols-2 gap-0 min-[900px]:grid-cols-5">
-        <TerminalMetric label="Tokens" value={<Num value={summary.totalTokens} />} />
+        <TerminalMetric label="TOKENS" value={<Num value={summary.totalTokens} />} />
         <TerminalMetric label="成本" value={usd(summary.costUsd)} />
         <TerminalMetric label="缓存命中率" value={percent(summary.cacheHitRate)} />
         <TerminalMetric label="会话" value={exact(summary.sessionCount)} />
@@ -205,7 +205,7 @@ function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket,
         <div className="paper-conclusion mt-3">{paperConclusion(summary)}</div>
       </div>
       <div data-testid="overview-kpis" className="grid grid-cols-2 gap-x-6 gap-y-4 min-[900px]:grid-cols-4">
-        <PaperMetric label="Tokens" value={<Num value={summary.totalTokens} />} />
+        <PaperMetric label="TOKENS" value={<Num value={summary.totalTokens} />} />
         <PaperMetric label="成本" value={usd(summary.costUsd)} />
         <PaperMetric label="缓存命中率" value={percent(summary.cacheHitRate)} />
         <PaperMetric label="会话" value={exact(summary.sessionCount)} />
@@ -228,11 +228,11 @@ function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket,
   );
 }
 
-function Kpi({ label, value }: { label: string; value: ReactNode }) {
+function Kpi({ label, value, primary = false }: { label: string; value: ReactNode; primary?: boolean }) {
   return (
-    <section className="card min-w-0 px-[var(--card-px)] py-[var(--kpi-py)]">
+    <section className={cn("card min-w-0 px-[var(--card-px)] py-[var(--kpi-py)]", primary && "overview-kpi-primary")}>
       <h2 className="truncate text-sm font-semibold text-ink">{label}</h2>
-      <div className="display num-fit mt-[var(--kpi-gap)] text-[32px] leading-10 text-ink min-[1300px]:text-[36px]">{value}</div>
+      <div className={cn("display mt-[var(--kpi-gap)] text-[32px] leading-10 text-ink min-[1300px]:text-[36px]", primary ? "whitespace-nowrap" : "num-fit")}>{value}</div>
     </section>
   );
 }

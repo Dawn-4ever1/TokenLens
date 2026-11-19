@@ -15,7 +15,7 @@ async function openOverview(page: import("@playwright/test").Page, width = 1200)
 }
 
 function summaryCard(page: import("@playwright/test").Page) {
-  return page.locator("section").filter({ has: page.getByRole("heading", { name: "Tokens", exact: true }) }).first();
+  return page.locator("section").filter({ has: page.getByRole("heading", { name: "TOKENS", exact: true }) }).first();
 }
 
 test("five calendar ranges update the figures, including custom dates", async ({ page }) => {
@@ -26,18 +26,18 @@ test("five calendar ranges update the figures, including custom dates", async ({
   await expect(picker.getByRole("radio").allTextContents()).resolves.toEqual(["日", "周", "月", "总计", "自定义"]);
   const summary = summaryCard(page);
   // The original number display: plain text, no animation wrapper.
-  await expect(summary.locator(".num-fit .num")).toHaveCount(1);
+  await expect(summary.locator(".display .num")).toHaveCount(1);
   await expect.poll(() => summary.getByRole("button").first().evaluate((element) => getComputedStyle(element).animationName)).toBe("none");
 
   for (const range of ["日", "周", "月", "总计"]) {
     await picker.getByRole("radio", { name: range, exact: true }).click();
-    await expect(summary.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
+    await expect(summary.getByRole("heading", { name: "TOKENS", exact: true })).toBeVisible();
   }
   await picker.getByRole("radio", { name: "自定义", exact: true }).click();
   await expect(page.getByRole("button", { name: "修改日期", exact: true })).toBeVisible();
   await page.getByLabel("开始", { exact: true }).fill("2026-11-03");
   await page.getByLabel("结束", { exact: true }).fill("2026-11-05");
-  await expect(summary.getByRole("heading", { name: "Tokens", exact: true })).toBeVisible();
+  await expect(summary.getByRole("heading", { name: "TOKENS", exact: true })).toBeVisible();
   const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("tokenlens.filters.v1") ?? "{}"));
   expect(stored).toMatchObject({ preset: "custom", customFrom: "2026-11-03", customTo: "2026-11-05" });
   expect(errors).toEqual([]);
@@ -54,7 +54,7 @@ test("device picker lists every device without descriptions and filters every pa
     document.querySelector(`[aria-label="${label}"]`)!.getBoundingClientRect().left));
   expect(order[0]).toBeLessThan(order[1]!);
   expect(order[1]).toBeLessThan(order[2]!);
-  const all = await summaryCard(page).locator(".num-fit").innerText();
+  const all = await summaryCard(page).locator(".display").innerText();
   await scope.click();
   await expect(page.getByRole("menuitemradio").allTextContents()).resolves.toEqual([
     "全账号", "MacBook Pro（本机）", "Mac mini", "Windows 台式机", "旧笔记本",
@@ -64,13 +64,13 @@ test("device picker lists every device without descriptions and filters every pa
   await page.getByRole("menuitemradio", { name: "MacBook Pro（本机）", exact: true }).click();
   await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
   await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("MacBook Pro");
-  const currentNumber = summaryCard(page).locator(".num-fit");
+  const currentNumber = summaryCard(page).locator(".display");
   await expect(currentNumber).not.toHaveText(all);
   const current = await currentNumber.innerText();
   await page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true }).click();
   await page.getByRole("menuitemradio", { name: "Mac mini", exact: true }).click();
   await expect(page.getByRole("group", { name: "生效的筛选" })).toContainText("Mac mini");
-  const otherNumber = summaryCard(page).locator(".num-fit");
+  const otherNumber = summaryCard(page).locator(".display");
   await expect(otherNumber).not.toHaveText(current);
   const other = await otherNumber.innerText();
   expect(other).not.toBe(all);
@@ -134,7 +134,7 @@ for (const width of [1440, 1200, 1100, 1000, 900]) {
   test(`headline token text stays left-aligned throughout format changes @${width}`, async ({ page }) => {
     await openOverview(page, width);
     expect(await page.evaluate(() => innerWidth)).toBe(width);
-    const button = summaryCard(page).locator(".num-fit button");
+    const button = summaryCard(page).locator(".display button");
     // A range change and a reload must not bring the old number animation back.
     for (const range of ["月", "总计"]) {
       await page.getByRole("radiogroup", { name: "时间范围" }).getByRole("radio", { name: range, exact: true }).click();
