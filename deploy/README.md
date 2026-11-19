@@ -77,7 +77,7 @@ cannot expose the port to the internet.
 `/` and `/privacy` are static pages compiled into the server; their stylesheet
 and logo are under `server/public/`. They do not provide a browser dashboard,
 require a login, set cookies, run JavaScript or load third-party resources.
-The four public page asset routes stay public; `/stats/{token}` is an optional
+The public page, stylesheet, logo and four fixed demo-screenshot asset routes stay public; `/stats/{token}` is an optional
 operator-only page with the same CSP, enabled only when `TOKENLENS_STATS_TOKEN`
 is set. It shows aggregate daily page and download counts; no IP, user agent,
 referrer or cookie is stored. The API, account and dashboard boundaries stay as
