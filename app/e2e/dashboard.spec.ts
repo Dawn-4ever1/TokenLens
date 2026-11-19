@@ -228,8 +228,7 @@ test("overview keeps equal KPIs until Tokens needs more room, then stacks tools 
   expect(medium.boxes.map((box) => box.fontSize)).toEqual(["32px", "32px", "32px", "32px"]);
   expect(medium.boxes[0]!.width).toBeGreaterThan(medium.boxes[1]!.width);
   expect(medium.boxes[0]!.width).toBeLessThan(medium.boxes[1]!.width * 1.5);
-  // At this window width the tool/model cards stay side by side. A wider
-  // Tokens value only changes the KPI columns, not the cards below.
+  // When the exact Tokens value no longer fits, the modules stack full-width.
   expect(medium.toolModelStacked).toBe(false);
 
   // The medium layout grows only the Tokens column to fit a 12-digit exact total.
@@ -259,7 +258,9 @@ test("overview keeps equal KPIs until Tokens needs more room, then stacks tools 
 });
 
 test("tool and model cards switch only once in either resize direction", async ({ page }) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
+  // This exact value needs more room at 36px than a 1440px window provides.
+  // Start wide enough for a real side-by-side state; never shrink the text.
+  await page.setViewportSize({ width: 1700, height: 900 });
   const errors = await open(page, { exactNumbers: true });
   await settle(page, "总览");
 
@@ -275,7 +276,7 @@ test("tool and model cards switch only once in either resize direction", async (
   });
 
   const narrowing: boolean[] = [];
-  for (let width = 1440; width >= 900; width -= 1) {
+  for (let width = 1700; width >= 900; width -= 1) {
     await page.setViewportSize({ width, height: 900 });
     narrowing.push(await isStacked());
   }
@@ -284,7 +285,7 @@ test("tool and model cards switch only once in either resize direction", async (
   expect(narrowing.filter((stacked, index) => index > 0 && stacked !== narrowing[index - 1])).toEqual([true]);
 
   const widening: boolean[] = [];
-  for (let width = 900; width <= 1440; width += 1) {
+  for (let width = 900; width <= 1700; width += 1) {
     await page.setViewportSize({ width, height: 900 });
     widening.push(await isStacked());
   }

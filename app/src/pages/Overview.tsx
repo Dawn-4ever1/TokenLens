@@ -83,8 +83,6 @@ export function Overview() {
         </Card>
       ) : (
         <>
-          {/* Tool/model placement depends only on the window breakpoint. KPI
-              text measurement must not reverse it when the sidebar narrows. */}
           <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
             <ToolCard summary={s} />
             <ModelCard summary={s} />
@@ -270,6 +268,8 @@ function useKpiLayout(
       const padding = Number.parseFloat(styles.getPropertyValue("--card-px")) || 20;
       const gap = Number.parseFloat(styles.getPropertyValue("--grid-gap")) || 16;
       const equalInner = (rowWidth - gap * 3) / 4 - padding * 2;
+      // The sidebar narrows at 1100px and gives content width back. That
+      // must not reverse a one-way window resize from stacked to side by side.
       const mode = textWidth <= equalInner ? "wide" : "medium";
       setLayout((previous) => (previous === mode ? previous : mode));
     };
