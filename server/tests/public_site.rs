@@ -71,10 +71,55 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
             assert!(!body.contains("fill=\"#1e2b4a\""));
         }
         if path == "/assets/site.css" {
-            assert!(body.contains(".download-section { background: #1a1714; color: #f6f1e7; }"));
+            assert!(body.contains(
+                ".download-section { background: #1a1714; color: #f6f1e7; border-top: 0; }"
+            ));
         }
         assert!(!body.contains("tls_"), "{path}");
     }
+}
+
+#[tokio::test]
+async fn demo_screenshots_are_explicit_local_assets_with_immutable_caching() {
+    let h = Harness::start().await;
+    for path in [
+        "/assets/overview.webp",
+        "/assets/trends.webp",
+        "/assets/session-detail.webp",
+        "/assets/devices.webp",
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{path}", h.base))
+            .send()
+            .await
+            .expect("demo screenshot");
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).expect("type"),
+            "image/webp"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CACHE_CONTROL)
+                .expect("cache"),
+            "public, max-age=86400"
+        );
+        assert!(response.headers().get(header::SET_COOKIE).is_none());
+        let bytes = response.bytes().await.expect("image bytes");
+        assert!(bytes.starts_with(b"RIFF"), "{path}: WebP header");
+        assert_eq!(&bytes[8..12], b"WEBP", "{path}: WebP format");
+        assert!(bytes.len() > 10_000, "{path}: complete image");
+        assert!(bytes.len() < 200_000, "{path}: optimized image");
+    }
+    let response = h
+        .http
+        .get(format!("{}/assets/overview.webp/extra", h.base))
+        .send()
+        .await
+        .expect("unknown image route");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

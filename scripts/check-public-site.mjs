@@ -56,6 +56,30 @@ for (const [name, type, options] of [
           const nav = page.locator(".site-nav .nav-download");
           if (await nav.textContent() !== "GitHub ↗") throw new Error("Top navigation must say GitHub");
           if (await nav.getAttribute("href") !== "https://github.com/Dawn-4ever1/TokenLens") throw new Error("Top navigation must link to the public GitHub project");
+          const images = await page.locator("img").evaluateAll(async (items) => {
+            await Promise.all(items.map(async (image) => {
+              image.loading = "eager";
+              if (!image.complete) await new Promise((resolve) => { image.addEventListener("load", resolve, { once: true }); image.addEventListener("error", resolve, { once: true }); });
+            }));
+            return items.map((image) => ({ src: image.getAttribute("src"), alt: image.alt, loaded: image.complete && image.naturalWidth > 0, width: image.getBoundingClientRect().width }));
+          });
+          if (images.length !== 6) throw new Error(`${name} ${width}: expected 6 product/brand images, found ${images.length}`);
+          for (const image of images) {
+            if (!image.loaded || !image.alt && image.src !== "/assets/tokenlens.svg") throw new Error(`${name} ${width}: broken or unlabelled image ${image.src}`);
+            if (image.width <= 0) throw new Error(`${name} ${width}: invisible image ${image.src}`);
+          }
+          const internalLinks = await page.locator('a[href^="#"]').evaluateAll((links) => links.map((link) => link.getAttribute("href")));
+          for (const href of internalLinks) {
+            if (href === "#" || !await page.locator(href).count()) throw new Error(`${name} ${width}: broken section link ${href}`);
+          }
+          for (const selector of ["#features", "#showcase", "#workflow", "#getting-started", "#faq", "#download-title"]) {
+            if (await page.locator(selector).count() !== 1) throw new Error(`${name} ${width}: missing ${selector}`);
+          }
+          const faq = page.locator(".faq-list details").nth(1);
+          await faq.locator("summary").click();
+          if (!await faq.evaluate((element) => element.open)) throw new Error(`${name} ${width}: FAQ must work without JavaScript`);
+          await faq.locator("summary").click();
+          if (await faq.evaluate((element) => element.open)) throw new Error(`${name} ${width}: FAQ did not close`);
         }
         if (screenshots && [1440, 390].includes(width)) {
           const slug = path === "/" ? "index" : "privacy";

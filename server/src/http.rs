@@ -369,6 +369,13 @@ pub fn router(state: AppState) -> Router {
         .route("/stats/{token}", get(crate::public_site::site_stats_page))
         .route("/assets/site.css", get(crate::public_site::styles))
         .route("/assets/tokenlens.svg", get(crate::public_site::logo))
+        .route("/assets/overview.webp", get(crate::public_site::overview))
+        .route("/assets/trends.webp", get(crate::public_site::trends))
+        .route(
+            "/assets/session-detail.webp",
+            get(crate::public_site::session_detail),
+        )
+        .route("/assets/devices.webp", get(crate::public_site::devices))
         .route("/downloads/latest.json", get(download_manifest))
         .route("/downloads/latest/windows", get(download_latest_windows))
         .route("/downloads/latest/macos", get(download_latest_macos))

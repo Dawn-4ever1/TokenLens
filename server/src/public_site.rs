@@ -15,6 +15,10 @@ const INDEX: &str = include_str!("../public/index.html");
 const PRIVACY: &str = include_str!("../public/privacy.html");
 const STYLES: &str = include_str!("../public/site.css");
 const LOGO: &str = include_str!("../public/assets/tokenlens.svg");
+const OVERVIEW: &[u8] = include_bytes!("../public/assets/overview.webp");
+const TRENDS: &[u8] = include_bytes!("../public/assets/trends.webp");
+const SESSION_DETAIL: &[u8] = include_bytes!("../public/assets/session-detail.webp");
+const DEVICES: &[u8] = include_bytes!("../public/assets/devices.webp");
 const CSP: &str = "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; img-src 'self'; style-src 'self'";
 
 fn page(content: &str, content_type: &'static str, cache: &'static str) -> Response {
@@ -52,12 +56,12 @@ async fn render_index(headers: HeaderMap) -> Response {
                 download_button(DesktopPlatform::Macos, true, true),
                 download_button(DesktopPlatform::Windows, false, true),
             ]
-            .join("\n              "),
+            .join("\n            "),
             [
                 download_button(DesktopPlatform::Macos, true, false),
                 download_button(DesktopPlatform::Windows, false, false),
             ]
-            .join("\n              "),
+            .join("\n            "),
         )
     } else {
         (
@@ -65,12 +69,12 @@ async fn render_index(headers: HeaderMap) -> Response {
                 download_button(DesktopPlatform::Windows, true, true),
                 download_button(DesktopPlatform::Macos, false, true),
             ]
-            .join("\n              "),
+            .join("\n            "),
             [
                 download_button(DesktopPlatform::Windows, true, false),
                 download_button(DesktopPlatform::Macos, false, false),
             ]
-            .join("\n              "),
+            .join("\n            "),
         )
     };
     let content = INDEX
@@ -300,6 +304,28 @@ pub async fn logo() -> Response {
     page(LOGO, "image/svg+xml", "public, max-age=86400")
 }
 
+fn image(content: &'static [u8]) -> Response {
+    let mut response = page("", "image/webp", "public, max-age=86400");
+    *response.body_mut() = content.into();
+    response
+}
+
+pub async fn overview() -> Response {
+    image(OVERVIEW)
+}
+
+pub async fn trends() -> Response {
+    image(TRENDS)
+}
+
+pub async fn session_detail() -> Response {
+    image(SESSION_DETAIL)
+}
+
+pub async fn devices() -> Response {
+    image(DEVICES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -401,6 +427,15 @@ mod tests {
     fn policy_matches_the_current_collection_boundaries() {
         assert!(INDEX.contains("界面示意，数据为虚构"));
         assert!(INDEX.contains("无需先注册"));
+        assert!(INDEX.contains("三种视觉风格"));
+        assert!(INDEX.contains("星期 × 小时"));
+        assert!(INDEX.contains("不是网页版看板"));
+        assert!(INDEX.contains("云服务 · 目前免费"));
+        assert!(INDEX.contains("不代表你的实际用量或账单"));
+        for asset in ["overview", "trends", "session-detail", "devices"] {
+            assert!(INDEX.contains(&format!("/assets/{asset}.webp")));
+        }
+        assert!(INDEX.contains("对话内容不上传"));
         assert!(PRIVACY.contains("不保存你的 Google 密码或长期 Google 授权令牌"));
         assert!(PRIVACY.contains("退出账号</strong>会撤销当前登录状态，并断开这台电脑的云端连接"));
         assert!(PRIVACY.contains("也不会删除云端设备或历史"));
