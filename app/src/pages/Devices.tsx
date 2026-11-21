@@ -9,6 +9,7 @@ import { clientColor, coverageColumns, formFactorLabel, platformLabel } from "@/
 import { useStatus } from "@/lib/status";
 import type { DeviceStatus, DeviceUsage, Devices as DevicesData, FormFactor } from "@/lib/types";
 import { deviceTone } from "./Overview";
+import { ConnectServer } from "./Pairing";
 
 export function Devices() {
   const { query, timeZone } = useData();
@@ -16,6 +17,7 @@ export function Devices() {
   const connected = Boolean(status?.server);
   const devices = useDashboard<DevicesData>("devices", query());
   const [adding, setAdding] = useState(false);
+  const [connecting, setConnecting] = useState(false);
   const data = devices.data;
   const max = Math.max(0, ...(data?.usage ?? []).map((usage) => usage.totalTokens));
   return (
@@ -59,7 +61,16 @@ export function Devices() {
           <Coverage data={data} timeZone={timeZone} />
         </>
       )}
-      <AddDevice open={adding} onOpenChange={setAdding} />
+      <AddDevice
+        open={adding}
+        onOpenChange={setAdding}
+        connected={connected}
+        onConnect={() => {
+          setAdding(false);
+          setConnecting(true);
+        }}
+      />
+      <ConnectServer open={connecting} onOpenChange={setConnecting} />
     </div>
   );
 }
@@ -425,8 +436,39 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
   );
 }
 
-/** Adding another computer is an account sign-in, not a credentials hand-off. */
-function AddDevice({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+/** Adding another computer is an account sign-in, not a credentials hand-off.
+ *  When this computer is still local-only, guide it to connect to Cloud first. */
+function AddDevice({
+  open,
+  onOpenChange,
+  connected,
+  onConnect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  connected: boolean;
+  onConnect: () => void;
+}) {
+  if (!connected) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange} title="添加设备">
+        <p className="text-sm leading-6 text-ink-2">
+          这台电脑当前只保存在本机，还没有连接云端。要合并查看多台电脑，请按两步连接：
+        </p>
+        <ol className="mt-3 list-decimal space-y-2 pl-5 text-sm leading-6 text-ink-2">
+          <li>先在这台电脑登录「TokenLens 云服务」，把本机加入你的云端空间。</li>
+          <li>再去另一台电脑安装并打开 TokenLens，使用同一个账号登录，即可自动汇总。</li>
+        </ol>
+        <p className="mt-4 rounded-[var(--radius-control)] bg-surface-2 px-4 py-3 text-[13px] leading-6 text-ink-2">
+          支持免费使用 GitHub、Google 或邮箱账号登录，本机已有历史会保留并自动同步；也可以连接你自己搭建的服务器。
+        </p>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={() => onOpenChange(false)}>取消</Button>
+          <Button variant="primary" onClick={onConnect}>登录这台电脑的云端</Button>
+        </div>
+      </Dialog>
+    );
+  }
   return (
     <Dialog open={open} onOpenChange={onOpenChange} title="添加设备">
       <ol className="list-decimal space-y-2 pl-5 text-sm leading-6 text-ink-2">

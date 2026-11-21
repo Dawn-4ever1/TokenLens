@@ -15,8 +15,8 @@ macOS.
 - **Cost estimates**: "API-equivalent" cost from the public LiteLLM,
   OpenRouter and models.dev price catalogs, refreshed daily. Not your bill:
   subscriptions and relays can cost very differently.
-- **One computer or many**: works on its own, or syncs several computers to a
-  server you host.
+- **One computer or many**: works on its own, or syncs several computers through
+  the free TokenLens Cloud or a server you host.
 - **Light in the background**: a tray app that reads agent logs only when they
   change; the window is opened on demand.
 - **In-app updates**: checks GitHub first and falls back to the verified release
@@ -38,7 +38,9 @@ The installers are not code-signed yet, so the system asks once:
 
 - **Windows**: on "Windows protected your PC", click "More info", then "Run anyway".
 - **macOS**: open the app from Applications; if it cannot be verified, go to
-  System Settings → Privacy & Security and click "Open Anyway".
+  System Settings → Privacy & Security and click "Open Anyway" (or run
+  `xattr -cr /Applications/TokenLens.app` in Terminal if macOS reports it as
+  damaged).
 
 ## Two ways to use it
 
@@ -62,12 +64,15 @@ view.
 
 ## Privacy
 
-- Only numbers leave the agent logs: token counts, model names, times, and a
-  one-way hash of the project. Prompts, answers, code, file contents, paths and
-  session titles are never read into the database or uploaded.
+- Only numbers and statistical labels leave the agent logs: token counts, agent
+  and model names, times, session identifiers and tool-saved session titles,
+  plus the project name and a one-way hash of the workspace. Prompts, answers,
+  code, file contents and full file paths are never stored in the database or
+  uploaded.
 - Server tokens are stored in the macOS Keychain or Windows Credential Manager
   and never reach the web view; the server stores only their hashes.
-- In local mode nothing is uploaded at all.
+- In local mode no usage data is uploaded. See the
+  [Privacy Policy](https://tokenlens.online/privacy) for full details.
 - Update checks use anonymous GET requests about 10 seconds after launch and
   every 24 hours. GitHub is tried first, then the TokenLens website's verified
   release copy; no usage or credentials are sent. Turn off automatic checks in
@@ -78,10 +83,11 @@ view.
 
 Claude Code, Codex, Gemini CLI, OpenCode, Amp, Kilo Code, Roo Code, Droid,
 Kimi, Qwen Code, GitHub Copilot, OpenClaw, ZCode, DeepSeek Harness, WorkBuddy,
-Antigravity, and Qoder (international). Log parsing comes from
-[tokscale](https://github.com/junhoyeo/tokscale), used as a library at a pinned
-revision; Qoder has its own adapter, and because its local logs mostly record
-credits, its token numbers are marked as estimates.
+Antigravity, and Qoder (International and CN, across IDE, Desktop and CLI). Log
+parsing comes from [tokscale](https://github.com/junhoyeo/tokscale), used as a
+library at a pinned revision; Qoder has its own adapter that reads recorded IDE
+token counts directly and converts credits-only sessions using calibrated rates
+while keeping the original credits.
 
 ## Build from source
 

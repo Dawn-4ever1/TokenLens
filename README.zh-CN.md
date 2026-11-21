@@ -7,7 +7,7 @@
 - **token 花在哪**：输入、输出、缓存读取、缓存写入、推理分开显示。缓存读取通常占九成以上，并不等于你付费的部分。
 - **趋势和会话**：按天、按小时的趋势，「星期 × 小时」热力图，每个会话逐轮的 token 构成，可按工具、模型、项目、电脑筛选。
 - **成本估算**：按 LiteLLM、OpenRouter、models.dev 三份公开价格表估算的「API 等价成本」，每天更新。不是账单：订阅制、中转站的实际花费可能差很多。
-- **一台或多台电脑**：一台电脑直接用；多台电脑可以同步到你自己搭的服务器上合在一起看。
+- **一台或多台电脑**：一台电脑直接用；多台电脑可以免费连接官方云服务，或同步到你自己搭的服务器合在一起看。
 - **后台占用小**：常驻托盘，agent 日志有变化时才去读；窗口需要时再打开。
 - **应用内更新**：优先检查 GitHub 公开版本，失败时使用 TokenLens 官网的已验证发布副本；可在设置里关闭。点「下载并更新」后才下载、验签、安装和重启。
 
@@ -25,7 +25,7 @@
 安装包暂时没有付费签名，系统第一次会拦一下：
 
 - **Windows**：出现「Windows 已保护你的电脑」时，点「更多信息」，再点「仍要运行」。
-- **macOS**：从「应用程序」里打开；提示无法验证开发者时，到「系统设置 → 隐私与安全性」点「仍要打开」。
+- **macOS**：从「应用程序」里打开；提示「无法验证开发者」时，到「系统设置 → 隐私与安全性」点「仍要打开」，或提示「已损坏」时在终端执行 `xattr -cr /Applications/TokenLens.app` 后再打开。
 
 ## 两种用法
 
@@ -37,14 +37,14 @@
 
 ## 隐私
 
-- 从 agent 日志里只取数字：token 数、模型名、时间，以及项目的单向哈希。提示词、回答、代码、文件内容、路径和会话标题都不会进数据库，也不会上传。
+- 从 agent 日志里只取数字与必要的统计标签：token 数、工具与模型名、时间、会话标识与工具已保存的会话标题，以及项目名称和工作区标识的单向哈希。提示词、回答、代码、文件内容和完整文件路径都不会进数据库，也不会上传。
 - 连接服务器用的凭据存在 macOS 钥匙串或 Windows 凭据管理器里，看板页面拿不到；服务端只保存它们的哈希。
-- 「只在这台电脑上」时什么都不上传。
+- 「只在这台电脑上」时，工具用量不会上传到服务器。详细边界见 [隐私政策](https://tokenlens.online/privacy)。
 - 更新检查在启动约 10 秒后、之后每 24 小时匿名读取公开版本信息，优先 GitHub，失败时尝试 TokenLens 官网；不发送用量或凭据。可在设置里关闭，也可手动检查。更新包安装前必须验签，这与系统的付费代码签名不同。
 
 ## 支持的 agent
 
-Claude Code、Codex、Gemini CLI、OpenCode、Amp、Kilo Code、Roo Code、Droid、Kimi、Qwen Code、GitHub Copilot、OpenClaw、ZCode、DeepSeek Harness、WorkBuddy、Antigravity，以及 Qoder 国际版。日志解析用的是 [tokscale](https://github.com/junhoyeo/tokscale)（作为库使用，锁定版本）；Qoder 有单独的适配，它本地大多只记 credits，所以 token 数标为「估算」。
+Claude Code、Codex、Gemini CLI、OpenCode、Amp、Kilo Code、Roo Code、Droid、Kimi、Qwen Code、GitHub Copilot、OpenClaw、ZCode、DeepSeek Harness、WorkBuddy、Antigravity，以及 Qoder 国际版与 Qoder CN（含 IDE、桌面端与 CLI）。日志解析用的是锁版本的 [tokscale](https://github.com/junhoyeo/tokscale) 库，并单独适配 Qoder：IDE 直接读取已记录的 token 数，只记 credits 的会话按校准汇率折算并保留原始 credits。
 
 ## 从源码构建
 

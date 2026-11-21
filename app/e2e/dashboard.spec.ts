@@ -1202,6 +1202,32 @@ test("cloud sign-in shows every device; adding a device is instructions only", a
   expect(errors).toEqual([]);
 });
 
+test("clicking Add Device while unconnected guides signing in on this computer first", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 900 });
+  const errors = await open(page, { view: "devices", query: "" });
+  await settle(page, "设备");
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("还没有连接云端");
+  await expect(dialog).toContainText("先在这台电脑登录「TokenLens 云服务」");
+  await expect(dialog.getByRole("button", { name: "完成", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "登录这台电脑的云端", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
+  await signIn(dialog);
+  await expect(dialog).toBeHidden();
+  await settle(page, "设备");
+  await expect(page.getByRole("heading", { name: /MacBook Pro/ })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toBeVisible();
+  // Once connected, Add Device switches to the second-computer instructions.
+  await page.getByRole("button", { name: "添加设备", exact: true }).click();
+  await expect(dialog).toContainText("使用与这台电脑相同的账号登录。");
+  await expect(dialog.getByRole("button", { name: "完成", exact: true })).toBeVisible();
+  await dialog.getByRole("button", { name: "完成", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
 test("the device menu explains credentials and keeps removal in the cloud view", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   const errors = await open(page, { view: "devices", query: "?server" });
