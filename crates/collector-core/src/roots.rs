@@ -12,9 +12,38 @@ use crate::{QODER_CLIENT, QODER_CN_CLIENT};
 pub struct WatchRoot {
     pub client: String,
     pub path: PathBuf,
-    /// A title-only index update must refresh historical events, not just
-    /// yesterday's and today's token range.
+    /// A title-only index update must refresh historical events for this
+    /// client, not just the yesterday-through-today window.
     pub metadata_only: bool,
+}
+
+/// Opening a WAL-mode SQLite database read-only still maps and rewrites its
+/// `-shm` shared-memory index. Watching that sidecar causes a self-triggering
+/// scan loop; real writes always touch the database file itself or `-wal`.
+pub(crate) fn is_sqlite_shm_sidecar(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    [".db-shm", ".sqlite-shm", ".sqlite3-shm", ".vscdb-shm"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+fn is_sqlite_wal_for(path: &Path, root: &Path) -> bool {
+    let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    if ![".db", ".sqlite", ".sqlite3", ".vscdb"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+    {
+        return false;
+    }
+    let mut wal = root.as_os_str().to_os_string();
+    wal.push("-wal");
+    path.as_os_str() == wal.as_os_str()
 }
 
 fn is_forbidden(path: &Path, client: &str) -> bool {
@@ -58,13 +87,13 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     // Title metadata sources live outside some usage roots and may change on
     // their own. Keep these roots shared with the actual metadata readers.
     push(QODER_CLIENT, crate::qoder::projects_root(home));
-    push(QODER_CLIENT, crate::qoder::projects_root(home));
     push(
         QODER_CN_CLIENT,
         crate::qoder::projects_root_cn(home, use_env_roots),
     );
     // Qoder IDE's SQLite store is distinct from the newer Desktop transcripts.
-    // Watch its parent, including -wal/-shm; reading never creates sidecars.
+    // Watch its parent for local.db and -wal; -shm is ignored to prevent
+    // read-only SQLite opens from re-triggering scans.
     if let Some(parent) = crate::qoder_ide::database_path(home, use_env_roots).parent() {
         push(QODER_CLIENT, parent.to_path_buf());
     }
@@ -78,13 +107,17 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
             && root.path != home
             && !home.starts_with(&root.path)
     });
+    // Sort places `metadata_only: false` before `true` for the same
+    // `(client, path)`, so `dedup_by` keeps the primary usage root rather than
+    // registering duplicate watches or turning normal log writes into full
+    // metadata rescans.
     roots.sort();
-    roots.dedup();
+    roots.dedup_by(|later, earlier| later.client == earlier.client && later.path == earlier.path);
     roots
 }
 
 /// Existing directories of the detected clients; nested duplicates of the
-/// same client are dropped because watches are recursive.
+/// same client and kind are dropped because directory watches are recursive.
 pub fn watch_roots(
     home: &Path,
     use_env_roots: bool,
@@ -101,6 +134,7 @@ pub fn watch_roots(
         .filter(|root| {
             !existing.iter().any(|other| {
                 other.client == root.client
+                    && other.metadata_only == root.metadata_only
                     && other.path != root.path
                     && root.path.starts_with(&other.path)
             })
@@ -111,7 +145,7 @@ pub fn watch_roots(
 
 #[derive(Debug, Clone, Default)]
 pub struct RootMap {
-    roots: Vec<(PathBuf, String, bool)>,
+    roots: Vec<(PathBuf, String, bool, bool)>,
     ignored: Vec<PathBuf>,
 }
 
@@ -131,9 +165,10 @@ impl RootMap {
             roots: roots
                 .iter()
                 .flat_map(|root| {
+                    let is_dir = root.path.is_dir();
                     with_canonical(&root.path)
                         .into_iter()
-                        .map(|path| (path, root.client.clone(), root.metadata_only))
+                        .map(move |path| (path, root.client.clone(), root.metadata_only, is_dir))
                 })
                 .collect(),
             ignored: ignored
@@ -145,16 +180,27 @@ impl RootMap {
 
     /// The client whose root is the longest prefix of `path`.
     pub fn client_for(&self, path: &Path) -> Option<(&str, bool)> {
-        if self.ignored.iter().any(|own| path.starts_with(own)) {
+        if self.ignored.iter().any(|own| path.starts_with(own)) || is_sqlite_shm_sidecar(path) {
             return None;
         }
         self.roots
             .iter()
-            .filter(|(root, _, metadata_only)| {
-                path.starts_with(root) && (!*metadata_only || path == root || root.is_dir())
+            .filter(|(root, _, metadata_only, is_dir)| {
+                if *metadata_only {
+                    path == root
+                        || is_sqlite_wal_for(path, root)
+                        || (*is_dir && path.starts_with(root))
+                } else {
+                    path.starts_with(root) || is_sqlite_wal_for(path, root)
+                }
             })
-            .max_by_key(|(root, _, _)| root.components().count())
-            .map(|(_, client, metadata_only)| (client.as_str(), *metadata_only))
+            .max_by_key(|(root, _, _, _)| root.components().count())
+            .map(|(_, client, metadata_only, _)| {
+                let is_metadata = *metadata_only
+                    || (client == "openclaw"
+                        && path.file_name() == Some(std::ffi::OsStr::new("sessions.json")));
+                (client.as_str(), is_metadata)
+            })
     }
 }
 
@@ -192,6 +238,7 @@ mod tests {
         std::fs::create_dir_all(home.path().join(".codex/sessions")).expect("sessions");
         std::fs::create_dir_all(home.path().join(".zcode/v2")).expect("desktop");
         std::fs::write(home.path().join(".codex/session_index.jsonl"), "{}\n").expect("index");
+        std::fs::write(home.path().join(".zcode/v2/tasks-index.sqlite"), "").expect("tasks");
         let roots = watch_roots(home.path(), false, &detected(&["codex", "zcode"]));
         let map = RootMap::new(&roots, &[]);
         assert_eq!(
@@ -199,8 +246,20 @@ mod tests {
             Some(("codex", true))
         );
         assert_eq!(
+            map.client_for(&home.path().join(".zcode/v2/tasks-index.sqlite")),
+            Some(("zcode", true))
+        );
+        assert_eq!(
             map.client_for(&home.path().join(".zcode/v2/tasks-index.sqlite-wal")),
             Some(("zcode", true))
+        );
+        assert_eq!(
+            map.client_for(&home.path().join(".zcode/v2/tasks-index.sqlite-shm")),
+            None
+        );
+        assert_eq!(
+            map.client_for(&home.path().join(".zcode/v2/unrelated.json")),
+            None
         );
         assert_eq!(
             map.client_for(&home.path().join(".codex/unrelated-state.json")),
@@ -242,12 +301,13 @@ mod tests {
         std::fs::create_dir_all(directory).expect("IDE fixture directory");
         let roots = watch_roots(home.path(), false, &detected(&[QODER_CLIENT]));
         let map = RootMap::new(&roots, &[]);
-        for sidecar in ["local.db", "local.db-wal", "local.db-shm"] {
+        for sidecar in ["local.db", "local.db-wal"] {
             assert_eq!(
                 map.client_for(&directory.join(sidecar)),
                 Some((QODER_CLIENT, false))
             );
         }
+        assert_eq!(map.client_for(&directory.join("local.db-shm")), None);
         assert!(
             roots
                 .iter()
@@ -275,18 +335,70 @@ mod tests {
         let own = home.path().join(".codex/sessions/tokenlens-own");
         let roots = watch_roots(home.path(), false, &detected(&["zcode", "codex"]));
         let map = RootMap::new(&roots, std::slice::from_ref(&own));
-        for sidecar in ["db.sqlite", "db.sqlite-wal", "db.sqlite-shm"] {
+        for sidecar in ["db.sqlite", "db.sqlite-wal"] {
             assert_eq!(
                 map.client_for(&home.path().join(".zcode/cli/db").join(sidecar)),
                 Some(("zcode", false))
             );
         }
         assert_eq!(
+            map.client_for(&home.path().join(".zcode/cli/db/db.sqlite-shm")),
+            None
+        );
+        assert_eq!(
             map.client_for(&home.path().join(".codex/sessions/2026/r.jsonl")),
             Some(("codex", false))
         );
         assert_eq!(map.client_for(&own.join("outbox.sqlite-wal")), None);
         assert_eq!(map.client_for(&home.path().join(".bashrc")), None);
+    }
+
+    #[test]
+    fn sqlite_shm_sidecars_never_trigger_and_same_path_metadata_roots_do_not_shadow_usage() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::create_dir_all(home.path().join(".openclaw/agents/main/sessions"))
+            .expect("openclaw");
+        std::fs::create_dir_all(home.path().join(".gemini/antigravity/conversations"))
+            .expect("antigravity");
+        let roots = watch_roots(
+            home.path(),
+            false,
+            &detected(&["openclaw", "antigravity-extension"]),
+        );
+        assert_eq!(
+            roots.iter().filter(|r| r.client == "openclaw").count(),
+            1,
+            "shared usage/metadata path must not register duplicate watches"
+        );
+        let map = RootMap::new(&roots, &[]);
+        assert_eq!(
+            map.client_for(&home.path().join(".openclaw/agents/main/sessions/a.jsonl")),
+            Some(("openclaw", false))
+        );
+        assert_eq!(
+            map.client_for(
+                &home
+                    .path()
+                    .join(".openclaw/agents/main/sessions/sessions.json")
+            ),
+            Some(("openclaw", true))
+        );
+        assert_eq!(
+            map.client_for(
+                &home
+                    .path()
+                    .join(".gemini/antigravity/conversations/c.db-wal")
+            ),
+            Some(("antigravity-extension", false))
+        );
+        assert_eq!(
+            map.client_for(
+                &home
+                    .path()
+                    .join(".gemini/antigravity/conversations/c.db-shm")
+            ),
+            None
+        );
     }
 
     #[test]

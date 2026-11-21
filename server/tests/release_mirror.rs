@@ -577,6 +577,7 @@ async fn website_download_clicks_and_files_are_counted_without_updater_traffic()
         .expect("location")
         .to_owned();
     assert!(location.ends_with("?source=website"), "{location}");
+    harness.state.flush_site_metrics().await;
     assert_eq!(
         harness
             .count("SELECT count FROM site_daily_counts WHERE metric = 'download_click_windows'"),
@@ -594,6 +595,7 @@ async fn website_download_clicks_and_files_are_counted_without_updater_traffic()
             .status(),
         StatusCode::FOUND
     );
+    harness.state.flush_site_metrics().await;
     assert_eq!(
         harness
             .count("SELECT count FROM site_daily_counts WHERE metric = 'download_click_windows'"),
@@ -613,6 +615,7 @@ async fn website_download_clicks_and_files_are_counted_without_updater_traffic()
             .status(),
         StatusCode::OK
     );
+    harness.state.flush_site_metrics().await;
     assert_eq!(
         harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
         1
@@ -629,6 +632,7 @@ async fn website_download_clicks_and_files_are_counted_without_updater_traffic()
             .status(),
         StatusCode::OK
     );
+    harness.state.flush_site_metrics().await;
     assert_eq!(
         harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
         1

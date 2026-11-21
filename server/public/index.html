@@ -288,6 +288,10 @@
               <summary>支持哪些电脑和 AI 编程工具？<span class="faq-plus" aria-hidden="true"></span></summary>
               <p>目前提供 Windows 10 / 11 与 Apple 芯片 Mac 安装包。应用自动发现本机支持的 Claude Code、Codex、Qoder 国际版 / CN、Gemini CLI、OpenCode、OpenClaw、DeepSeek Harness、ZCode 等工具；具体范围以当前版本说明为准。</p>
             </details>
+            <details id="first-open">
+              <summary>首次打开遇到系统安全提示怎么办？<span class="faq-plus" aria-hidden="true"></span></summary>
+              <p>当前为 0.x 开源早期版本，暂未购买商业代码签名证书。Mac 首次打开若提示「无法验证开发者」或「已损坏」，可先拖入「应用程序」，在「系统设置 → 隐私与安全性」底部点「仍要打开」，或在终端执行 <code>xattr -cr /Applications/TokenLens.app</code> 后再打开；Windows 若出现 SmartScreen 蓝屏提示，点「更多信息」→「仍要运行」即可。安装包均由 GitHub Actions 公开构建并附带 SHA-256 校验值。</p>
+            </details>
             <details>
               <summary>Token 总量就是实际扣费吗？<span class="faq-plus" aria-hidden="true"></span></summary>
               <p>不是。总量包含缓存读取等构成，不能直接当作实际扣费。成本根据公开价格表计算，是 API 等价估算，不是订阅或中转服务账单；Qoder 的 credits 与折算口径也会单独保留。</p>
@@ -319,7 +323,7 @@
             <div class="download-buttons">
               {{BOTTOM_DOWNLOAD_BUTTONS}}
             </div>
-            <p class="download-note">Windows 10 / 11 · macOS Apple 芯片<br>当前为 0.x 早期版本，界面提供简体中文。</p>
+            <p class="download-note">Windows 10 / 11 · macOS Apple 芯片<br>当前为 0.x 开源早期版本，界面提供简体中文。<a href="#first-open">首次打开提示说明</a></p>
             <a class="release-link" href="https://github.com/Dawn-4ever1/TokenLens/releases" rel="noopener noreferrer">查看版本说明与全部发布文件 <span aria-hidden="true">↗</span></a>
           </div>
         </div>

@@ -78,6 +78,59 @@ async fn failed_claims_are_rate_limited() {
 }
 
 #[tokio::test]
+async fn failed_claims_from_one_ip_do_not_lock_out_another_ip() {
+    let h = Harness::start().await;
+    let good = h.issue_code();
+    let bad_body = json!({
+        "code": "0000-0000-0000",
+        "platform": "macos",
+        "formFactor": "laptop",
+        "displayName": "Attacker",
+    });
+    for _ in 0..CLAIM_FAILURE_LIMIT {
+        let resp = h
+            .http
+            .post(format!("{}/api/pair/claim", h.base))
+            .header("x-forwarded-for", "203.0.113.10")
+            .json(&bad_body)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked = h
+        .http
+        .post(format!("{}/api/pair/claim", h.base))
+        .header("x-forwarded-for", "203.0.113.10")
+        .json(&json!({
+            "code": good,
+            "platform": "macos",
+            "formFactor": "laptop",
+            "displayName": "Blocked",
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other_ip = h
+        .http
+        .post(format!("{}/api/pair/claim", h.base))
+        .header("x-forwarded-for", "198.51.100.7")
+        .json(&json!({
+            "code": good,
+            "platform": "macos",
+            "formFactor": "laptop",
+            "displayName": "Normal User",
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(other_ip.status(), StatusCode::OK);
+    assert_eq!(h.count("SELECT COUNT(*) FROM devices"), 1);
+}
+
+#[tokio::test]
 async fn malformed_claims_are_bad_requests() {
     let h = Harness::start().await;
     let code = h.issue_code();

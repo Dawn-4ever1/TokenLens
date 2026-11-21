@@ -7,7 +7,9 @@
 //! metric, so the table grows by a handful of rows per day.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 
+use axum::http::{HeaderMap, header};
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -18,6 +20,41 @@ pub const DOWNLOAD_CLICK_MACOS: &str = "download_click_macos";
 pub const DOWNLOAD_CLICK_WINDOWS: &str = "download_click_windows";
 pub const DOWNLOAD_FILE_MACOS: &str = "download_file_macos";
 pub const DOWNLOAD_FILE_WINDOWS: &str = "download_file_windows";
+
+/// Obvious automated crawlers, monitors and CLI tools that should not inflate
+/// human website counts. Checked in memory only; the header is never stored.
+const AUTOMATED_AGENT_TOKENS: &[&str] = &[
+    "bot",
+    "crawler",
+    "spider",
+    "slurp",
+    "bingpreview",
+    "facebookexternalhit",
+    "whatsapp",
+    "telegrambot",
+    "discordbot",
+    "slackbot",
+    "headlesschrome",
+    "phantomjs",
+    "lighthouse",
+    "pagespeed",
+    "uptime",
+    "statuscake",
+    "pingdom",
+    "datadog",
+    "curl/",
+    "wget/",
+    "python-requests",
+    "python-urllib",
+    "go-http-client",
+    "scrapy",
+    "httpclient",
+    "java/",
+    "libwww-perl",
+    "node-fetch",
+    "undici",
+    "axios/",
+];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DailyCounts {
@@ -60,6 +97,65 @@ pub struct DayRow {
     pub counts: DailyCounts,
 }
 
+/// In-memory accumulator so public GET traffic never contends on the SQLite
+/// write mutex on every page view. Flushed periodically, on stats reads, and
+/// on graceful shutdown.
+#[derive(Debug, Default)]
+pub struct SiteStatsBuffer {
+    pending: Mutex<BTreeMap<(String, &'static str), u64>>,
+}
+
+impl SiteStatsBuffer {
+    pub fn increment(&self, day: String, metric: &'static str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            *pending.entry((day, metric)).or_insert(0) += 1;
+        }
+    }
+
+    pub fn take(&self) -> Vec<(String, &'static str, u64)> {
+        let Ok(mut pending) = self.pending.lock() else {
+            return Vec::new();
+        };
+        if pending.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut *pending)
+            .into_iter()
+            .filter(|(_, delta)| *delta > 0)
+            .map(|((day, metric), delta)| (day, metric, delta))
+            .collect()
+    }
+
+    pub fn restore(&self, batch: Vec<(String, &'static str, u64)>) {
+        if batch.is_empty() {
+            return;
+        }
+        if let Ok(mut pending) = self.pending.lock() {
+            for (day, metric, delta) in batch {
+                if delta > 0 {
+                    *pending.entry((day, metric)).or_insert(0) += delta;
+                }
+            }
+        }
+    }
+}
+
+/// Returns false for obvious automated crawlers and CLI probes so they do not
+/// inflate website counts. Missing User-Agent headers are still counted so
+/// privacy-hardened browsers (and minimal HTTP clients without a UA) work.
+pub fn should_count_request(headers: &HeaderMap) -> bool {
+    let Some(user_agent) = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let lower = user_agent.to_ascii_lowercase();
+    !AUTOMATED_AGENT_TOKENS
+        .iter()
+        .any(|token| lower.contains(token))
+}
+
 /// The operator-facing day boundary follows the dashboard time zone.
 pub fn day_for(now_ms: i64, time_zone: Tz) -> String {
     DateTime::from_timestamp_millis(now_ms)
@@ -70,12 +166,49 @@ pub fn day_for(now_ms: i64, time_zone: Tz) -> String {
 }
 
 pub fn record(conn: &Connection, day: &str, metric: &str) -> rusqlite::Result<()> {
+    record_delta(conn, day, metric, 1)
+}
+
+pub fn record_delta(
+    conn: &Connection,
+    day: &str,
+    metric: &str,
+    delta: u64,
+) -> rusqlite::Result<()> {
+    if delta == 0 {
+        return Ok(());
+    }
+    let delta = i64::try_from(delta).unwrap_or(i64::MAX);
     conn.execute(
-        "INSERT INTO site_daily_counts (day, metric, count) VALUES (?1, ?2, 1)
-         ON CONFLICT(day, metric) DO UPDATE SET count = count + 1",
-        params![day, metric],
+        "INSERT INTO site_daily_counts (day, metric, count) VALUES (?1, ?2, ?3)
+         ON CONFLICT(day, metric) DO UPDATE SET count = count + excluded.count",
+        params![day, metric, delta],
     )?;
     Ok(())
+}
+
+pub fn record_batch(
+    conn: &mut Connection,
+    batch: &[(String, &'static str, u64)],
+) -> rusqlite::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let tx = conn.transaction()?;
+    {
+        let mut statement = tx.prepare_cached(
+            "INSERT INTO site_daily_counts (day, metric, count) VALUES (?1, ?2, ?3)
+             ON CONFLICT(day, metric) DO UPDATE SET count = count + excluded.count",
+        )?;
+        for (day, metric, delta) in batch {
+            if *delta == 0 {
+                continue;
+            }
+            let delta = i64::try_from(*delta).unwrap_or(i64::MAX);
+            statement.execute(params![day, metric, delta])?;
+        }
+    }
+    tx.commit()
 }
 
 /// Returns one row per day, oldest first, including days with no requests.
@@ -162,6 +295,7 @@ fn count(value: i64) -> u64 {
 mod tests {
     use super::*;
     use crate::db;
+    use axum::http::HeaderValue;
 
     fn day(offset_days: i64) -> String {
         (chrono::NaiveDate::from_ymd_opt(2026, 11, 1).expect("date") + Duration::days(offset_days))
@@ -192,6 +326,64 @@ mod tests {
         assert_eq!(by_day(&day(0)).download_clicks_macos, 1);
         assert_eq!(by_day(&day(1)).downloads_windows, 1);
         assert_eq!(by_day(&day(2)), DailyCounts::default());
+    }
+
+    #[test]
+    fn buffered_counts_flush_in_one_batch_and_restore_on_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut opened = db::open(&dir.path().join("stats.sqlite")).expect("open");
+        let buffer = SiteStatsBuffer::default();
+        buffer.increment(day(0), HOME_VIEW);
+        buffer.increment(day(0), HOME_VIEW);
+        buffer.increment(day(0), DOWNLOAD_CLICK_WINDOWS);
+
+        let batch = buffer.take();
+        assert_eq!(batch.len(), 2);
+        assert!(buffer.take().is_empty());
+        buffer.restore(batch);
+        buffer.increment(day(0), HOME_VIEW);
+
+        let batch = buffer.take();
+        record_batch(&mut opened.conn, &batch).expect("record batch");
+
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .expect("date")
+            .and_hms_opt(12, 0, 0)
+            .expect("time")
+            .and_utc()
+            .timestamp_millis();
+        let rows = report(&opened.conn, now, crate::DEFAULT_TIME_ZONE, 3).expect("report");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].counts.home_views, 3);
+        assert_eq!(rows[0].counts.download_clicks_windows, 1);
+    }
+
+    #[test]
+    fn crawler_user_agents_are_skipped_while_browsers_and_empty_ua_count() {
+        let empty = HeaderMap::new();
+        assert!(should_count_request(&empty));
+
+        for browser in [
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::USER_AGENT, HeaderValue::from_static(browser));
+            assert!(should_count_request(&headers), "{browser}");
+        }
+
+        for automated in [
+            "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Mozilla/5.0 (compatible; Bytespider; spider-feedback@bytedance.com)",
+            "curl/8.7.1",
+            "python-requests/2.32.3",
+            "Go-http-client/2.0",
+            "UptimeRobot/2.0",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::USER_AGENT, HeaderValue::from_static(automated));
+            assert!(!should_count_request(&headers), "{automated}");
+        }
     }
 
     #[test]

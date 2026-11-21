@@ -23,6 +23,10 @@ use crate::state::{Prepared, StateError};
 use crate::sync::{Recorded, SyncLine, Syncer};
 use crate::worker::{self, KeepPayload, WorkerFailure, WorkerOutput};
 
+/// Limit background scans consistently on Mac and Windows. The worker remains
+/// a short-lived child process, while the watch loop itself stays lightweight.
+const BACKGROUND_SCAN_RAYON_THREADS: &str = "2";
+
 /// Agent root overrides read by the locked upstream rev (clients.rs `PathRoot::EnvVar`).
 /// They are removed from worker environments when an explicit home is used.
 pub const AGENT_ROOT_ENV_VARS: &[&str] = &[
@@ -160,10 +164,24 @@ fn scope_for(kind: &ScanKind) -> Scope {
             clients: None,
             range: DateRange::all_history(),
         },
-        ScanKind::Triggered { clients, .. } => {
+        ScanKind::Triggered {
+            clients,
+            all_history: true,
+            ..
+        } => Scope {
+            clients: Some(clients.clone()),
+            range: DateRange::all_history(),
+        },
+        ScanKind::Triggered {
+            clients,
+            all_history: false,
+            ..
+        } => {
             let today = local_today();
             Scope {
                 clients: Some(clients.clone()),
+                // Keep yesterday in triggered scans for midnight/timezone
+                // boundaries; upstream's source cache makes the extra day free.
                 range: DateRange {
                     since: today.pred_opt(),
                     until: Some(today),
@@ -214,6 +232,9 @@ pub fn worker_command(options: &WatchOptions, scope: &Scope) -> Command {
             command.env_remove("TOKSCALE_CONFIG_DIR");
         }
     }
+    // Rayon reads this before its global pool is initialized. Keep the limit
+    // on background workers only so interactive commands keep their defaults.
+    command.env("RAYON_NUM_THREADS", BACKGROUND_SCAN_RAYON_THREADS);
     worker::configure_priority(&mut command);
     command
 }
@@ -254,20 +275,37 @@ fn build_watcher(
         }
     })
     .map_err(|_| ())?;
-    for root in roots {
+    let mut recursive_dirs: Vec<PathBuf> = roots
+        .iter()
+        .filter(|root| !root.path.is_file())
+        .map(|root| root.path.clone())
+        .collect();
+    recursive_dirs.sort_by_key(|path| path.components().count());
+    let mut watched_recursive: Vec<PathBuf> = Vec::new();
+    for dir in recursive_dirs {
+        if watched_recursive
+            .iter()
+            .any(|parent| dir.starts_with(parent))
+        {
+            continue;
+        }
         watcher
-            .watch(
-                if root.path.is_file() {
-                    root.path.parent().unwrap_or(&root.path)
-                } else {
-                    &root.path
-                },
-                if root.path.is_file() {
-                    RecursiveMode::NonRecursive
-                } else {
-                    RecursiveMode::Recursive
-                },
-            )
+            .watch(&dir, RecursiveMode::Recursive)
+            .map_err(|_| ())?;
+        watched_recursive.push(dir);
+    }
+    let mut watched_non_recursive: BTreeSet<PathBuf> = BTreeSet::new();
+    for root in roots.iter().filter(|root| root.path.is_file()) {
+        let dir = root.path.parent().unwrap_or(&root.path).to_path_buf();
+        if watched_recursive
+            .iter()
+            .any(|parent| dir.starts_with(parent))
+            || !watched_non_recursive.insert(dir.clone())
+        {
+            continue;
+        }
+        watcher
+            .watch(&dir, RecursiveMode::NonRecursive)
             .map_err(|_| ())?;
     }
     Ok(watcher)
@@ -571,13 +609,14 @@ mod tests {
     }
 
     #[test]
-    fn triggered_scope_is_yesterday_through_today_for_the_given_clients() {
-        let clients = ["codex".to_owned(), "zcode".to_owned()]
+    fn triggered_scope_is_yesterday_through_today_and_metadata_is_client_history() {
+        let clients: BTreeSet<String> = ["codex".to_owned(), "zcode".to_owned()]
             .into_iter()
             .collect();
         let scope = scope_for(&ScanKind::Triggered {
-            clients,
+            clients: clients.clone(),
             polled: false,
+            all_history: false,
         });
         let today = local_today();
         assert_eq!(scope.range.until, Some(today));
@@ -592,6 +631,20 @@ mod tests {
         );
         assert!(args.contains(&"--no-env-roots".to_owned()));
         assert!(!args.contains(&"--upstream-cache".to_owned()));
+        assert_eq!(
+            env_value(&worker_command(&options(None), &scope), "RAYON_NUM_THREADS"),
+            Some(Some("2".into()))
+        );
+        let metadata = scope_for(&ScanKind::Triggered {
+            clients,
+            polled: false,
+            all_history: true,
+        });
+        assert_eq!(
+            metadata.clients,
+            Some(["codex".to_owned(), "zcode".to_owned()].into())
+        );
+        assert_eq!(metadata.range, DateRange::all_history());
         let full = scope_for(&ScanKind::Full);
         assert!(full.clients.is_none());
         assert_eq!(full.range, DateRange::all_history());

@@ -163,6 +163,7 @@ h2 { margin-bottom: 16px; font-size: clamp(31px, 3.2vw, 43px); font-weight: 650;
 .faq-plus::after { transform: rotate(90deg); }
 .faq-list details[open] .faq-plus::after { display: none; }
 .faq-list details p { margin: -3px 32px 24px 0; color: var(--muted); font-size: 13px; line-height: 1.95; }
+.faq-list details code { padding: 1px 6px; border-radius: 5px; background: var(--surface-alt); border: 1px solid var(--line); color: var(--ink); font-family: var(--mono); font-size: 12px; word-break: break-all; }
 
 .download-section { background: #1a1714; color: #f6f1e7; border-top: 0; }
 .download-inner { display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 65px; }
@@ -176,6 +177,8 @@ h2 { margin-bottom: 16px; font-size: clamp(31px, 3.2vw, 43px); font-weight: 650;
 .download-buttons { display: grid; gap: 11px; }
 .download-section .button:hover { background: var(--primary-soft); color: #1a1714; }
 .download-note { margin-top: 17px; margin-bottom: 0; font-size: 11px; line-height: 1.85; color: #b9b0a4; text-align: center; }
+.download-note a { color: #e8dfd2; text-decoration: underline; text-underline-offset: 3px; }
+.download-note a:hover { color: #fff; }
 .release-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 18px; font-size: 12px; color: #d6cec2; }
 .release-link:hover { color: #fff; }
 

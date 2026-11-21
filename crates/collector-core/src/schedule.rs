@@ -36,10 +36,12 @@ impl Default for Timing {
 pub enum ScanKind {
     /// Every client, every date; also re-selects the watched directories.
     Full,
-    /// Only the given clients, from yesterday to today.
+    /// Only the given clients, from yesterday through today — or all history
+    /// when `all_history` is set for a single-client title/metadata refresh.
     Triggered {
         clients: BTreeSet<String>,
         polled: bool,
+        all_history: bool,
     },
 }
 
@@ -57,6 +59,7 @@ impl ScanKind {
 pub struct Scheduler {
     timing: Timing,
     pending: BTreeSet<String>,
+    pending_history: BTreeSet<String>,
     first_change: Option<Instant>,
     last_change: Option<Instant>,
     full_due: Instant,
@@ -77,6 +80,7 @@ impl Scheduler {
         Self {
             timing,
             pending: BTreeSet::new(),
+            pending_history: BTreeSet::new(),
             first_change: None,
             last_change: None,
             full_due: now,
@@ -109,10 +113,10 @@ impl Scheduler {
 
     pub fn on_change(&mut self, now: Instant, client: &str, metadata_only: bool) {
         if metadata_only {
-            self.request_full(now);
-            return;
+            self.pending_history.insert(client.to_owned());
+        } else {
+            self.pending.insert(client.to_owned());
         }
-        self.pending.insert(client.to_owned());
         self.first_change.get_or_insert(now);
         self.last_change = Some(now);
     }
@@ -136,7 +140,7 @@ impl Scheduler {
     }
 
     fn triggered_due(&self) -> Option<Instant> {
-        if self.pending.is_empty() {
+        if self.pending.is_empty() && self.pending_history.is_empty() {
             return None;
         }
         let debounced = self.last_change? + self.timing.debounce;
@@ -175,6 +179,7 @@ impl Scheduler {
         let kind = if self.full_due <= now {
             // A full scan covers every pending change and any poll.
             self.pending.clear();
+            self.pending_history.clear();
             self.first_change = None;
             self.last_change = None;
             self.full_requested = false;
@@ -183,11 +188,29 @@ impl Scheduler {
             }
             ScanKind::Full
         } else if self.triggered_due().is_some_and(|due| due <= now) {
-            self.first_change = None;
-            self.last_change = None;
-            ScanKind::Triggered {
-                clients: std::mem::take(&mut self.pending),
-                polled: false,
+            if !self.pending_history.is_empty() && self.pending.is_subset(&self.pending_history) {
+                self.pending.clear();
+                self.first_change = None;
+                self.last_change = None;
+                ScanKind::Triggered {
+                    clients: std::mem::take(&mut self.pending_history),
+                    polled: false,
+                    all_history: true,
+                }
+            } else {
+                let clients = std::mem::take(&mut self.pending);
+                if self.pending_history.is_empty() {
+                    self.first_change = None;
+                    self.last_change = None;
+                } else {
+                    self.first_change = Some(now);
+                    self.last_change = Some(now);
+                }
+                ScanKind::Triggered {
+                    clients,
+                    polled: false,
+                    all_history: false,
+                }
             }
         } else if self.polling && self.next_poll.is_some_and(|due| due <= now) {
             self.next_poll = Some(now + self.timing.poll_interval);
@@ -197,6 +220,7 @@ impl Scheduler {
             ScanKind::Triggered {
                 clients: self.detected.clone(),
                 polled: true,
+                all_history: false,
             }
         } else {
             return None;
@@ -227,8 +251,17 @@ impl Scheduler {
         self.backoff = Some(backoff);
         self.retry_at = Some(now + backoff);
         // A failed full scan stays due; a failed triggered scan is re-queued.
-        if let ScanKind::Triggered { clients, .. } = kind {
-            self.pending.extend(clients);
+        if let ScanKind::Triggered {
+            clients,
+            all_history,
+            ..
+        } = kind
+        {
+            if all_history {
+                self.pending_history.extend(clients);
+            } else {
+                self.pending.extend(clients);
+            }
             self.first_change = Some(self.first_change.map_or(now, |first| first.min(now)));
             self.last_change.get_or_insert(now);
         }
@@ -254,16 +287,46 @@ mod tests {
         ScanKind::Triggered {
             clients: clients.iter().map(|client| (*client).to_owned()).collect(),
             polled: false,
+            all_history: false,
+        }
+    }
+
+    fn triggered_history(clients: &[&str]) -> ScanKind {
+        ScanKind::Triggered {
+            clients: clients.iter().map(|client| (*client).to_owned()).collect(),
+            polled: false,
+            all_history: true,
         }
     }
 
     #[test]
-    fn title_only_changes_request_a_full_refresh_without_changing_token_scans() {
+    fn title_only_changes_refresh_only_that_clients_history_without_triggering_full_scans() {
         let t0 = Instant::now();
-        let mut scheduler = Scheduler::new(t0, Timing::default());
-        scheduler.on_change(t0, "codex", true);
-        assert!(matches!(scheduler.poll(t0), Some(ScanKind::Full)));
-        assert!(scheduler.pending.is_empty());
+        let mut scheduler = started(t0);
+        scheduler.on_change(t0 + secs(40.0), "codex", true);
+        assert_eq!(scheduler.poll(t0 + secs(41.0)), None);
+        assert_eq!(
+            scheduler.poll(t0 + secs(41.5)),
+            Some(triggered_history(&["codex"]))
+        );
+        scheduler.on_finished(t0 + secs(42.0), true);
+        assert_eq!(scheduler.next_deadline(), Some(t0 + secs(3600.0)));
+
+        // When one client changes usage and another changes metadata, keep the
+        // usage scan scoped and run the metadata history scan separately.
+        scheduler.on_change(t0 + secs(80.0), "dsh", false);
+        scheduler.on_change(t0 + secs(80.1), "codex", true);
+        assert_eq!(scheduler.poll(t0 + secs(82.0)), Some(triggered(&["dsh"])));
+        scheduler.on_finished(t0 + secs(83.0), true);
+        assert_eq!(
+            scheduler.poll(t0 + secs(112.0)),
+            Some(triggered_history(&["codex"]))
+        );
+        scheduler.on_finished(t0 + secs(113.0), false);
+        assert_eq!(
+            scheduler.poll(t0 + secs(173.0)),
+            Some(triggered_history(&["codex"]))
+        );
     }
     #[test]
     fn startup_is_a_full_scan_and_idle_waits_for_the_hourly_full() {
@@ -365,6 +428,7 @@ mod tests {
         let polled = ScanKind::Triggered {
             clients: ["codex".to_owned(), "dsh".to_owned()].into(),
             polled: true,
+            all_history: false,
         };
         assert_eq!(scheduler.poll(t0 + secs(310.0)), Some(polled.clone()));
         scheduler.on_finished(t0 + secs(311.0), true);

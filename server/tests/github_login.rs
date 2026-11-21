@@ -233,3 +233,39 @@ async fn github_sign_in_is_unavailable_until_a_client_id_is_configured() {
         .await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
 }
+
+#[tokio::test]
+async fn github_start_rate_limits_per_client_ip() {
+    let stub = Stub::start();
+    let h = harness_with(&stub).await;
+    for _ in 0..tokenlens_server::limiter::AUTH_REQUESTS_PER_WINDOW {
+        let resp = h
+            .http
+            .post(format!("{}/api/auth/github/start", h.base))
+            .header("x-forwarded-for", "203.0.113.55")
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+    let limited = h
+        .http
+        .post(format!("{}/api/auth/github/start", h.base))
+        .header("x-forwarded-for", "203.0.113.55")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other_ip = h
+        .http
+        .post(format!("{}/api/auth/github/start", h.base))
+        .header("x-forwarded-for", "198.51.100.88")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(other_ip.status(), StatusCode::OK);
+}

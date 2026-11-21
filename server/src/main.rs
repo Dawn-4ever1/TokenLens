@@ -204,6 +204,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     config.pricing_dir.clone(),
                     config.pricing_refresh,
                 ));
+                let stats_state = state.clone();
+                tokio::spawn(async move {
+                    let mut interval = tokio::time::interval(Duration::from_secs(30));
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        stats_state.flush_site_metrics().await;
+                    }
+                });
                 tokenlens_server::serve(listener, state, shutdown_signal()).await
             })?;
         }

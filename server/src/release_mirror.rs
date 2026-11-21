@@ -632,8 +632,14 @@ fn write_json_new<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), Mir
     write_new(path, &bytes)
 }
 
+#[cfg(unix)]
 fn sync_dir(path: &Path) -> Result<(), MirrorError> {
     fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_path: &Path) -> Result<(), MirrorError> {
     Ok(())
 }
 

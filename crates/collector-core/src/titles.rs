@@ -4,7 +4,7 @@
 //! its locked revision does not expose; it never changes keys, tokens, costs,
 //! models or attribution. No prompt or assistant content is used as a title.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -26,76 +26,121 @@ pub fn metadata_text(value: Option<&str>) -> Option<String> {
         .then(|| value.to_owned())
 }
 
-fn transcript_lines(path: &Path) -> Option<Box<dyn Iterator<Item = String>>> {
-    let file = std::fs::File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
+fn bytes_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    let first = needle[0];
+    let tail = &needle[1..];
+    let limit = haystack.len() - needle.len();
+    let mut offset = 0;
+    while offset <= limit {
+        let Some(found) = haystack[offset..=limit]
+            .iter()
+            .position(|&byte| byte == first)
+        else {
+            return false;
+        };
+        let start = offset + found;
+        if haystack[start + 1..start + needle.len()] == *tail {
+            return true;
+        }
+        offset = start + 1;
+    }
+    false
+}
+
+fn matches_any(haystack: &[u8], needles: &[&[u8]]) -> bool {
+    needles.is_empty()
+        || needles
+            .iter()
+            .any(|needle| bytes_contains(haystack, needle))
+}
+
+fn parse_json_bytes(record: &[u8]) -> Option<Value> {
+    let start = record.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let end = record
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())?
+        + 1;
+    let trimmed = &record[start..end];
+    if let Ok(value) = serde_json::from_slice::<Value>(trimmed) {
+        return Some(value);
+    }
+    let text = String::from_utf8_lossy(trimmed);
+    serde_json::from_str::<Value>(text.trim()).ok()
+}
+
+/// Streams a plain or zstd-compressed JSONL file with bounded memory and only
+/// invokes JSON parsing on lines matching at least one byte needle.
+fn visit_matching_json_lines(path: &Path, needles: &[&[u8]], mut on_value: impl FnMut(Value)) {
+    let Ok(file) = std::fs::File::open(path) else {
+        return;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return;
+    };
+    let length = metadata.len();
     if length > MAX_FILE_BYTES {
-        return None;
+        return;
     }
     let mut input = BufReader::new(file.take(length));
-    let compressed = input.fill_buf().ok()?.starts_with(&ZSTD_MAGIC);
-    let reader: Box<dyn BufRead> = if compressed {
+    let Ok(prefix) = input.fill_buf() else {
+        return;
+    };
+    let compressed = prefix.starts_with(&ZSTD_MAGIC);
+    let mut reader: Box<dyn BufRead> = if compressed {
         // A bounded decoder is sufficient for plain-text title events; do not
         // allocate an entire transcript or retain any of its message content.
-        let mut decoder = zstd::stream::read::Decoder::with_buffer(input).ok()?;
-        decoder.window_log_max(26).ok()?;
+        let Ok(mut decoder) = zstd::stream::read::Decoder::with_buffer(input) else {
+            return;
+        };
+        if decoder.window_log_max(26).is_err() {
+            return;
+        }
         Box::new(BufReader::new(decoder.take(MAX_DECODED_BYTES)))
     } else {
         Box::new(input.take(MAX_DECODED_BYTES))
     };
-    Some(Box::new(TranscriptLines {
-        reader,
-        decoded: 0,
-        finished: false,
-    }))
-}
 
-struct TranscriptLines<R> {
-    reader: R,
-    decoded: u64,
-    finished: bool,
-}
-
-impl<R: BufRead> Iterator for TranscriptLines<R> {
-    type Item = String;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.finished {
-            return None;
+    let mut record = Vec::with_capacity(8 * 1024);
+    let mut decoded: u64 = 0;
+    loop {
+        record.clear();
+        if record.capacity() > 256 * 1024 {
+            record.shrink_to(64 * 1024);
         }
-        let mut record = Vec::new();
-        match self
-            .reader
+        match reader
             .by_ref()
             .take(MAX_RECORD_BYTES + 1)
             .read_until(b'\n', &mut record)
         {
-            Ok(0) => None,
+            Ok(0) => break,
             Ok(count) => {
-                self.decoded = self.decoded.saturating_add(count as u64);
-                if record.len() as u64 > MAX_RECORD_BYTES || !record.ends_with(b"\n") {
-                    // A final newline-free record may be valid only when it is
-                    // inside the limit. Read errors stop this metadata lane;
+                decoded = decoded.saturating_add(count as u64);
+                if record.len() as u64 > MAX_RECORD_BYTES {
+                    // Read errors or oversized records stop this metadata lane;
                     // usage parsing remains upstream's responsibility.
-                    if record.len() as u64 > MAX_RECORD_BYTES {
-                        self.finished = true;
-                        return None;
-                    }
+                    break;
                 }
-                if self.decoded >= MAX_DECODED_BYTES {
-                    self.finished = true;
+                if matches_any(&record, needles)
+                    && let Some(value) = parse_json_bytes(&record)
+                {
+                    on_value(value);
                 }
-                let line = String::from_utf8_lossy(&record);
-                Some(line.trim().to_owned())
+                if decoded >= MAX_DECODED_BYTES {
+                    break;
+                }
             }
-            Err(_) => {
-                self.finished = true;
-                None
-            }
+            Err(_) => break,
         }
     }
 }
 
+#[cfg(test)]
 fn json_line(line: &str) -> Option<Value> {
     (!line.is_empty())
         .then(|| serde_json::from_str::<Value>(line).ok())
@@ -110,14 +155,15 @@ fn title_from_dsh_line(value: &Value) -> Option<String> {
 
 fn dsh_file(path: &Path) -> Option<String> {
     let mut title = None;
-    for line in transcript_lines(path)? {
-        let Some(value) = json_line(&line) else {
-            continue;
-        };
-        if let Some(next) = title_from_dsh_line(&value) {
-            title = Some(next);
-        }
-    }
+    visit_matching_json_lines(
+        path,
+        &[b"\"session/title\"", b"\"session\\/title\""],
+        |value| {
+            if let Some(next) = title_from_dsh_line(&value) {
+                title = Some(next);
+            }
+        },
+    );
     title
 }
 
@@ -154,7 +200,16 @@ fn metadata_files(root: &Path, accept: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     paths
 }
 
+#[cfg(test)]
 fn read_dsh(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+    read_dsh_for(home, use_env_roots, None)
+}
+
+fn read_dsh_for(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     let root = if use_env_roots {
         std::env::var_os("DSH_HOME")
             .filter(|value| !value.is_empty())
@@ -164,13 +219,25 @@ fn read_dsh(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
         home.join(".dsh")
     }
     .join("sessions");
-    metadata_files(&root, dsh_transcript)
-        .into_iter()
-        .filter_map(|path| {
-            let id = path.parent()?.file_name()?.to_str()?.to_owned();
-            dsh_file(&path).map(|title| (id, title))
-        })
-        .collect()
+    metadata_files(&root, |path| {
+        if !dsh_transcript(path) {
+            return false;
+        }
+        match needed {
+            Some(ids) => path
+                .parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str())
+                .is_some_and(|id| ids.contains(id)),
+            None => true,
+        }
+    })
+    .into_iter()
+    .filter_map(|path| {
+        let id = path.parent()?.file_name()?.to_str()?.to_owned();
+        dsh_file(&path).map(|title| (id, title))
+    })
+    .collect()
 }
 
 /// Last title record wins. Forked DSH logs retain the parent's title records;
@@ -206,32 +273,30 @@ fn claude_file(path: &Path) -> BTreeMap<String, (u8, String)> {
         .and_then(|name| name.to_str())
         .map(str::to_owned);
     let mut titles = BTreeMap::new();
-    let Some(lines) = transcript_lines(path) else {
-        return titles;
-    };
-    for line in lines {
-        let Some(value) = json_line(&line) else {
-            continue;
-        };
-        let Some((priority, title)) = title_from_claude_line(&value) else {
-            continue;
-        };
-        let session = value
-            .get("sessionId")
-            .or_else(|| value.get("session_id"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| fallback.clone());
-        let Some(session) = session else {
-            continue;
-        };
-        if titles
-            .get(&session)
-            .is_none_or(|(current, _): &(u8, String)| priority >= *current)
-        {
-            titles.insert(session, (priority, title));
-        }
-    }
+    visit_matching_json_lines(
+        path,
+        &[b"\"summary\"", b"\"ai-title\"", b"\"custom-title\""],
+        |value| {
+            let Some((priority, title)) = title_from_claude_line(&value) else {
+                return;
+            };
+            let session = value
+                .get("sessionId")
+                .or_else(|| value.get("session_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| fallback.clone());
+            let Some(session) = session else {
+                return;
+            };
+            if titles
+                .get(&session)
+                .is_none_or(|(current, _): &(u8, String)| priority >= *current)
+            {
+                titles.insert(session, (priority, title));
+            }
+        },
+    );
     titles
 }
 
@@ -247,13 +312,20 @@ fn claude_root(home: &Path, use_env_roots: bool) -> PathBuf {
     .join("projects")
 }
 
-fn read_claude(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+fn read_claude_for(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     let mut titles = BTreeMap::new();
     for path in metadata_files(&claude_root(home, use_env_roots), |path| {
         path.extension()
             .is_some_and(|extension| extension == "jsonl")
     }) {
         for (id, (priority, title)) in claude_file(&path) {
+            if needed.is_some_and(|ids| !ids.contains(id.as_str())) {
+                continue;
+            }
             if titles
                 .get(&id)
                 .is_none_or(|(current, _): &(u8, String)| priority >= *current)
@@ -500,25 +572,34 @@ fn crush_registries(home: &Path, use_env_roots: bool) -> Vec<PathBuf> {
     paths
 }
 
-fn read_devin(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+fn read_devin_for(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     let path = data_root(home, use_env_roots).join("devin/cli/sessions.db");
     let mut titles = sqlite_titles(&path, "SELECT id, NULLIF(title, '') FROM sessions");
     let root = home.join("Library/Application Support/Devin/User/acp-events");
     for path in metadata_files(&root, |path| {
-        path.extension()
+        if !path
+            .extension()
             .is_some_and(|extension| extension == "ndjson")
+        {
+            return false;
+        }
+        match needed {
+            Some(ids) => path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|id| ids.contains(id)),
+            None => true,
+        }
     }) {
         let file_id = path
             .file_stem()
             .and_then(|name| name.to_str())
             .unwrap_or("unknown");
-        let Some(lines) = transcript_lines(&path) else {
-            continue;
-        };
-        for line in lines {
-            let Some(value) = json_line(&line) else {
-                continue;
-            };
+        visit_matching_json_lines(&path, &[b"\"session_info_update\""], |value| {
             if value
                 .pointer("/notification/sessionUpdate")
                 .and_then(Value::as_str)
@@ -528,7 +609,7 @@ fn read_devin(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
             {
                 titles.insert(file_id.to_owned(), title);
             }
-        }
+        });
     }
     titles
 }
@@ -615,27 +696,37 @@ fn sqlite_titles(path: &Path, query: &str) -> BTreeMap<String, String> {
     titles
 }
 
-fn read_codex(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+fn read_codex_for(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     let path = root_path(home, use_env_roots, "CODEX_HOME", ".codex").join("session_index.jsonl");
     let mut titles = BTreeMap::new();
-    let Some(lines) = transcript_lines(&path) else {
-        return titles;
-    };
-    for line in lines {
-        let Some(value) = json_line(&line) else {
-            continue;
-        };
+    visit_matching_json_lines(&path, &[b"\"thread_name\""], |value| {
         let Some(id) = value.get("id").and_then(Value::as_str) else {
-            continue;
+            return;
         };
+        if needed.is_some_and(|ids| !ids.contains(id)) {
+            return;
+        }
         if let Some(title) = metadata_text(value.get("thread_name").and_then(Value::as_str)) {
             titles.insert(id.to_owned(), title);
         }
-    }
+    });
     titles
 }
 
+#[cfg(test)]
 fn read_senpi(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+    read_senpi_for(home, use_env_roots, None)
+}
+
+fn read_senpi_for(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     let root = root_path(
         home,
         use_env_roots,
@@ -650,22 +741,20 @@ fn read_senpi(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
     }) {
         let mut id = None;
         let mut title = None;
-        let Some(lines) = transcript_lines(&path) else {
-            continue;
-        };
-        for line in lines {
-            let Some(value) = json_line(&line) else {
-                continue;
-            };
-            match value.get("type").and_then(Value::as_str) {
+        visit_matching_json_lines(
+            &path,
+            &[b"\"session\"", b"\"session_info\""],
+            |value| match value.get("type").and_then(Value::as_str) {
                 Some("session") => id = value.get("id").and_then(Value::as_str).map(str::to_owned),
                 Some("session_info") => {
                     title = metadata_text(value.get("name").and_then(Value::as_str))
                 }
                 _ => {}
-            }
-        }
-        if let (Some(id), Some(title)) = (id, title) {
+            },
+        );
+        if let (Some(id), Some(title)) = (id, title)
+            && needed.is_none_or(|ids| ids.contains(id.as_str()))
+        {
             titles.insert(id, title);
         }
     }
@@ -748,7 +837,9 @@ pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::root
     };
     let codex = root_path(home, use_env_roots, "CODEX_HOME", ".codex");
     push("codex", codex.join("session_index.jsonl"));
-    push("zcode", home.join(".zcode/v2"));
+    // Watch only the title database (and its -wal via RootMap), not the whole
+    // ~/.zcode/v2 directory, so unrelated desktop files never trigger scans.
+    push("zcode", home.join(".zcode/v2/tasks-index.sqlite"));
     push("kiro", home.join(".kiro/sessions"));
     push("copilot", home.join(".copilot/data.db"));
     push(
@@ -789,9 +880,12 @@ pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::root
     }
     push(
         "devin-cli",
-        data_root(home, use_env_roots).join("devin/cli"),
+        data_root(home, use_env_roots).join("devin/cli/sessions.db"),
     );
-    push("devin-cli", home.join("AppData/Roaming/devin/cli"));
+    push(
+        "devin-cli",
+        home.join("AppData/Roaming/devin/cli/sessions.db"),
+    );
     push("devin-desktop", home.join(".config/Devin/User/acp-events"));
     push("devin-desktop", home.join(".config/devin/User/acp-events"));
     push(
@@ -807,69 +901,94 @@ pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::root
     roots
 }
 
+/// The locked Codex parser prefixes the logical thread UUID with a stable
+/// 28-byte scope. Only the canonical UUID suffix is a valid index key; never
+/// use title or first-message fields to guess an association.
+fn codex_uuid_suffix(session_id: &str) -> Option<&str> {
+    (session_id.len() == 64)
+        .then(|| session_id.get(28..))
+        .flatten()
+        .filter(|id| {
+            id.len() == 36
+                && [8, 13, 18, 23]
+                    .iter()
+                    .all(|position| id.as_bytes()[*position] == b'-')
+                && id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+        })
+}
+
 pub fn enrich_messages(messages: &mut [UnifiedMessage], home: &Path, use_env_roots: bool) {
-    let mut by_client: BTreeMap<&str, BTreeMap<String, String>> = BTreeMap::new();
+    let mut needed_by_client: BTreeMap<String, HashSet<String>> = BTreeMap::new();
+    for message in messages.iter() {
+        if message.session_title.is_some() {
+            continue;
+        }
+        let client = message.client.as_str();
+        if !matches!(
+            client,
+            "devin-cli"
+                | "devin-desktop"
+                | "codex"
+                | "senpi"
+                | "copilot"
+                | "amp"
+                | "kiro"
+                | "zed"
+                | "crush"
+                | "dsh"
+                | "claude"
+                | "openclaw"
+                | "zcode"
+        ) {
+            continue;
+        }
+        let ids = needed_by_client.entry(client.to_owned()).or_default();
+        ids.insert(message.session_id.to_string());
+        if client == "codex"
+            && let Some(uuid) = codex_uuid_suffix(message.session_id.as_str())
+        {
+            ids.insert(uuid.to_owned());
+        }
+    }
+    if needed_by_client.is_empty() {
+        return;
+    }
+
+    let mut by_client: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    for (client, needed) in &needed_by_client {
+        let titles = match client.as_str() {
+            "devin-cli" | "devin-desktop" => read_devin_for(home, use_env_roots, Some(needed)),
+            "codex" => read_codex_for(home, use_env_roots, Some(needed)),
+            "senpi" => read_senpi_for(home, use_env_roots, Some(needed)),
+            "copilot" => read_copilot(home, use_env_roots),
+            "amp" => read_amp(home, use_env_roots),
+            "kiro" => read_kiro(home),
+            "zed" => read_zed(home, use_env_roots),
+            "crush" => read_crush(home, use_env_roots),
+            "dsh" => read_dsh_for(home, use_env_roots, Some(needed)),
+            "claude" => read_claude_for(home, use_env_roots, Some(needed)),
+            "openclaw" => read_openclaw(home, use_env_roots),
+            "zcode" => read_zcode(home),
+            _ => continue,
+        };
+        by_client.insert(client.clone(), titles);
+    }
+
     for message in messages.iter_mut() {
         if message.session_title.is_some() {
             continue;
         }
         let client = message.client.as_str();
-        let titles = match client {
-            "devin-cli" | "devin-desktop" => by_client
-                .entry(client)
-                .or_insert_with(|| read_devin(home, use_env_roots)),
-            "codex" => by_client
-                .entry(client)
-                .or_insert_with(|| read_codex(home, use_env_roots)),
-            "senpi" => by_client
-                .entry(client)
-                .or_insert_with(|| read_senpi(home, use_env_roots)),
-            "copilot" => by_client
-                .entry(client)
-                .or_insert_with(|| read_copilot(home, use_env_roots)),
-            "amp" => by_client
-                .entry(client)
-                .or_insert_with(|| read_amp(home, use_env_roots)),
-            "kiro" => by_client.entry(client).or_insert_with(|| read_kiro(home)),
-            "zed" => by_client
-                .entry(client)
-                .or_insert_with(|| read_zed(home, use_env_roots)),
-            "crush" => by_client
-                .entry(client)
-                .or_insert_with(|| read_crush(home, use_env_roots)),
-            "dsh" => by_client
-                .entry(client)
-                .or_insert_with(|| read_dsh(home, use_env_roots)),
-            "claude" => by_client
-                .entry(client)
-                .or_insert_with(|| read_claude(home, use_env_roots)),
-            "openclaw" => by_client
-                .entry(client)
-                .or_insert_with(|| read_openclaw(home, use_env_roots)),
-            "zcode" => by_client.entry(client).or_insert_with(|| read_zcode(home)),
-            _ => continue,
+        let Some(titles) = by_client.get(client) else {
+            continue;
         };
         if let Some(title) = titles.get(message.session_id.as_str()).or_else(|| {
             (client == "codex")
-                .then(|| {
-                    // The locked Codex parser prefixes the logical thread
-                    // UUID with a stable 28-byte scope. Only the canonical
-                    // UUID suffix is a valid index key; never use title or
-                    // first-message fields to guess an association.
-                    (message.session_id.len() == 64)
-                        .then(|| &message.session_id[28..])
-                        .filter(|id| {
-                            id.len() == 36
-                                && [8, 13, 18, 23]
-                                    .iter()
-                                    .all(|position| id.as_bytes()[*position] == b'-')
-                                && id
-                                    .bytes()
-                                    .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
-                        })
-                        .and_then(|id| titles.get(id))
-                })
+                .then(|| codex_uuid_suffix(message.session_id.as_str()))
                 .flatten()
+                .and_then(|id| titles.get(id))
         }) {
             message.session_title = Some(title.as_str().into());
         }
@@ -1096,5 +1215,43 @@ mod tests {
         messages[0].session_title = Some(SharedStr::from("Upstream title"));
         enrich_messages(&mut messages, Path::new("/not-a-real-home"), false);
         assert_eq!(messages[0].session_title.as_deref(), Some("Upstream title"));
+    }
+
+    #[test]
+    fn dsh_enrichment_reads_only_requested_sessions_and_skips_unrelated_lines() {
+        let home = tempfile::tempdir().unwrap();
+        let wanted = home.path().join(".dsh/sessions/project/wanted-session");
+        let ignored = home.path().join(".dsh/sessions/project/ignored-session");
+        std::fs::create_dir_all(&wanted).unwrap();
+        std::fs::create_dir_all(&ignored).unwrap();
+        std::fs::write(
+            wanted.join("session.jsonl"),
+            concat!(
+                "{\"type\":\"user/message\",\"data\":{\"text\":\"not json title\"}}\n",
+                "{\"type\":\"session/title\",\"data\":{\"title\":\"Targeted DSH title\"}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ignored.join("session.jsonl"),
+            "{\"type\":\"session/title\",\"data\":{\"title\":\"Should not be loaded\"}}\n",
+        )
+        .unwrap();
+        let only_wanted = HashSet::from(["wanted-session".to_owned()]);
+        let loaded = read_dsh_for(home.path(), false, Some(&only_wanted));
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded.get("wanted-session").map(String::as_str),
+            Some("Targeted DSH title")
+        );
+        assert!(!loaded.contains_key("ignored-session"));
+        assert!(bytes_contains(
+            b"abc\"session/title\"def",
+            b"\"session/title\""
+        ));
+        assert!(!bytes_contains(
+            b"abc\"user/message\"def",
+            b"\"session/title\""
+        ));
     }
 }

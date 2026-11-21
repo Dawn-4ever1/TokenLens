@@ -61,9 +61,9 @@ async fn pages_and_their_assets_are_public_static_and_csp_restricted() {
         }
         assert!(body.contains(expected), "{path}");
         if path == "/assets/tokenlens.svg" {
-            let current = include_bytes!("../../app/public/favicon.svg");
+            let current = include_str!("../../app/public/favicon.svg").replace("\r\n", "\n");
             assert_eq!(
-                body.as_bytes(),
+                body.replace("\r\n", "\n"),
                 current,
                 "website icon must match the current app artwork"
             );
@@ -224,6 +224,34 @@ async fn site_counters_are_anonymous_and_need_the_operator_token() {
             .status(),
         StatusCode::OK
     );
+
+    // Automated crawlers and CLI tools do not inflate page counts.
+    assert_eq!(
+        h.http
+            .get(format!("{}/", h.base))
+            .header(
+                header::USER_AGENT,
+                "Mozilla/5.0 (compatible; Googlebot/2.1)"
+            )
+            .send()
+            .await
+            .expect("bot")
+            .status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        h.http
+            .get(format!("{}/privacy", h.base))
+            .header(header::USER_AGENT, "curl/8.7.1")
+            .send()
+            .await
+            .expect("curl")
+            .status(),
+        StatusCode::OK
+    );
+
+    // Buffered counts stay in memory until flushed (or read via /stats/{token}).
+    h.state.flush_site_metrics().await;
 
     assert_eq!(
         h.count("SELECT count FROM site_daily_counts WHERE metric = 'home_view'"),

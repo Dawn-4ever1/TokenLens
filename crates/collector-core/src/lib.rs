@@ -355,43 +355,58 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
             .clients
             .as_ref()
             .is_none_or(|subset| subset.contains(QODER_CLIENT));
-    let use_cache = options.upstream_cache && upstream_cache_is_exact(&upstream);
-    let start = Instant::now();
-    // An empty upstream list means "all clients" upstream, so skip the call.
-    let messages = if upstream.is_empty() {
-        Vec::new()
+    // Keep history-retaining clients (Claude) off the persistent upstream cache
+    // without forcing every other client in a full scan to re-parse cold.
+    let (uncached_clients, cached_clients): (Vec<String>, Vec<String>) = if options.upstream_cache {
+        upstream
+            .iter()
+            .cloned()
+            .partition(|client| HISTORY_RETAINING_CLIENTS.contains(&client.as_str()))
     } else {
-        let parse_options = LocalParseOptions {
+        (upstream.clone(), Vec::new())
+    };
+    let use_cache = !cached_clients.is_empty();
+    let start = Instant::now();
+    // An empty upstream list means "all clients" upstream, so skip each empty lane.
+    let mut messages = Vec::new();
+    if !cached_clients.is_empty() || !uncached_clients.is_empty() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .map_err(|error| Error::Parser(error.to_string()))?;
+        let make_options = |clients: Vec<String>| LocalParseOptions {
             home_dir: Some(options.home.to_string_lossy().into_owned()),
             use_env_roots: options.use_env_roots,
-            clients: Some(upstream.clone()),
+            clients: Some(clients),
             since: range.since.map(|date| date.to_string()),
             until: range.until.map(|date| date.to_string()),
             year: None,
             scanner_settings: tokscale_core::scanner::ScannerSettings::default(),
         };
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .map_err(|error| Error::Parser(error.to_string()))?;
-        let parsed = if use_cache {
-            runtime.block_on(parse_local_unified_messages_with_pricing(
-                parse_options,
-                None,
-            ))
-        } else {
-            runtime.block_on(parse_local_unified_messages_with_pricing_uncached(
-                parse_options,
-                None,
-            ))
-        };
-        parsed.map_err(|_| {
+        let parser_error = || {
             Error::Parser(
                 "an agent could not be parsed; no source details are printed for privacy"
                     .to_owned(),
             )
-        })?
-    };
-    let mut messages = messages;
+        };
+        if !cached_clients.is_empty() {
+            let parsed = runtime
+                .block_on(parse_local_unified_messages_with_pricing(
+                    make_options(cached_clients),
+                    None,
+                ))
+                .map_err(|_| parser_error())?;
+            messages.extend(parsed);
+        }
+        if !uncached_clients.is_empty() {
+            let parsed = runtime
+                .block_on(parse_local_unified_messages_with_pricing_uncached(
+                    make_options(uncached_clients),
+                    None,
+                ))
+                .map_err(|_| parser_error())?;
+            messages.extend(parsed);
+        }
+    }
     titles::enrich_messages(&mut messages, &options.home, options.use_env_roots);
     let mut events = map_messages_with_salt(&messages, options.project_salt.as_deref())
         .map_err(Error::EventMapping)?;

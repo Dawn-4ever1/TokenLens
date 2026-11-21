@@ -92,9 +92,10 @@ async fn render_index(headers: HeaderMap) -> Response {
 }
 
 pub async fn index(State(state): State<AppState>, method: Method, headers: HeaderMap) -> Response {
+    let should_count = method == Method::GET && site_stats::should_count_request(&headers);
     let response = render_index(headers).await;
-    if method == Method::GET && response.status() == StatusCode::OK {
-        state.record_site_metric(site_stats::HOME_VIEW).await;
+    if should_count && response.status() == StatusCode::OK {
+        state.record_site_metric(site_stats::HOME_VIEW);
     }
     response
 }
@@ -159,10 +160,15 @@ async fn render_privacy() -> Response {
     page(PRIVACY, "text/html; charset=utf-8", "public, max-age=300")
 }
 
-pub async fn privacy(State(state): State<AppState>, method: Method) -> Response {
+pub async fn privacy(
+    State(state): State<AppState>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
+    let should_count = method == Method::GET && site_stats::should_count_request(&headers);
     let response = render_privacy().await;
-    if method == Method::GET && response.status() == StatusCode::OK {
-        state.record_site_metric(site_stats::PRIVACY_VIEW).await;
+    if should_count && response.status() == StatusCode::OK {
+        state.record_site_metric(site_stats::PRIVACY_VIEW);
     }
     response
 }
@@ -436,6 +442,9 @@ mod tests {
             assert!(INDEX.contains(&format!("/assets/{asset}.webp")));
         }
         assert!(INDEX.contains("对话内容不上传"));
+        assert!(INDEX.contains("首次打开遇到系统安全提示怎么办"));
+        assert!(INDEX.contains("xattr -cr /Applications/TokenLens.app"));
+        assert!(INDEX.contains("SmartScreen"));
         assert!(PRIVACY.contains("不保存你的 Google 密码或长期 Google 授权令牌"));
         assert!(PRIVACY.contains("退出账号</strong>会撤销当前登录状态，并断开这台电脑的云端连接"));
         assert!(PRIVACY.contains("也不会删除云端设备或历史"));

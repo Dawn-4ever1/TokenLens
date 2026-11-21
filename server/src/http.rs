@@ -59,6 +59,7 @@ pub struct AppState {
     avatar_data: Arc<crate::avatar_data::AvatarData>,
     release_mirror: Option<Arc<crate::release_mirror::ReleaseMirror>>,
     auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
+    site_stats_buffer: Arc<site_stats::SiteStatsBuffer>,
 }
 
 impl AppState {
@@ -79,6 +80,7 @@ impl AppState {
             avatar_data: Arc::new(crate::avatar_data::AvatarData::new()),
             release_mirror: None,
             auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
+            site_stats_buffer: Arc::new(site_stats::SiteStatsBuffer::default()),
         }
     }
 
@@ -143,6 +145,13 @@ impl AppState {
         self.auth_limiter
             .lock()
             .map(|mut limiter| limiter.allow(key, self.now_ms()))
+            .unwrap_or(false)
+    }
+
+    pub fn allow_auth_scoped(&self, scope: &'static str, key: &str) -> bool {
+        self.auth_limiter
+            .lock()
+            .map(|mut limiter| limiter.allow_scoped(scope, key, self.now_ms()))
             .unwrap_or(false)
     }
 
@@ -239,24 +248,43 @@ impl AppState {
         self.stats_token.as_deref()
     }
 
-    /// Counts one anonymous public-site event for today. The database only
-    /// sees a day and a metric name; no request metadata is passed here.
-    pub async fn record_site_metric(&self, metric: &'static str) {
-        let db = Arc::clone(&self.db);
+    /// Buffers one anonymous public-site event for today in memory; flushed
+    /// periodically, before stats reads, and on graceful shutdown so public
+    /// GET traffic never contends on the SQLite write lock.
+    pub fn record_site_metric(&self, metric: &'static str) {
         let day = site_stats::day_for(self.clock.now_ms(), self.time_zone);
+        self.site_stats_buffer.increment(day, metric);
+    }
+
+    /// Writes any buffered anonymous site counts into SQLite in one transaction.
+    pub async fn flush_site_metrics(&self) {
+        let batch = self.site_stats_buffer.take();
+        if batch.is_empty() {
+            return;
+        }
+        let db = Arc::clone(&self.db);
+        let retry = batch.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let conn = db.lock().map_err(|_| "site stats database lock poisoned")?;
-            site_stats::record(&conn, &day, metric).map_err(|_| "site stats could not be written")
+            let mut conn = db.lock().map_err(|_| "site stats database lock poisoned")?;
+            site_stats::record_batch(&mut conn, &batch)
+                .map_err(|_| "site stats could not be written")
         })
         .await;
         match result {
             Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(error, metric, "site metric not recorded"),
-            Err(error) => tracing::warn!(%error, metric, "site metric task failed"),
+            Ok(Err(error)) => {
+                self.site_stats_buffer.restore(retry);
+                tracing::warn!(error, "site metrics batch not recorded");
+            }
+            Err(error) => {
+                self.site_stats_buffer.restore(retry);
+                tracing::warn!(%error, "site metrics flush task failed");
+            }
         }
     }
 
     pub async fn site_stats_report(&self, days: usize) -> Option<Vec<DayRow>> {
+        self.flush_site_metrics().await;
         let db = Arc::clone(&self.db);
         let now = self.clock.now_ms();
         let time_zone = self.time_zone;
@@ -529,6 +557,34 @@ fn no_store<T: Serialize>(value: &T) -> Response {
 
 // ------------------------------------------------------------------- auth --
 
+/// Extracts an ephemeral client address key for in-memory rate limiting only.
+/// Behind Caddy (`reverse_proxy 127.0.0.1:8787`), the first valid IP from
+/// `X-Forwarded-For` (or `X-Real-IP`) identifies the caller; direct loopback
+/// requests without proxy headers fall back to `"direct"`. Never logged or
+/// stored in the database.
+pub(crate) fn client_rate_key(headers: &HeaderMap) -> String {
+    if let Some(forwarded) = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+    {
+        for part in forwarded.split(',') {
+            let candidate = part.trim();
+            if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
+                return ip.to_string();
+            }
+        }
+    }
+    if let Some(real_ip) = headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        && let Ok(ip) = real_ip.parse::<std::net::IpAddr>()
+    {
+        return ip.to_string();
+    }
+    "direct".to_owned()
+}
+
 pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
     let token = value.strip_prefix("Bearer ")?;
@@ -706,12 +762,17 @@ fn classify(raw: serde_json::Value) -> Result<UsageEvent, RejectReason> {
 
 // --------------------------------------------------------------- handlers --
 
-async fn pair_claim(State(state): State<AppState>, body: Body) -> Result<Response, ApiError> {
+async fn pair_claim(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Result<Response, ApiError> {
+    let client_key = client_rate_key(&headers);
     if state
         .limiter
         .lock()
         .map_err(|_| ApiError::Internal)?
-        .is_blocked(state.clock.now_ms())
+        .is_blocked(&client_key, state.clock.now_ms())
     {
         return Err(ApiError::TooManyRequests);
     }
@@ -765,7 +826,7 @@ async fn pair_claim(State(state): State<AppState>, body: Body) -> Result<Respons
             .limiter
             .lock()
             .map_err(|_| ApiError::Internal)?
-            .record_failure(state.clock.now_ms());
+            .record_failure(&client_key, state.clock.now_ms());
         return Err(ApiError::InvalidPairCode);
     };
     tracing::info!(device = %claimed.device_id, "device paired");
@@ -1251,15 +1312,14 @@ async fn latest_installer(
 async fn download_latest_windows(
     State(state): State<AppState>,
     method: axum::http::Method,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let response = latest_installer(state.clone(), |version| {
         format!("TokenLens_{version}_x64-setup.exe")
     })
     .await?;
-    if method == axum::http::Method::GET {
-        state
-            .record_site_metric(crate::site_stats::DOWNLOAD_CLICK_WINDOWS)
-            .await;
+    if method == axum::http::Method::GET && site_stats::should_count_request(&headers) {
+        state.record_site_metric(crate::site_stats::DOWNLOAD_CLICK_WINDOWS);
     }
     Ok(response)
 }
@@ -1267,15 +1327,14 @@ async fn download_latest_windows(
 async fn download_latest_macos(
     State(state): State<AppState>,
     method: axum::http::Method,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let response = latest_installer(state.clone(), |version| {
         format!("TokenLens_{version}_aarch64.dmg")
     })
     .await?;
-    if method == axum::http::Method::GET {
-        state
-            .record_site_metric(crate::site_stats::DOWNLOAD_CLICK_MACOS)
-            .await;
+    if method == axum::http::Method::GET && site_stats::should_count_request(&headers) {
+        state.record_site_metric(crate::site_stats::DOWNLOAD_CLICK_MACOS);
     }
     Ok(response)
 }
@@ -1283,6 +1342,7 @@ async fn download_latest_macos(
 async fn download_asset(
     State(state): State<AppState>,
     method: axum::http::Method,
+    headers: HeaderMap,
     Path((version, filename)): Path<(String, String)>,
     RawQuery(query): RawQuery,
 ) -> Result<Response, ApiError> {
@@ -1300,6 +1360,7 @@ async fn download_asset(
         return Err(ApiError::ServiceUnavailable);
     }
     if method == axum::http::Method::GET
+        && site_stats::should_count_request(&headers)
         && query
             .as_deref()
             .is_some_and(|query| query.split('&').any(|pair| pair == "source=website"))
@@ -1312,7 +1373,7 @@ async fn download_asset(
             None
         };
         if let Some(metric) = metric {
-            state.record_site_metric(metric).await;
+            state.record_site_metric(metric);
         }
     }
     let is_json = filename == crate::release_mirror::MANIFEST_FILE;

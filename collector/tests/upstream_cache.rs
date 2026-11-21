@@ -184,8 +184,8 @@ fn cached_codex_worker_matches_uncached_after_every_kind_of_change() {
 
 /// Upstream's persistent cache deliberately keeps Claude turns that a
 /// transcript rewrite removed ("retained history"). Workers therefore parse
-/// any scope that includes Claude without the cache, and only Claude-free
-/// scopes use it.
+/// Claude without the persistent cache while still letting every other client
+/// in the same full scan reuse the cache.
 #[test]
 fn claude_scopes_bypass_the_cache_and_match_uncached() {
     let fixture = Fixture::new(None);
@@ -197,10 +197,20 @@ fn claude_scopes_bypass_the_cache_and_match_uncached() {
         .join(".codex/sessions/2026/11/03/rollout-synthetic-codex-session.jsonl");
     write(&path, &[claude(1, 11), claude(2, 12), claude(3, 13)]);
     write(&codex, &codex_lines(&[(100, 100)]));
-    fixture.assert_equal("initial", 4, false);
+    fixture.assert_equal("initial", 4, true);
+
+    let shard_root = fixture.cache.join("cache").join("source-message-cache-v2");
+    assert!(
+        shard_root.join("codex").is_dir(),
+        "non-Claude clients in a full scan must populate the persistent cache"
+    );
+    assert!(
+        !shard_root.join("claude").exists(),
+        "Claude must never be stored in the persistent cache"
+    );
 
     write(&path, &[claude(1, 11)]);
-    fixture.assert_equal("truncate", 2, false);
+    fixture.assert_equal("truncate", 2, true);
     let (events, cached) = worker_run(&fixture.home, Some(&fixture.cache), Some("claude"));
     assert!(!cached);
     assert_eq!(events.len(), 1);
@@ -209,7 +219,8 @@ fn claude_scopes_bypass_the_cache_and_match_uncached() {
     assert_eq!(events.len(), 1);
 
     std::fs::remove_file(&path).expect("delete");
-    fixture.assert_equal("delete", 1, false);
+    fixture.assert_equal("delete", 1, true);
+    assert!(!shard_root.join("claude").exists());
 }
 
 #[test]

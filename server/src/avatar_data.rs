@@ -34,25 +34,39 @@ impl AvatarData {
         if !avatar_url_allowed(url) {
             return None;
         }
-        let Ok(mut cache) = self.cache.lock() else {
-            return None;
-        };
-        cache.retain(|_, entry| now - entry.fetched_at < CACHE_TTL_MS);
-        if let Some(entry) = cache.get(url) {
-            return Some((entry.bytes.clone(), entry.mime));
+        self.image_with(url, now, fetch)
+    }
+
+    fn image_with<F>(&self, url: &str, now: i64, fetcher: F) -> Option<(Vec<u8>, &'static str)>
+    where
+        F: FnOnce(&str) -> Option<(Vec<u8>, &'static str)>,
+    {
+        {
+            let Ok(mut cache) = self.cache.lock() else {
+                return None;
+            };
+            cache.retain(|_, entry| now - entry.fetched_at < CACHE_TTL_MS);
+            if let Some(entry) = cache.get(url) {
+                return Some((entry.bytes.clone(), entry.mime));
+            }
         }
-        let (bytes, mime) = fetch(url)?;
-        if cache.len() >= MAX_CACHE {
-            cache.clear();
+        // Release the cache mutex before performing blocking network I/O so
+        // concurrent cache hits or other accounts' avatars are never stalled.
+        let (bytes, mime) = fetcher(url)?;
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.retain(|_, entry| now - entry.fetched_at < CACHE_TTL_MS);
+            if cache.len() >= MAX_CACHE && !cache.contains_key(url) {
+                cache.clear();
+            }
+            cache.insert(
+                url.to_owned(),
+                Cached {
+                    fetched_at: now,
+                    bytes: bytes.clone(),
+                    mime,
+                },
+            );
         }
-        cache.insert(
-            url.to_owned(),
-            Cached {
-                fetched_at: now,
-                bytes: bytes.clone(),
-                mime,
-            },
-        );
         Some((bytes, mime))
     }
 }
@@ -146,6 +160,7 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::mpsc;
 
     /// A one-shot HTTP stub; returns the request line count for cache checks.
     fn stub(
@@ -225,6 +240,41 @@ mod tests {
         assert_eq!(fetched.0, PNG);
         assert_eq!(fetched.1, "image/png");
         assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn slow_fetch_does_not_block_concurrent_cache_hits() {
+        let data = AvatarData::new();
+        let cached_url = "https://avatars.githubusercontent.com/u/1?v=4";
+        let slow_url = "https://avatars.githubusercontent.com/u/2?v=4";
+        let seeded = data.image_with(cached_url, 1_000, |_| Some((PNG.to_vec(), "image/png")));
+        assert_eq!(seeded, Some((PNG.to_vec(), "image/png")));
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let bg = data.clone();
+        let handle = std::thread::spawn(move || {
+            bg.image_with(slow_url, 1_000, |_| {
+                entered_tx.send(()).expect("signal entered");
+                release_rx.recv().expect("wait release");
+                Some((PNG.to_vec(), "image/png"))
+            })
+        });
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("slow fetch should start");
+        // While the slow fetch is still in flight, a cached lookup must not deadlock or wait.
+        let hit = data.image_with(cached_url, 1_000, |_| {
+            panic!("cached avatar should not re-fetch");
+        });
+        assert_eq!(hit, Some((PNG.to_vec(), "image/png")));
+
+        release_tx.send(()).expect("release slow fetch");
+        assert_eq!(
+            handle.join().expect("join"),
+            Some((PNG.to_vec(), "image/png"))
+        );
     }
 
     #[test]

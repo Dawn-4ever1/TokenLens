@@ -143,9 +143,12 @@ pub async fn serve(
     state: http::AppState,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, http::router(state))
+    let flush_state = state.clone();
+    let result = axum::serve(listener, http::router(state))
         .with_graceful_shutdown(shutdown)
-        .await
+        .await;
+    flush_state.flush_site_metrics().await;
+    result
 }
 
 /// Asks a server listening on `addr` for `/healthz`; an unspecified address
