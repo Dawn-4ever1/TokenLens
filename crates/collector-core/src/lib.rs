@@ -370,6 +370,14 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
     // An empty upstream list means "all clients" upstream, so skip each empty lane.
     let mut messages = Vec::new();
     if !cached_clients.is_empty() || !uncached_clients.is_empty() {
+        let mut scanner_settings = tokscale_core::scanner::ScannerSettings::default();
+        let t3_antigravity_dirs =
+            roots::t3_antigravity_conversation_dirs(&options.home, options.use_env_roots);
+        if !t3_antigravity_dirs.is_empty() {
+            scanner_settings
+                .extra_scan_paths
+                .insert("antigravity-extension".to_owned(), t3_antigravity_dirs);
+        }
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .map_err(|error| Error::Parser(error.to_string()))?;
@@ -380,7 +388,7 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
             since: range.since.map(|date| date.to_string()),
             until: range.until.map(|date| date.to_string()),
             year: None,
-            scanner_settings: tokscale_core::scanner::ScannerSettings::default(),
+            scanner_settings: scanner_settings.clone(),
         };
         let parser_error = || {
             Error::Parser(
@@ -867,5 +875,146 @@ mod tests {
         assert_eq!(report.client_totals[0].precision_counts["estimated"], 1);
         assert_eq!(report.client_totals[0].precision_counts["measured"], 1);
         assert_eq!(report.daily[0].tokens.total, 44560);
+    }
+
+    fn encode_protobuf_varint(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    fn enc_varint(field: u64, value: u64) -> Vec<u8> {
+        let mut out = encode_protobuf_varint(field << 3);
+        out.extend(encode_protobuf_varint(value));
+        out
+    }
+
+    fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+        let mut out = encode_protobuf_varint((field << 3) | 2);
+        out.extend(encode_protobuf_varint(payload.len() as u64));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn write_antigravity_db(path: &Path, response_ids_and_tokens: &[(&str, u64, u64, u64, u64)]) {
+        std::fs::create_dir_all(path.parent().expect("db parent")).expect("db dir");
+        let conn = rusqlite::Connection::open(path).expect("open synthetic db");
+        conn.execute_batch(
+            "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+             CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY DEFAULT 'main', data BLOB);",
+        )
+        .expect("create schema");
+        let ts_secs = u64::try_from((chrono::Utc::now().timestamp() - 3_600).max(1_700_000_001))
+            .expect("positive ts");
+        let ts_msg = enc_varint(1, ts_secs);
+        let gen9 = enc_len(4, &ts_msg);
+        let traj_blob = enc_len(2, &ts_msg);
+        conn.execute(
+            "INSERT INTO trajectory_metadata_blob (id, data) VALUES ('main', ?1)",
+            [&traj_blob],
+        )
+        .expect("insert trajectory_metadata_blob");
+        for (idx, (response_id, input, text_out, thinking, cache_read)) in
+            response_ids_and_tokens.iter().enumerate()
+        {
+            let mut usage = Vec::new();
+            usage.extend(enc_varint(2, *input));
+            usage.extend(enc_varint(3, *thinking + *text_out));
+            usage.extend(enc_varint(5, *cache_read));
+            usage.extend(enc_varint(9, *thinking));
+            usage.extend(enc_varint(10, *text_out));
+            usage.extend(enc_len(11, response_id.as_bytes()));
+            let mut chat_model = Vec::new();
+            chat_model.extend(enc_len(4, &usage));
+            chat_model.extend(enc_len(9, &gen9));
+            chat_model.extend(enc_len(19, b"gemini-4-carbon"));
+            let row_blob = enc_len(1, &chat_model);
+            let size = i64::try_from(row_blob.len()).expect("blob size");
+            let row_idx = i64::try_from(idx).expect("row idx");
+            conn.execute(
+                "INSERT INTO gen_metadata (idx, data, size) VALUES (?1, ?2, ?3)",
+                rusqlite::params![row_idx, row_blob, size],
+            )
+            .expect("insert gen_metadata");
+        }
+    }
+
+    #[test]
+    fn t3_antigravity_instances_scan_into_antigravity_extension_and_dedup_across_surfaces() {
+        let home = tempfile::tempdir().expect("home");
+        write_antigravity_db(
+            &home.path().join(
+                ".t3/userdata/providers/antigravity/inst-1/antigravity-acp/conversations/s1.db",
+            ),
+            &[("resp-1", 100, 20, 5, 30), ("resp-shared", 200, 40, 10, 50)],
+        );
+        write_antigravity_db(
+            &home.path().join(
+                ".t3/userdata/providers/antigravity/inst-2/antigravity-acp/conversations/s2.db",
+            ),
+            &[("resp-2", 300, 60, 15, 70)],
+        );
+        write_antigravity_db(
+            &home
+                .path()
+                .join(".gemini/antigravity/conversations/standalone.db"),
+            &[("resp-shared", 200, 40, 10, 50)],
+        );
+
+        let report = scan_with(
+            &Config::default(),
+            &ScanOptions {
+                home: home.path().to_path_buf(),
+                use_env_roots: false,
+                clients: Some(BTreeSet::from(["antigravity-extension".to_owned()])),
+                range: DateRange::all_history(),
+                upstream_cache: false,
+                project_salt: None,
+            },
+        )
+        .expect("scan t3 and standalone antigravity");
+
+        assert_eq!(report.events.len(), 3);
+        assert!(
+            report
+                .events
+                .iter()
+                .all(|event| event.client == "antigravity-extension")
+        );
+        let input: u64 = report.events.iter().map(|event| event.input).sum();
+        let output: u64 = report.events.iter().map(|event| event.output).sum();
+        let reasoning: u64 = report.events.iter().map(|event| event.reasoning).sum();
+        let cache_read: u64 = report.events.iter().map(|event| event.cache_read).sum();
+        assert_eq!(input, 600);
+        assert_eq!(output, 120);
+        assert_eq!(reasoning, 30);
+        assert_eq!(cache_read, 150);
+
+        let excluded = scan_with(
+            &Config {
+                clients: Clients::Auto("auto".to_owned()),
+                exclude: vec!["antigravity-extension".to_owned()],
+            },
+            &ScanOptions {
+                home: home.path().to_path_buf(),
+                use_env_roots: false,
+                clients: None,
+                range: DateRange::all_history(),
+                upstream_cache: false,
+                project_salt: None,
+            },
+        )
+        .expect("scan with antigravity-extension excluded");
+        assert!(excluded.events.is_empty());
     }
 }

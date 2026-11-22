@@ -54,6 +54,7 @@ pub const AGENT_ROOT_ENV_VARS: &[&str] = &[
     "QODER_CN_HOME",
     "QODER_CN_DB_PATH",
     "QODERCN_CONFIG_DIR",
+    "T3CODE_HOME",
     "APPDATA",
     "XDG_DATA_HOME",
     "XDG_CONFIG_HOME",
@@ -659,6 +660,7 @@ mod tests {
             Some(Some("1".into()))
         );
         assert_eq!(env_value(&uncached, "CODEX_HOME"), Some(None));
+        assert_eq!(env_value(&uncached, "T3CODE_HOME"), Some(None));
         assert_eq!(
             env_value(&uncached, "HOME"),
             Some(Some("/synthetic-home".into()))

@@ -2,6 +2,7 @@
 //! mapping from a changed path back to its client.
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use tokscale_core::ClientId;
@@ -52,6 +53,90 @@ fn is_forbidden(path: &Path, client: &str) -> bool {
         && client != QODER_CN_CLIENT
 }
 
+fn is_real_dir(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+fn t3_base_dir_from(home: &Path, use_env_roots: bool, env_value: Option<&OsStr>) -> PathBuf {
+    if use_env_roots && let Some(raw) = env_value {
+        let trimmed = raw.to_string_lossy();
+        let trimmed = trimmed.trim();
+        if !trimmed.is_empty() {
+            if trimmed == "~" {
+                return home.to_path_buf();
+            }
+            if let Some(relative) = trimmed
+                .strip_prefix("~/")
+                .or_else(|| trimmed.strip_prefix("~\\"))
+            {
+                let mut path = home.to_path_buf();
+                for component in Path::new(relative).components() {
+                    path.push(component.as_os_str());
+                }
+                return path;
+            }
+            let candidate = PathBuf::from(trimmed);
+            if candidate.is_absolute() {
+                return candidate;
+            }
+        }
+    }
+    home.join(".t3")
+}
+
+fn t3_base_dir(home: &Path, use_env_roots: bool) -> PathBuf {
+    t3_base_dir_from(
+        home,
+        use_env_roots,
+        std::env::var_os("T3CODE_HOME").as_deref(),
+    )
+}
+
+/// Isolated Antigravity conversation directories written by T3 Code under
+/// `<T3CODE_HOME|~/.t3>/userdata/providers/antigravity/<instance>/antigravity-acp/conversations`.
+pub fn t3_antigravity_conversation_dirs(home: &Path, use_env_roots: bool) -> Vec<PathBuf> {
+    let base = t3_base_dir(home, use_env_roots);
+    if base == home || home.starts_with(&base) || !is_real_dir(&base) {
+        return Vec::new();
+    }
+    let userdata = base.join("userdata");
+    if !is_real_dir(&userdata) {
+        return Vec::new();
+    }
+    let providers = userdata.join("providers");
+    if !is_real_dir(&providers) {
+        return Vec::new();
+    }
+    let ag_root = providers.join("antigravity");
+    if !is_real_dir(&ag_root) {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(&ag_root) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let acp = entry.path().join("antigravity-acp");
+        if !is_real_dir(&acp) {
+            continue;
+        }
+        let conv = acp.join("conversations");
+        if !is_real_dir(&conv) {
+            continue;
+        }
+        if !is_forbidden(&conv, "antigravity-extension") && conv != home && !home.starts_with(&conv)
+        {
+            dirs.push(conv);
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     let home_text = home.to_string_lossy();
     let mut roots = Vec::new();
@@ -99,6 +184,9 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     }
     if let Some(parent) = crate::qoder_ide::database_path_cn(home, use_env_roots).parent() {
         push(crate::QODER_CN_CLIENT, parent.to_path_buf());
+    }
+    for dir in t3_antigravity_conversation_dirs(home, use_env_roots) {
+        push("antigravity-extension", dir);
     }
     roots.extend(crate::titles::metadata_watch_roots(home, use_env_roots));
     roots.retain(|root| {
@@ -438,6 +526,107 @@ mod tests {
         assert_eq!(
             map.client_for(Path::new("/synthetic/a/c")),
             Some(("outer", false))
+        );
+    }
+
+    #[test]
+    fn t3_antigravity_conversations_are_watched_without_watching_noisy_siblings() {
+        let home = tempfile::tempdir().expect("home");
+        let conv_a = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-a/antigravity-acp/conversations");
+        let conv_b = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-b/antigravity-acp/conversations");
+        let log_dir = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-a/antigravity-acp/log");
+        let brain_dir = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-a/antigravity-acp/brain/id");
+        std::fs::create_dir_all(&conv_a).expect("conv_a");
+        std::fs::create_dir_all(&conv_b).expect("conv_b");
+        std::fs::create_dir_all(&log_dir).expect("log_dir");
+        std::fs::create_dir_all(&brain_dir).expect("brain_dir");
+        std::fs::write(home.path().join(".t3/userdata/statev2.sqlite"), "").expect("statev2");
+
+        let roots = watch_roots(home.path(), false, &detected(&["antigravity-extension"]));
+        let paths: Vec<PathBuf> = roots.iter().map(|root| root.path.clone()).collect();
+        assert_eq!(roots.len(), 2);
+        assert!(paths.contains(&conv_a));
+        assert!(paths.contains(&conv_b));
+
+        let map = RootMap::new(&roots, &[]);
+        assert_eq!(
+            map.client_for(&conv_a.join("s.db")),
+            Some(("antigravity-extension", false))
+        );
+        assert_eq!(
+            map.client_for(&conv_b.join("s.db-wal")),
+            Some(("antigravity-extension", false))
+        );
+        assert_eq!(map.client_for(&conv_a.join("s.db-shm")), None);
+        assert_eq!(map.client_for(&log_dir.join("acp.log")), None);
+        assert_eq!(map.client_for(&brain_dir.join("transcript.jsonl")), None);
+        assert_eq!(
+            map.client_for(&home.path().join(".t3/userdata/statev2.sqlite-wal")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t3_antigravity_rejects_symlinked_profile_or_conversations_dirs() {
+        let home = tempfile::tempdir().expect("home");
+        let outside_conv = home.path().join("outside/conversations");
+        let outside_inst_conv = home
+            .path()
+            .join("outside-inst/antigravity-acp/conversations");
+        let real_inst_acp = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/real-inst/antigravity-acp");
+        let ag_root = home.path().join(".t3/userdata/providers/antigravity");
+        std::fs::create_dir_all(&outside_conv).expect("outside conv");
+        std::fs::create_dir_all(&outside_inst_conv).expect("outside inst conv");
+        std::fs::create_dir_all(&real_inst_acp).expect("real inst acp");
+        std::os::unix::fs::symlink(&outside_conv, real_inst_acp.join("conversations"))
+            .expect("symlink conversations");
+        std::os::unix::fs::symlink(
+            home.path().join("outside-inst"),
+            ag_root.join("linked-inst"),
+        )
+        .expect("symlink instance");
+
+        assert!(t3_antigravity_conversation_dirs(home.path(), false).is_empty());
+    }
+
+    #[test]
+    fn t3_base_dir_resolution() {
+        let home = tempfile::tempdir().expect("home");
+        let custom_abs = home.path().join("custom-t3-abs");
+        assert_eq!(
+            t3_base_dir_from(home.path(), false, Some(custom_abs.as_os_str())),
+            home.path().join(".t3")
+        );
+        assert_eq!(
+            t3_base_dir_from(home.path(), true, Some(OsStr::new("~/custom-t3"))),
+            home.path().join("custom-t3")
+        );
+        assert_eq!(
+            t3_base_dir_from(home.path(), true, Some(custom_abs.as_os_str())),
+            custom_abs
+        );
+        assert_eq!(
+            t3_base_dir_from(home.path(), true, Some(OsStr::new("relative/path"))),
+            home.path().join(".t3")
+        );
+        assert_eq!(
+            t3_base_dir_from(home.path(), true, Some(OsStr::new("   "))),
+            home.path().join(".t3")
+        );
+        assert_eq!(
+            t3_base_dir_from(home.path(), true, Some(OsStr::new("~"))),
+            home.path().to_path_buf()
         );
     }
 }
