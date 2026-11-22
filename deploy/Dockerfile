@@ -11,15 +11,20 @@ COPY Cargo.toml Cargo.lock ./
 COPY schema schema
 COPY config/pricing-overrides.json config/pricing-overrides.json
 COPY crates/usage-event crates/usage-event
-COPY server server
-# Only the server and its local crate are in the image (tokscale-core comes
-# from git), so the workspace is narrowed to them; versions still come from
-# the committed Cargo.lock.
+COPY server/Cargo.toml server/Cargo.toml
+# Pre-build workspace dependencies in a cached Docker layer so source-only
+# server updates recompile in seconds instead of rebuilding OpenSSL/tokscale.
 # Small servers: `docker compose build --build-arg BUILD_JOBS=1` caps parallel
 # compile jobs so the build does not starve other services of memory.
 ARG BUILD_JOBS
 RUN sed -i 's|^members = .*|members = ["crates/usage-event", "server"]|' Cargo.toml \
+ && mkdir -p server/src \
+ && echo "pub fn _stub() {}" > server/src/lib.rs \
+ && echo "fn main() {}" > server/src/main.rs \
  && cargo build --release -p tokenlens-server ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} \
+ && rm -rf server/src target/release/.fingerprint/tokenlens-server-* target/release/deps/tokenlens_server* target/release/deps/libtokenlens_server* target/release/tokenlens-server
+COPY server server
+RUN cargo build --release -p tokenlens-server ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} \
  && install -s -m 0755 target/release/tokenlens-server /tokenlens-server
 
 FROM debian:bookworm-slim

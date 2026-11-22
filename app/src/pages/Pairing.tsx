@@ -10,7 +10,7 @@ import { ApiError } from "@/lib/types";
 
 type FormFactor = "laptop" | "desktop";
 type Where = "cloud" | "own";
-type Method = "github" | "google" | "email";
+type Method = "github" | "google" | "email" | "pair";
 
 function GitHubIcon({ className }: { className?: string }) {
   return (
@@ -39,6 +39,13 @@ function loginError(error: unknown): string {
     if (error.kind === "bad_email") return "邮箱格式不对，请检查后重试。";
     if (error.kind === "rate_limited") return "发送太频繁，请稍等一分钟再试。";
     if (error.kind === "unavailable") return "服务器暂时不能发信，请稍后再试。";
+  }
+  return errorMessage(error);
+}
+
+function pairError(error: unknown): string {
+  if (error instanceof ApiError && (error.kind === "bad_code" || error.kind === "unauthorized")) {
+    return "配对码无效或已过期，请在服务器重新生成后重试。";
   }
   return errorMessage(error);
 }
@@ -155,6 +162,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [ownServer, setOwnServer] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
+  const [pairCode, setPairCode] = useState("");
   const [formFactor, setFormFactor] = useState<FormFactor>(status?.formFactor ?? "laptop");
   const [name, setName] = useState<string | null>(null);
   const [deviceOpen, setDeviceOpen] = useState(false);
@@ -170,8 +178,12 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const displayName = (name ?? defaultName).trim();
   const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   const codeOk = code.replace(/[^0-9]/g, "").length === 6;
+  const pairCodeOk = pairCode.replace(/[^A-Z0-9]/gi, "").length >= 8;
   const serverOk = /^https?:\/\/[^\s/]+/i.test(server);
-  const ready = emailOk && codeOk && serverOk && displayName.length > 0 && [...displayName].length <= 64;
+  const nameOk = displayName.length > 0 && [...displayName].length <= 64;
+  const ready = method === "pair"
+    ? serverOk && pairCodeOk && nameOk
+    : emailOk && codeOk && serverOk && nameOk;
 
   useEffect(() => {
     if (sentAt === null) return;
@@ -201,6 +213,19 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     onBusy(true);
     setError(null);
     try {
+      if (method === "pair") {
+        const next = await app.pair({
+          server,
+          code: pairCode.trim(),
+          formFactor,
+          name: displayName,
+          autostart: status?.autostart === true,
+        });
+        setPairCode("");
+        set(next);
+        onClose();
+        return;
+      }
       const next = await app.loginAccount({
         server,
         email: email.trim(),
@@ -214,7 +239,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       set(next);
       onClose();
     } catch (next) {
-      setError(loginError(next));
+      setError(method === "pair" ? pairError(next) : loginError(next));
     } finally {
       setBusy(false);
       onBusy(false);
@@ -534,10 +559,25 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
             </>
           )}
         </div>
+      ) : method === "pair" ? (
+        <div className="space-y-4">
+          <Field label="服务器地址" hint="填写你搭建的 TokenLens 服务器地址">
+            <input aria-label="服务器地址" className={inputClass} value={ownServer} onChange={(event) => setOwnServer(event.target.value)} placeholder="https://" autoComplete="off" spellCheck={false} inputMode="url" />
+          </Field>
+          <Field label="配对码" hint="在服务器运行 tokenlens-server pair-code create 生成，10 分钟内有效">
+            <input aria-label="配对码" className={cn(inputClass, "font-mono tracking-[0.08em] uppercase")} value={pairCode} onChange={(event) => setPairCode(event.target.value.toUpperCase())} placeholder="XXXX-XXXX-XXXX" autoComplete="off" spellCheck={false} />
+          </Field>
+          {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
+          <Button type="submit" variant="primary" className="w-full" disabled={!ready || busy}>{busy ? "正在连接…" : "连接服务器"}</Button>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { setWhere("cloud"); setChooser(true); setError(null); }}>返回登录方式</button>
+            <button type="button" className="text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setMethod("email"); setError(null); }}>使用邮箱验证码登录</button>
+          </div>
+        </div>
       ) : (
         <div className="space-y-4">
           {where === "own" && (
-            <Field label="服务器地址" hint="自建服务器使用邮箱验证码登录">
+            <Field label="服务器地址" hint="自建服务器可使用邮箱验证码或一次性配对码连接">
               <input aria-label="服务器地址" className={inputClass} value={ownServer} onChange={(event) => setOwnServer(event.target.value)} placeholder="https://" autoComplete="off" spellCheck={false} inputMode="url" />
             </Field>
           )}
@@ -556,10 +596,15 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           </div>
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="submit" variant="primary" className="w-full" disabled={!ready || busy}>{busy ? "正在登录…" : "登录并连接"}</Button>
-          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { if (where === "cloud") { setChooser(true); } else { setWhere("cloud"); setChooser(true); } }}>返回登录方式</button>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { if (where === "cloud") { setChooser(true); } else { setWhere("cloud"); setChooser(true); } setError(null); }}>返回登录方式</button>
+            {where === "own" && (
+              <button type="button" className="text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setMethod("pair"); setError(null); }}>使用配对码连接</button>
+            )}
+          </div>
         </div>
       )}
-      {method === "email" || gh || gg ? (
+      {method === "email" || method === "pair" || gh || gg ? (
         <div className="border-t border-line/70 pt-4">
           <button type="button" className="flex w-full items-center justify-between gap-2 text-left" aria-expanded={deviceOpen} onClick={() => setDeviceOpen((value) => !value)}>
             <span className="text-xs font-medium text-ink-2">设备与隐私</span>

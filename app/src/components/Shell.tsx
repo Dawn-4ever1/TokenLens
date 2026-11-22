@@ -1,5 +1,5 @@
 import { Cloud as CloudIcon, LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
-import { lazy, Suspense, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { relativeTime } from "@/lib/format";
 import { PAGES, useNav, type Page } from "@/lib/nav";
 import { useStatus } from "@/lib/status";
@@ -9,7 +9,7 @@ import { AppMark } from "./AppMark";
 import { DeviceScopePicker, FilterMenu, RangePicker, RefreshStatus } from "./FilterBar";
 import { SessionDrawer } from "./SessionDrawer";
 import { UpdateDialog, UpdateNotice } from "./UpdateNotice";
-import { Button, Dialog, StatusDot, Tip, cn } from "./ui";
+import { Button, Dialog, Popover, PopoverContent, PopoverTrigger, StatusDot, Tip, cn } from "./ui";
 import { Overview } from "@/pages/Overview";
 import { ConnectServer } from "@/pages/Pairing";
 
@@ -187,30 +187,68 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
     : `账号 ${name}`;
   const [imageFailed, setImageFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onResize = () => {
+      if (window.innerWidth >= 1100) setMenuOpen(false);
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [menuOpen]);
   if (name) {
     return (
       <div className="px-1">
         {/* In the collapsed rail the avatar sits directly above Settings,
-            both centred in the sidebar. The name and sign-out entry return
-            in the wide sidebar. */}
+            both centred in the sidebar, and opens a compact popover on click
+            so sign-out remains reachable without widening the window. */}
         <div
           role="group"
           aria-label={accountLabel}
           className="group flex h-9 w-full items-center justify-center gap-3 rounded-lg px-1 min-[1100px]:h-11 min-[1100px]:justify-start min-[1100px]:px-2"
         >
-          <Tip content={accountLabel} side="right">
-            <span data-account-identity className="flex min-w-0 flex-none items-center justify-center min-[1100px]:flex-1 min-[1100px]:justify-start min-[1100px]:gap-3">
-              {status?.accountAvatarUrl && !imageFailed ? (
-                <img
-                  src={status.accountAvatarUrl}
-                  alt=""
-                  className="h-5 w-5 shrink-0 rounded-full min-[1100px]:h-6 min-[1100px]:w-6"
-                  onError={() => setImageFailed(true)}
-                />
-              ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
-              <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
-            </span>
-          </Tip>
+          <Popover
+            open={menuOpen}
+            onOpenChange={(next) => {
+              if (!next || window.innerWidth < 1100) setMenuOpen(next);
+            }}
+          >
+            <Tip content={accountLabel} side="right">
+              <PopoverTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="打开账号菜单"
+                  data-account-identity
+                  className="flex min-w-0 flex-none items-center justify-center rounded-full p-0 text-left min-[1100px]:flex-1 min-[1100px]:cursor-default min-[1100px]:justify-start min-[1100px]:gap-3 min-[1100px]:rounded-none"
+                >
+                  {status?.accountAvatarUrl && !imageFailed ? (
+                    <img
+                      src={status.accountAvatarUrl}
+                      alt=""
+                      className="h-5 w-5 shrink-0 rounded-full min-[1100px]:h-6 min-[1100px]:w-6"
+                      onError={() => setImageFailed(true)}
+                    />
+                  ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
+                  <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+                </button>
+              </PopoverTrigger>
+            </Tip>
+            <PopoverContent side="right" align="end" className="w-52 p-2">
+              <div className="truncate px-2 py-1 text-xs font-medium text-ink" title={accountLabel}>{accountLabel}</div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setMenuOpen(false);
+                  setConfirming(true);
+                }}
+                className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-bad hover:bg-surface-2 disabled:opacity-50"
+              >
+                <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                退出登录
+              </button>
+            </PopoverContent>
+          </Popover>
           <div className="hidden min-[1100px]:contents">
             <Tip content="退出登录" side="right">
               <button

@@ -147,7 +147,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Serve => {
             let _lock = db::lock_database(&config.database_path)?;
             let conn = open_db(&config)?;
-            let reader = db::open_reader(&config.database_path)?;
+            let mut readers = Vec::with_capacity(4);
+            for _ in 0..4 {
+                readers.push(db::open_reader(&config.database_path)?);
+            }
             std::fs::create_dir_all(&config.pricing_dir)?;
             // SAFETY: no other thread exists yet; the runtime starts below.
             unsafe { pricing::configure_dir(&config.pricing_dir) };
@@ -158,7 +161,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 let listener = tokio::net::TcpListener::bind(config.listen_addr).await?;
                 tracing::info!(addr = %listener.local_addr()?, "listening");
                 let state = AppState::new(conn, Arc::new(SystemClock))
-                    .with_reader(reader)
+                    .with_readers(readers)
                     .with_time_zone(config.time_zone);
                 let state = match std::env::var("TOKENLENS_STATS_TOKEN") {
                     Ok(token) if !token.trim().is_empty() => {
@@ -211,6 +214,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     loop {
                         interval.tick().await;
                         stats_state.flush_site_metrics().await;
+                    }
+                });
+                let prune_state = state.clone();
+                tokio::spawn(async move {
+                    prune_state.prune_expired().await;
+                    let mut interval = tokio::time::interval(Duration::from_secs(3_600));
+                    interval.tick().await;
+                    loop {
+                        interval.tick().await;
+                        prune_state.prune_expired().await;
                     }
                 });
                 tokenlens_server::serve(listener, state, shutdown_signal()).await

@@ -138,12 +138,59 @@ impl Snapshot {
 
     #[doc(hidden)]
     pub fn checksum_matches(&self, filename: &str, bytes: &[u8]) -> bool {
+        let actual = hex_sha256(bytes);
+        self.digest_matches(filename, &actual)
+    }
+
+    fn digest_matches(&self, filename: &str, actual_hex: &str) -> bool {
         if filename == SUMS_FILE {
-            return constant_time_equal(self.sums_digest.as_bytes(), hex_sha256(bytes).as_bytes());
+            return constant_time_equal(self.sums_digest.as_bytes(), actual_hex.as_bytes());
         }
-        self.checksums.get(filename).is_some_and(|expected| {
-            constant_time_equal(expected.as_bytes(), hex_sha256(bytes).as_bytes())
-        })
+        self.checksums
+            .get(filename)
+            .is_some_and(|expected| constant_time_equal(expected.as_bytes(), actual_hex.as_bytes()))
+    }
+
+    /// Opens an asset file and verifies its SHA-256 in 64 KiB chunks without
+    /// buffering the full installer in memory, returning the rewound handle.
+    pub fn open_verified_file(&self, filename: &str) -> Result<(fs::File, u64), MirrorError> {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+
+        let path = self
+            .file_path(filename)
+            .ok_or_else(|| MirrorError::new(ErrorKind::Manifest))?;
+        let sym = fs::symlink_metadata(&path)?;
+        if !sym.is_file() || sym.file_type().is_symlink() {
+            return Err(MirrorError::new(ErrorKind::Io));
+        }
+        let mut file = fs::File::open(&path)?;
+        let len = file.metadata()?.len();
+        if len > MAX_ASSET_BYTES as u64 {
+            return Err(MirrorError::new(ErrorKind::Checksum));
+        }
+        let mut hasher = Sha256::new();
+        let mut buf = [0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let n = file.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            total = total.saturating_add(n as u64);
+            if total > MAX_ASSET_BYTES as u64 {
+                return Err(MirrorError::new(ErrorKind::Checksum));
+            }
+            hasher.update(&buf[..n]);
+        }
+        if total != len {
+            return Err(MirrorError::new(ErrorKind::Checksum));
+        }
+        let actual = format!("{:x}", hasher.finalize());
+        if !self.digest_matches(filename, &actual) {
+            return Err(MirrorError::new(ErrorKind::Checksum));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        Ok((file, len))
     }
 }
 
@@ -482,6 +529,11 @@ impl ReleaseMirror {
     }
 
     fn publish(self: &Arc<Self>, candidate: Candidate) -> Result<(), MirrorError> {
+        let previous_version = self
+            .current
+            .read()
+            .ok()
+            .and_then(|guard| guard.as_ref().map(|snap| snap.version.clone()));
         let version = candidate.version.to_string();
         let final_dir = self.root.join("versions").join(&version);
         if final_dir.exists() {
@@ -528,12 +580,52 @@ impl ReleaseMirror {
                 .current
                 .write()
                 .map_err(|_| MirrorError::new(ErrorKind::Io))? = Some(snapshot);
+            self.prune_old_versions(&candidate.version, previous_version.as_ref());
             Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_dir_all(staging);
         }
         result
+    }
+
+    /// Retains `current` and at most one previous version directory so old
+    /// releases cannot fill disk over time while keeping any just-superseded
+    /// directory untouched.
+    fn prune_old_versions(&self, current: &Version, previous: Option<&Version>) {
+        let versions_dir = self.root.join("versions");
+        let Ok(entries) = fs::read_dir(&versions_dir) else {
+            return;
+        };
+        let mut parsed: Vec<(Version, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_dir() || meta.file_type().is_symlink() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Ok(ver) = Version::parse(name) {
+                parsed.push((ver, path));
+            }
+        }
+        let fallback_prev = previous.cloned().or_else(|| {
+            parsed
+                .iter()
+                .filter(|(ver, _)| ver < current)
+                .map(|(ver, _)| ver.clone())
+                .max()
+        });
+        for (ver, path) in parsed {
+            if &ver == current || fallback_prev.as_ref() == Some(&ver) {
+                continue;
+            }
+            let _ = fs::remove_dir_all(path);
+        }
     }
 
     fn load_published(&self) -> Result<(), MirrorError> {
@@ -605,10 +697,12 @@ impl ReleaseMirror {
             sums_digest,
             checksums: sums,
         };
+        let published_version = candidate.version.clone();
         *self
             .current
             .write()
             .map_err(|_| MirrorError::new(ErrorKind::Io))? = Some(Arc::new(snapshot));
+        self.prune_old_versions(&published_version, None);
         Ok(())
     }
 }

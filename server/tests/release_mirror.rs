@@ -694,3 +694,83 @@ async fn corrupted_served_file_is_not_returned_as_a_verified_download() {
         .expect("download");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
+
+#[tokio::test]
+async fn download_asset_supports_resumable_byte_ranges_and_prunes_older_versions() {
+    let root = tempfile::tempdir().expect("tempdir");
+    // Pre-create two older historical version folders before publishing 1.2.3 -> 1.2.4.
+    let versions_dir = root.path().join("mirror/versions");
+    std::fs::create_dir_all(versions_dir.join("0.9.0")).expect("old 0.9.0");
+    std::fs::create_dir_all(versions_dir.join("1.0.0")).expect("old 1.0.0");
+
+    let upstream = upstream();
+    let mirror = open_mirror(root.path(), Arc::clone(&upstream));
+    mirror.sync().await.expect("1.2.3");
+    assert!(versions_dir.join("1.2.3").exists());
+    assert!(versions_dir.join("1.0.0").exists(), "one fallback kept");
+    assert!(
+        !versions_dir.join("0.9.0").exists(),
+        "older version pruned on publish"
+    );
+
+    upstream.release("1.2.4");
+    mirror.sync().await.expect("1.2.4");
+    assert!(versions_dir.join("1.2.4").exists());
+    assert!(versions_dir.join("1.2.3").exists());
+    assert!(
+        !versions_dir.join("1.0.0").exists(),
+        "superseded grand-parent pruned"
+    );
+
+    let harness =
+        Harness::start_with_mirror_and_stats(Arc::clone(&mirror), Some("range-stats-token")).await;
+    let url = format!(
+        "{}/downloads/v1.2.4/TokenLens_1.2.4_x64-setup.exe?source=website",
+        harness.base
+    );
+
+    // First 8 bytes -> 206 Partial Content, counts download once (start == 0).
+    let first = harness
+        .http
+        .get(&url)
+        .header("range", "bytes=0-7")
+        .send()
+        .await
+        .expect("range 0-7");
+    assert_eq!(first.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(first.headers()["accept-ranges"], "bytes");
+    assert_eq!(first.headers()["content-range"], "bytes 0-7/38");
+    assert_eq!(first.headers()["content-length"], "8");
+    assert_eq!(first.bytes().await.expect("bytes").as_ref(), b"offline ");
+
+    // Resume from byte 8 -> 206 Partial Content, must NOT double-count website download!
+    let resumed = harness
+        .http
+        .get(&url)
+        .header("range", "bytes=8-")
+        .send()
+        .await
+        .expect("range 8-");
+    assert_eq!(resumed.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(resumed.headers()["content-range"], "bytes 8-37/38");
+    assert_eq!(
+        resumed.bytes().await.expect("bytes").as_ref(),
+        b"windows updater fixture 1.2.4\n"
+    );
+    harness.state.flush_site_metrics().await;
+    assert_eq!(
+        harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
+        1
+    );
+
+    // Out-of-bounds range -> 416 Range Not Satisfiable.
+    let bad_range = harness
+        .http
+        .get(&url)
+        .header("range", "bytes=999-1000")
+        .send()
+        .await
+        .expect("bad range");
+    assert_eq!(bad_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(bad_range.headers()["content-range"], "bytes */38");
+}

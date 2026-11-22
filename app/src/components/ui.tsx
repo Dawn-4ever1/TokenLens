@@ -201,10 +201,21 @@ export function ErrorState({ message, onRetry, compact }: { message: string; onR
 export const Popover = PopoverPrimitive.Root;
 export const PopoverTrigger = PopoverPrimitive.Trigger;
 
-export function PopoverContent({ className, children, align = "end" }: { className?: string; children: ReactNode; align?: "start" | "center" | "end" }) {
+export function PopoverContent({
+  className,
+  children,
+  align = "end",
+  side,
+}: {
+  className?: string;
+  children: ReactNode;
+  align?: "start" | "center" | "end";
+  side?: "top" | "right" | "bottom" | "left";
+}) {
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content
+        side={side}
         align={align}
         sideOffset={6}
         collisionPadding={12}

@@ -131,6 +131,44 @@ async fn failed_claims_from_one_ip_do_not_lock_out_another_ip() {
 }
 
 #[tokio::test]
+async fn spoofed_forwarded_for_prefix_cannot_bypass_per_ip_rate_limit() {
+    let h = Harness::start().await;
+    let good = h.issue_code();
+    let bad_body = json!({
+        "code": "0000-0000-0000",
+        "platform": "macos",
+        "formFactor": "laptop",
+        "displayName": "Spoofer",
+    });
+    for i in 0..CLAIM_FAILURE_LIMIT {
+        let forged = format!("198.51.100.{}, 203.0.113.42", i + 1);
+        let resp = h
+            .http
+            .post(format!("{}/api/pair/claim", h.base))
+            .header("x-forwarded-for", forged)
+            .json(&bad_body)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked = h
+        .http
+        .post(format!("{}/api/pair/claim", h.base))
+        .header("x-forwarded-for", "192.0.2.99, 203.0.113.42")
+        .json(&json!({
+            "code": good,
+            "platform": "macos",
+            "formFactor": "laptop",
+            "displayName": "Still Same Real Peer",
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn malformed_claims_are_bad_requests() {
     let h = Harness::start().await;
     let code = h.issue_code();

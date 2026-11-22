@@ -75,11 +75,11 @@ let cache: { events: Ev[]; now: number } | null = null;
 function rawEvents(): Ev[] {
   const now = Date.now();
   if (cache && now - cache.now < 60_000) return cache.events;
-  const rand = rng(20261110);
   const out: Ev[] = [];
   const today = Math.floor((now + OFFSET_MS) / DAY) * DAY - OFFSET_MS;
   let n = 0;
   for (let day = 150; day >= 0; day--) {
+    const rand = rng(20261110 + day * 7919);
     const start = today - day * DAY;
     const weekday = new Date(start + OFFSET_MS).getUTCDay();
     const busy = weekday === 0 || weekday === 6 ? 0.45 : 1;

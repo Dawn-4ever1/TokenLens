@@ -3,7 +3,9 @@
 //! Request logs carry only the method, the route template, the status and
 //! the latency. Headers, bodies, tokens and pairing codes are never logged.
 
+use std::collections::HashMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -40,12 +42,16 @@ const MAX_HEARTBEAT_CLIENTS: usize = 256;
 /// JavaScript numbers are exact up to 2^53 - 1; the dashboard reads them there.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 const MAX_TEXT_BYTES: usize = 512;
+const READ_TOKEN_TOUCH_INTERVAL_MS: i64 = 5 * 60 * 1_000;
+const MAX_READ_TOKEN_TOUCH_CACHE: usize = 2_048;
 
 #[derive(Clone)]
 pub struct AppState {
     db: Arc<Mutex<Connection>>,
-    /// Read-only connection for dashboard reads; `None` shares `db`.
-    reader: Option<Arc<Mutex<Connection>>>,
+    /// Read-only connections for dashboard reads; empty shares `db`.
+    readers: Arc<Vec<Mutex<Connection>>>,
+    reader_cursor: Arc<AtomicUsize>,
+    read_token_touches: Arc<Mutex<HashMap<String, i64>>>,
     clock: Arc<dyn Clock>,
     limiter: Arc<Mutex<ClaimLimiter>>,
     ingest_limiter: Arc<Mutex<IngestLimiter>>,
@@ -66,7 +72,9 @@ impl AppState {
     pub fn new(conn: Connection, clock: Arc<dyn Clock>) -> Self {
         Self {
             db: Arc::new(Mutex::new(conn)),
-            reader: None,
+            readers: Arc::new(Vec::new()),
+            reader_cursor: Arc::new(AtomicUsize::new(0)),
+            read_token_touches: Arc::new(Mutex::new(HashMap::new())),
             clock,
             limiter: Arc::new(Mutex::new(ClaimLimiter::default())),
             ingest_limiter: Arc::new(Mutex::new(IngestLimiter::default())),
@@ -224,9 +232,28 @@ impl AppState {
     /// Dashboard reads use this connection (see `db::open_reader`) instead of
     /// waiting for the one that takes uploads.
     #[must_use]
-    pub fn with_reader(mut self, reader: Connection) -> Self {
-        self.reader = Some(Arc::new(Mutex::new(reader)));
+    pub fn with_reader(self, reader: Connection) -> Self {
+        self.with_readers(vec![reader])
+    }
+
+    /// Configures a pool of read-only SQLite WAL connections so concurrent
+    /// dashboard queries run in parallel without waiting on uploads or each other.
+    #[must_use]
+    pub fn with_readers(mut self, readers: Vec<Connection>) -> Self {
+        self.readers = Arc::new(readers.into_iter().map(Mutex::new).collect());
         self
+    }
+
+    /// Prunes long-expired pairing codes, email challenges and retired account sessions.
+    pub async fn prune_expired(&self) {
+        let db = Arc::clone(&self.db);
+        let now = self.clock.now_ms();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(conn) = db.lock() {
+                let _ = db::prune_expired_records(&conn, now);
+            }
+        })
+        .await;
     }
 
     /// Zone for day, week and month buckets on the dashboard.
@@ -336,26 +363,30 @@ impl AppState {
 }
 
 impl AppState {
-    /// Dashboard reads: bad parameters become 400, database errors 500.
-    async fn query<T, F>(&self, work: F) -> Result<Response, ApiError>
+    /// Runs a read-only database closure on the next reader connection in the
+    /// pool (or falls back to `db` in unit tests without a separate reader).
+    async fn with_reader_snapshot<T, F>(&self, work: F) -> Result<T, ApiError>
     where
-        T: Serialize + Send + 'static,
-        F: FnOnce(&Connection, Tz, i64) -> Result<T, QueryError> + Send + 'static,
+        T: Send + 'static,
+        F: FnOnce(&Connection, Tz, i64) -> Result<T, Result<ApiError, db::DbError>>
+            + Send
+            + 'static,
     {
         let time_zone = self.time_zone;
-        let Some(reader) = self.reader.clone() else {
-            let value = self
+        if self.readers.is_empty() {
+            return self
                 .with_db(move |conn, now| match work(conn, time_zone, now) {
                     Ok(value) => Ok(Ok(value)),
-                    Err(QueryError::Bad) => Ok(Err(ApiError::BadRequest)),
-                    Err(QueryError::Db(error)) => Err(error),
+                    Err(Ok(api_error)) => Ok(Err(api_error)),
+                    Err(Err(db_error)) => Err(db_error),
                 })
-                .await??;
-            return Ok(axum::Json(value).into_response());
-        };
+                .await?;
+        }
+        let readers = Arc::clone(&self.readers);
+        let index = self.reader_cursor.fetch_add(1, Ordering::Relaxed) % readers.len();
         let now = self.clock.now_ms();
-        let value = tokio::task::spawn_blocking(move || {
-            let conn = reader.lock().map_err(|_| ApiError::Internal)?;
+        tokio::task::spawn_blocking(move || {
+            let conn = readers[index].lock().map_err(|_| ApiError::Internal)?;
             let failed = |error: db::DbError| {
                 tracing::error!(kind = error_kind(&error), "database read failed");
                 ApiError::Internal
@@ -367,13 +398,57 @@ impl AppState {
                 .map_err(|error| failed(error.into()))?;
             match work(&snapshot, time_zone, now) {
                 Ok(value) => Ok(value),
-                Err(QueryError::Bad) => Err(ApiError::BadRequest),
-                Err(QueryError::Db(error)) => Err(failed(error)),
+                Err(Ok(api_error)) => Err(api_error),
+                Err(Err(db_error)) => Err(failed(db_error)),
             }
         })
         .await
-        .map_err(|_| ApiError::Internal)??;
+        .map_err(|_| ApiError::Internal)?
+    }
+
+    /// Dashboard reads: bad parameters become 400, database errors 500.
+    async fn query<T, F>(&self, work: F) -> Result<Response, ApiError>
+    where
+        T: Serialize + Send + 'static,
+        F: FnOnce(&Connection, Tz, i64) -> Result<T, QueryError> + Send + 'static,
+    {
+        let value = self
+            .with_reader_snapshot(move |conn, tz, now| match work(conn, tz, now) {
+                Ok(value) => Ok(value),
+                Err(QueryError::Bad) => Err(Ok(ApiError::BadRequest)),
+                Err(QueryError::Db(error)) => Err(Err(error)),
+            })
+            .await?;
         Ok(axum::Json(value).into_response())
+    }
+
+    fn maybe_touch_read_token(&self, token_hash: String) {
+        let now = self.clock.now_ms();
+        let should_touch = if let Ok(mut cache) = self.read_token_touches.lock() {
+            if cache.len() >= MAX_READ_TOKEN_TOUCH_CACHE {
+                cache.retain(|_, ts| now.saturating_sub(*ts) < READ_TOKEN_TOUCH_INTERVAL_MS);
+                if cache.len() >= MAX_READ_TOKEN_TOUCH_CACHE {
+                    cache.clear();
+                }
+            }
+            match cache.get(&token_hash) {
+                Some(&last) if now.saturating_sub(last) < READ_TOKEN_TOUCH_INTERVAL_MS => false,
+                _ => {
+                    cache.insert(token_hash.clone(), now);
+                    true
+                }
+            }
+        } else {
+            false
+        };
+        if should_touch {
+            let db = Arc::clone(&self.db);
+            tokio::task::spawn_blocking(move || {
+                if let Ok(conn) = db.lock() {
+                    let _ = db::touch_device_token(&conn, &token_hash, now);
+                }
+            });
+        }
     }
 }
 
@@ -558,16 +633,17 @@ fn no_store<T: Serialize>(value: &T) -> Response {
 // ------------------------------------------------------------------- auth --
 
 /// Extracts an ephemeral client address key for in-memory rate limiting only.
-/// Behind Caddy (`reverse_proxy 127.0.0.1:8787`), the first valid IP from
-/// `X-Forwarded-For` (or `X-Real-IP`) identifies the caller; direct loopback
-/// requests without proxy headers fall back to `"direct"`. Never logged or
-/// stored in the database.
+/// Behind Caddy (`reverse_proxy 127.0.0.1:8787`), Caddy appends the peer IP to
+/// `X-Forwarded-For`, so the rightmost valid IP identifies the real caller and
+/// prevents client-forged `X-Forwarded-For` prefixes from bypassing limits.
+/// Direct loopback requests without proxy headers fall back to `"direct"`.
+/// Never logged or stored in the database.
 pub(crate) fn client_rate_key(headers: &HeaderMap) -> String {
     if let Some(forwarded) = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())
     {
-        for part in forwarded.split(',') {
+        for part in forwarded.rsplit(',') {
             let candidate = part.trim();
             if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
                 return ip.to_string();
@@ -592,6 +668,8 @@ pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Wrong, revoked or wrong-kind credentials all give the same 401.
+/// Read tokens verify on the read-only pool and throttle `last_used_at` writes
+/// so concurrent dashboard views never contend on the SQLite write lock.
 async fn authenticate(
     state: &AppState,
     headers: &HeaderMap,
@@ -601,6 +679,16 @@ async fn authenticate(
         return Err(ApiError::Unauthorized);
     };
     let token = secrets::Secret::from_header(token);
+    if kind == TokenKind::Read && !state.readers.is_empty() {
+        let (ctx, hash) = state
+            .with_reader_snapshot(move |conn, _, _| {
+                db::authenticate_readonly(conn, token.expose(), kind).map_err(Err)
+            })
+            .await?
+            .ok_or(ApiError::Unauthorized)?;
+        state.maybe_touch_read_token(hash);
+        return Ok(ctx);
+    }
     state
         .with_db(move |conn, now| db::authenticate(conn, token.expose(), kind, now))
         .await?
@@ -1174,11 +1262,11 @@ async fn dashboard_session(
         .filter(dashboard::Query::is_empty)
         .ok_or(ApiError::BadRequest)?;
     let detail = state
-        .with_db(move |conn, now| {
+        .with_reader_snapshot(move |conn, _, now| {
             match dashboard::session_detail(conn, &caller.tenant_id, &key, now) {
                 Ok(detail) => Ok(detail),
                 Err(QueryError::Bad) => Ok(None),
-                Err(QueryError::Db(error)) => Err(error),
+                Err(QueryError::Db(error)) => Err(Err(error)),
             }
         })
         .await?
@@ -1339,6 +1427,133 @@ async fn download_latest_macos(
     Ok(response)
 }
 
+struct ChannelBody {
+    rx: tokio::sync::mpsc::Receiver<Result<Bytes, std::io::Error>>,
+    remaining: u64,
+}
+
+impl http_body::Body for ChannelBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        match self.rx.poll_recv(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                self.remaining = self.remaining.saturating_sub(chunk.len() as u64);
+                std::task::Poll::Ready(Some(Ok(http_body::Frame::data(chunk))))
+            }
+            std::task::Poll::Ready(Some(Err(err))) => std::task::Poll::Ready(Some(Err(err))),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.remaining)
+    }
+}
+
+enum ByteRange {
+    Full,
+    Partial { start: u64, end: u64 },
+    Unsatisfiable,
+}
+
+fn parse_byte_range(header_val: Option<&HeaderValue>, total_len: u64) -> ByteRange {
+    let Some(raw) = header_val.and_then(|v| v.to_str().ok()) else {
+        return ByteRange::Full;
+    };
+    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+        return ByteRange::Full;
+    };
+    if spec.contains(',') {
+        return ByteRange::Full;
+    }
+    let Some((left, right)) = spec.split_once('-') else {
+        return ByteRange::Full;
+    };
+    let (left, right) = (left.trim(), right.trim());
+    if total_len == 0 {
+        return ByteRange::Unsatisfiable;
+    }
+    if left.is_empty() {
+        let Ok(suffix) = right.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        if suffix == 0 {
+            return ByteRange::Unsatisfiable;
+        }
+        let take = suffix.min(total_len);
+        return ByteRange::Partial {
+            start: total_len - take,
+            end: total_len - 1,
+        };
+    }
+    let Ok(start) = left.parse::<u64>() else {
+        return ByteRange::Full;
+    };
+    if start >= total_len {
+        return ByteRange::Unsatisfiable;
+    }
+    let end = if right.is_empty() {
+        total_len - 1
+    } else {
+        let Ok(parsed_end) = right.parse::<u64>() else {
+            return ByteRange::Full;
+        };
+        if parsed_end < start {
+            return ByteRange::Full;
+        }
+        parsed_end.min(total_len - 1)
+    };
+    ByteRange::Partial { start, end }
+}
+
+fn stream_file_body(mut file: std::fs::File, start: u64, length: u64) -> Body {
+    use std::io::{Seek as _, SeekFrom};
+
+    if length == 0 {
+        return Body::empty();
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::task::spawn_blocking(move || {
+        if start > 0
+            && let Err(err) = file.seek(SeekFrom::Start(start))
+        {
+            let _ = tx.blocking_send(Err(err));
+            return;
+        }
+        let mut left = length;
+        let mut buf = [0_u8; 64 * 1024];
+        while left > 0 {
+            let want = usize::try_from(left.min(buf.len() as u64)).unwrap_or(buf.len());
+            match file.read(&mut buf[..want]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    left = left.saturating_sub(n as u64);
+                    if tx
+                        .blocking_send(Ok(Bytes::copy_from_slice(&buf[..n])))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = tx.blocking_send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+    Body::new(ChannelBody {
+        rx,
+        remaining: length,
+    })
+}
+
 async fn download_asset(
     State(state): State<AppState>,
     method: axum::http::Method,
@@ -1350,16 +1565,56 @@ async fn download_asset(
     if snapshot.version() != version {
         return Err(ApiError::NotFound);
     }
-    let path = snapshot.file_path(&filename).ok_or(ApiError::NotFound)?;
-    let bytes = tokio::fs::read(path)
-        .await
-        .map_err(|_| ApiError::ServiceUnavailable)?;
-    if bytes.len() > crate::release_mirror::MAX_ASSET_BYTES
-        || !snapshot.checksum_matches(&filename, &bytes)
-    {
-        return Err(ApiError::ServiceUnavailable);
+    if snapshot.file_path(&filename).is_none() {
+        return Err(ApiError::NotFound);
     }
+    let verify_snap = Arc::clone(&snapshot);
+    let verify_name = filename.clone();
+    let (file, total_len) =
+        tokio::task::spawn_blocking(move || verify_snap.open_verified_file(&verify_name))
+            .await
+            .map_err(|_| ApiError::Internal)?
+            .map_err(|_| ApiError::ServiceUnavailable)?;
+
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    if filename == crate::release_mirror::MANIFEST_FILE {
+        drop(file);
+        return Ok(download_response(
+            method,
+            snapshot.manifest().to_vec(),
+            "application/json",
+            "public, max-age=60, must-revalidate",
+            Some(&disposition),
+        ));
+    }
+
+    let range = if method == axum::http::Method::GET {
+        parse_byte_range(headers.get(header::RANGE), total_len)
+    } else {
+        ByteRange::Full
+    };
+    if matches!(range, ByteRange::Unsatisfiable) {
+        let mut resp = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+        resp.headers_mut().insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&format!("bytes */{total_len}")).expect("decimal content range"),
+        );
+        return Ok(resp);
+    }
+
+    let (status, start, send_len, content_range) = match range {
+        ByteRange::Full => (StatusCode::OK, 0, total_len, None),
+        ByteRange::Partial { start, end } => (
+            StatusCode::PARTIAL_CONTENT,
+            start,
+            end - start + 1,
+            Some(format!("bytes {start}-{end}/{total_len}")),
+        ),
+        ByteRange::Unsatisfiable => unreachable!(),
+    };
+
     if method == axum::http::Method::GET
+        && start == 0
         && site_stats::should_count_request(&headers)
         && query
             .as_deref()
@@ -1376,28 +1631,42 @@ async fn download_asset(
             state.record_site_metric(metric);
         }
     }
-    let is_json = filename == crate::release_mirror::MANIFEST_FILE;
-    let bytes = if is_json {
-        snapshot.manifest().to_vec()
+
+    let body = if method == axum::http::Method::HEAD {
+        Body::empty()
     } else {
-        bytes
+        stream_file_body(file, start, send_len)
     };
-    let disposition = format!("attachment; filename=\"{filename}\"");
-    Ok(download_response(
-        method,
-        bytes,
-        if is_json {
-            "application/json"
-        } else {
-            "application/octet-stream"
-        },
-        if is_json {
-            "public, max-age=60, must-revalidate"
-        } else {
-            "public, max-age=31536000, immutable"
-        },
-        Some(&disposition),
-    ))
+    let mut response = (status, body).into_response();
+    let out_headers = response.headers_mut();
+    out_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    out_headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&send_len.to_string()).expect("decimal content length"),
+    );
+    out_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    out_headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    out_headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    out_headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition).expect("allow-listed asset filename"),
+    );
+    if let Some(cr) = content_range {
+        out_headers.insert(
+            header::CONTENT_RANGE,
+            HeaderValue::from_str(&cr).expect("decimal content range"),
+        );
+    }
+    Ok(response)
 }
 
 /// Liveness for the container healthcheck; reveals nothing.

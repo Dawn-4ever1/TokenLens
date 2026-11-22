@@ -630,6 +630,13 @@ test("a self-hosted server offers only the email code, never GitHub or Google", 
   await expect(dialog.getByLabel("服务器地址")).toBeVisible();
   await expect(dialog.getByLabel("邮箱")).toBeVisible();
   await expect(dialog.getByLabel("验证码")).toBeVisible();
+  // Operators without Resend can switch to the 10-minute CLI pairing code.
+  await dialog.getByRole("button", { name: "使用配对码连接", exact: true }).click();
+  await expect(dialog.getByLabel("服务器地址")).toBeVisible();
+  await expect(dialog.getByLabel("配对码")).toBeVisible();
+  await expect(dialog.getByLabel("邮箱")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "使用邮箱验证码登录", exact: true }).click();
+  await expect(dialog.getByLabel("邮箱")).toBeVisible();
   // Switching back restores both provider choices for the hosted service.
   await dialog.getByRole("button", { name: "返回登录方式", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
@@ -1224,6 +1231,34 @@ test("clicking Add Device while unconnected guides signing in on this computer f
   await expect(dialog.getByRole("button", { name: "完成", exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "完成", exact: true }).click();
   await expect(dialog).toBeHidden();
+  expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+test("a self-hosted server can connect with a one-time pairing code and sign out from the narrow sidebar", async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 850 });
+  const errors = await open(page, { view: "cloud", query: "" });
+  await settle(page, "云端");
+  await page.getByRole("button", { name: "免费使用云服务", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog.getByRole("button", { name: "使用自己的服务器", exact: true }).click();
+  await dialog.getByRole("button", { name: "使用配对码连接", exact: true }).click();
+  await dialog.getByLabel("服务器地址").fill("https://self-hosted.example.com");
+  await dialog.getByLabel("配对码").fill("ABCD-EFGH-JKLM");
+  await dialog.getByRole("button", { name: "连接服务器", exact: true }).click();
+  await expect(dialog).toBeHidden();
+  await settle(page, "云端");
+  await expect(page.getByText("已连接", { exact: true })).toBeVisible();
+
+  // Now sign in to an account and verify sign-out works at 900px via the collapsed avatar popover.
+  await page.getByRole("button", { name: "登录，同步多台设备", exact: true }).click();
+  await signIn(page.getByRole("dialog"));
+  await expect(page.getByRole("dialog")).toBeHidden();
+  await expect(page.getByRole("button", { name: "退出登录", exact: true })).toBeHidden();
+  await page.getByRole("button", { name: "打开账号菜单", exact: true }).click();
+  await page.getByRole("button", { name: "退出登录", exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "退出登录", exact: true }).click();
+  await expect(page.getByRole("button", { name: "登录，同步多台设备", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
   expect(errors).toEqual([]);
 });

@@ -41,3 +41,4 @@ test-results/
 # local agent & browser scratch
 .claude/
 .playwright-cli/
+.promo/

@@ -638,13 +638,13 @@ pub(crate) fn insert_device_token(
     Ok(token)
 }
 
-/// The device of a live token of exactly `kind`; `None` for anything else.
-pub fn authenticate(
+/// Read-only token verification safe to run on `SQLITE_OPEN_READ_ONLY`
+/// connections without taking the write lock.
+pub fn authenticate_readonly(
     conn: &Connection,
     token: &str,
     kind: TokenKind,
-    now: i64,
-) -> Result<Option<AuthContext>, DbError> {
+) -> Result<Option<(AuthContext, String)>, DbError> {
     if !token.starts_with(kind.prefix()) {
         return Ok(None);
     }
@@ -672,14 +672,58 @@ pub fn authenticate(
     if TokenKind::parse(&stored_kind) != Some(kind) {
         return Ok(None);
     }
+    Ok(Some((
+        AuthContext {
+            device_id,
+            tenant_id,
+        },
+        hash,
+    )))
+}
+
+pub fn touch_device_token(conn: &Connection, token_hash: &str, now: i64) -> Result<(), DbError> {
     conn.execute(
         "UPDATE device_tokens SET last_used_at = ?2 WHERE token_hash = ?1",
-        params![hash, now],
+        params![token_hash, now],
     )?;
-    Ok(Some(AuthContext {
-        device_id,
-        tenant_id,
-    }))
+    Ok(())
+}
+
+/// The device of a live token of exactly `kind`; `None` for anything else.
+pub fn authenticate(
+    conn: &Connection,
+    token: &str,
+    kind: TokenKind,
+    now: i64,
+) -> Result<Option<AuthContext>, DbError> {
+    let Some((ctx, hash)) = authenticate_readonly(conn, token, kind)? else {
+        return Ok(None);
+    };
+    touch_device_token(conn, &hash, now)?;
+    Ok(Some(ctx))
+}
+
+/// Deletes long-expired pairing codes, email challenges and retired account
+/// sessions so short-lived auth tables stay small over months of operation.
+pub fn prune_expired_records(conn: &Connection, now: i64) -> Result<usize, DbError> {
+    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+    let short_cutoff = now.saturating_sub(DAY_MS);
+    let session_cutoff = now.saturating_sub(7 * DAY_MS);
+    let mut removed = 0;
+    removed += conn.execute(
+        "DELETE FROM pair_codes WHERE expires_at < ?1",
+        params![short_cutoff],
+    )?;
+    removed += conn.execute(
+        "DELETE FROM email_challenges WHERE expires_at < ?1",
+        params![short_cutoff],
+    )?;
+    removed += conn.execute(
+        "DELETE FROM account_sessions
+         WHERE expires_at < ?1 OR (revoked_at IS NOT NULL AND revoked_at < ?1)",
+        params![session_cutoff],
+    )?;
+    Ok(removed)
 }
 
 // ---------------------------------------------------------------- tenants --

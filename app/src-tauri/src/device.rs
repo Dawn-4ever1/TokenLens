@@ -74,9 +74,55 @@ fn mac_model_name(output: &str) -> Option<&str> {
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+#[repr(C)]
+struct SystemPowerStatus {
+    ac_line_status: u8,
+    battery_flag: u8,
+    battery_life_percent: u8,
+    system_status_flag: u8,
+    battery_life_time: u32,
+    battery_full_life_time: u32,
+}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn GetSystemPowerStatus(lp_system_power_status: *mut SystemPowerStatus) -> i32;
+}
+
+#[cfg(windows)]
+pub fn detected_form_factor() -> FormFactor {
+    let mut status = SystemPowerStatus {
+        ac_line_status: 255,
+        battery_flag: 255,
+        battery_life_percent: 255,
+        system_status_flag: 0,
+        battery_life_time: u32::MAX,
+        battery_full_life_time: u32::MAX,
+    };
+    // SAFETY: `status` is a valid aligned `SYSTEM_POWER_STATUS` out-parameter.
+    let ok = unsafe { GetSystemPowerStatus(&raw mut status) };
+    if ok != 0 {
+        form_factor_from_windows_battery_flag(status.battery_flag)
+    } else {
+        FormFactor::Laptop
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 pub fn detected_form_factor() -> FormFactor {
     FormFactor::Laptop
+}
+
+/// Win32 `SYSTEM_POWER_STATUS.BatteryFlag`: `0x80` (128) means no system
+/// battery is present (desktop PC); `0xFF` (255) means unknown status.
+#[cfg(any(windows, test))]
+pub fn form_factor_from_windows_battery_flag(battery_flag: u8) -> FormFactor {
+    if battery_flag != 255 && (battery_flag & 128) != 0 {
+        FormFactor::Desktop
+    } else {
+        FormFactor::Laptop
+    }
 }
 
 pub fn form_factor_from_mac_model(model: &str) -> FormFactor {
@@ -143,5 +189,20 @@ mod tests {
         let repaired = client_binding_id(dir.path()).unwrap();
         assert!(valid_binding_id(&repaired));
         assert_ne!(repaired, "not-a-real-id");
+    }
+
+    #[test]
+    fn windows_battery_flags_distinguish_desktops_and_laptops() {
+        assert_eq!(
+            form_factor_from_windows_battery_flag(128),
+            FormFactor::Desktop
+        );
+        assert_eq!(form_factor_from_windows_battery_flag(1), FormFactor::Laptop);
+        assert_eq!(form_factor_from_windows_battery_flag(8), FormFactor::Laptop);
+        assert_eq!(form_factor_from_windows_battery_flag(0), FormFactor::Laptop);
+        assert_eq!(
+            form_factor_from_windows_battery_flag(255),
+            FormFactor::Laptop
+        );
     }
 }
