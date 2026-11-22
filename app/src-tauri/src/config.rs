@@ -56,6 +56,7 @@ pub fn menu_bar_total_enabled(state_dir: &Path) -> bool {
         .unwrap_or(true)
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn save_menu_bar_total_enabled(state_dir: &Path, enabled: bool) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let path = state_dir.join("menu-bar-total.json");

@@ -65,6 +65,7 @@ pub fn detected_form_factor() -> FormFactor {
     FormFactor::Laptop
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn mac_model_name(output: &str) -> Option<&str> {
     output.lines().find_map(|line| {
         line.trim()
@@ -125,6 +126,7 @@ pub fn form_factor_from_windows_battery_flag(battery_flag: u8) -> FormFactor {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 pub fn form_factor_from_mac_model(model: &str) -> FormFactor {
     // The model string is a product family (e.g. "Mac15,3"), not a serial.
     // MacBook laptops are named explicitly. iMac, mini, Studio, Pro and
