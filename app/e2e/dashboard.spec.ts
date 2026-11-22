@@ -615,32 +615,29 @@ test("the code input and the request button sit on the same aligned row", async 
   expect(hint.y).toBeGreaterThan(input.y + input.height);
 });
 
-test("a self-hosted server offers only the email code, never GitHub or Google", async ({ page }) => {
+test("a self-hosted server offers only the pairing code, never GitHub, Google or email", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 900 });
   await openCloudLogin(page);
   const dialog = page.getByRole("dialog");
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "使用邮箱继续", exact: true })).toBeVisible();
   await expect(dialog.getByText("默认连接 TokenLens 云服务，首次登录自动创建空间", { exact: true })).toBeVisible();
   await dialog.getByRole("button", { name: "使用自己的服务器", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: "使用邮箱继续", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "继续前往 GitHub" })).toHaveCount(0);
   await expect(dialog.getByRole("button", { name: "继续前往 Google" })).toHaveCount(0);
-  await expect(dialog.getByLabel("服务器地址")).toBeVisible();
-  await expect(dialog.getByLabel("邮箱")).toBeVisible();
-  await expect(dialog.getByLabel("验证码")).toBeVisible();
-  // Operators without Resend can switch to the 10-minute CLI pairing code.
-  await dialog.getByRole("button", { name: "使用配对码连接", exact: true }).click();
+  await expect(dialog.getByLabel("邮箱")).toHaveCount(0);
+  await expect(dialog.getByLabel("验证码")).toHaveCount(0);
   await expect(dialog.getByLabel("服务器地址")).toBeVisible();
   await expect(dialog.getByLabel("配对码")).toBeVisible();
-  await expect(dialog.getByLabel("邮箱")).toHaveCount(0);
-  await dialog.getByRole("button", { name: "使用邮箱验证码登录", exact: true }).click();
-  await expect(dialog.getByLabel("邮箱")).toBeVisible();
-  // Switching back restores both provider choices for the hosted service.
+  // Switching back restores all three account sign-in choices for the hosted service.
   await dialog.getByRole("button", { name: "返回登录方式", exact: true }).click();
   await expect(dialog.getByRole("button", { name: "使用 GitHub 继续", exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "使用 Google 继续", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "使用邮箱继续", exact: true })).toBeVisible();
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
 });
 
@@ -1242,7 +1239,6 @@ test("a self-hosted server can connect with a one-time pairing code and sign out
   await page.getByRole("button", { name: "免费使用云服务", exact: true }).click();
   const dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "使用自己的服务器", exact: true }).click();
-  await dialog.getByRole("button", { name: "使用配对码连接", exact: true }).click();
   await dialog.getByLabel("服务器地址").fill("https://self-hosted.example.com");
   await dialog.getByLabel("配对码").fill("ABCD-EFGH-JKLM");
   await dialog.getByRole("button", { name: "连接服务器", exact: true }).click();

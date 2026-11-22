@@ -139,12 +139,12 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     setCopyState("idle");
     return generation;
   };
-  // A self-hosted server has no TokenLens GitHub or Google app, so both are
-  // offered only for the hosted service; "own" falls back to the email code.
+  // Official Cloud uses account sign-in (GitHub, Google, Email); a self-hosted
+  // server connects directly with an operator-issued pairing code.
   useEffect(() => {
     if (where === "own") {
       invalidateGoogle();
-      setMethod("email");
+      setMethod("pair");
       setGh(null);
       setGhState("idle");
       setGhFailure(null);
@@ -474,7 +474,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           </p>
         )}
         {error && <p role="alert" className="text-center text-[13px] leading-5 text-bad">{error}</p>}
-        <button type="button" className="mx-auto block pt-1 text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setWhere("own"); setChooser(false); setMethod("email"); }}>
+        <button type="button" className="mx-auto block pt-1 text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setWhere("own"); setChooser(false); setMethod("pair"); setError(null); }}>
           使用自己的服务器
         </button>
       </div>
@@ -569,18 +569,10 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           </Field>
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="submit" variant="primary" className="w-full" disabled={!ready || busy}>{busy ? "正在连接…" : "连接服务器"}</Button>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { setWhere("cloud"); setChooser(true); setError(null); }}>返回登录方式</button>
-            <button type="button" className="text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setMethod("email"); setError(null); }}>使用邮箱验证码登录</button>
-          </div>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { setWhere("cloud"); setChooser(true); setError(null); }}>返回登录方式</button>
         </div>
       ) : (
         <div className="space-y-4">
-          {where === "own" && (
-            <Field label="服务器地址" hint="自建服务器可使用邮箱验证码或一次性配对码连接">
-              <input aria-label="服务器地址" className={inputClass} value={ownServer} onChange={(event) => setOwnServer(event.target.value)} placeholder="https://" autoComplete="off" spellCheck={false} inputMode="url" />
-            </Field>
-          )}
           <Field label="邮箱" hint="用来登录，也用来接收验证码">
             <input aria-label="邮箱" className={inputClass} value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" autoComplete="email" spellCheck={false} inputMode="email" />
           </Field>
@@ -596,12 +588,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           </div>
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="submit" variant="primary" className="w-full" disabled={!ready || busy}>{busy ? "正在登录…" : "登录并连接"}</Button>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { if (where === "cloud") { setChooser(true); } else { setWhere("cloud"); setChooser(true); } setError(null); }}>返回登录方式</button>
-            {where === "own" && (
-              <button type="button" className="text-xs text-ink-3 underline decoration-line underline-offset-4 hover:text-ink" onClick={() => { setMethod("pair"); setError(null); }}>使用配对码连接</button>
-            )}
-          </div>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { setChooser(true); setError(null); }}>返回登录方式</button>
         </div>
       )}
       {method === "email" || method === "pair" || gh || gg ? (

@@ -128,9 +128,9 @@ docker compose exec dashboard tokenlens-server pair-code create
 ```
 
 The code is printed only in this terminal, is valid for 10 minutes and works
-once. In the app choose "连接服务器" (connect to a server) and enter
-`https://<your domain>` and the code. Further computers get their codes from an
-already paired app (Devices → 添加设备), without logging in to the server.
+once. In the app open **云端 → 免费使用云服务 → 使用自己的服务器** (or **设置 →
+连接服务器 → 使用自己的服务器**), then enter `https://<your domain>` and the
+code. Repeat for each additional computer you want in the same space.
 
 ```sh
 docker compose exec dashboard tokenlens-server device list
@@ -150,14 +150,13 @@ docker compose exec dashboard tokenlens-server pair-code create --tenant acme
 
 A computer's tenant is fixed by the code it was paired with.
 
-### Accounts and sign-in (optional)
+### Hosted account sign-in (official Cloud only)
 
-Apps can also sign in instead of using a pairing code: a first sign-in creates
-that person's own space, and later sign-ins return to it.
-
-Your own users reach this server through **Cloud → 免费使用云服务 → 自己的服务器**,
-which offers the email code (or the operator-issued pairing code). The app's
-GitHub and Google buttons only appear for the hosted `tokenlens.online` service.
+Account sign-in (GitHub, Google and email verification codes) is used by the
+hosted `tokenlens.online` Cloud service, where each person's first sign-in
+creates an isolated space and later sign-ins return to it. Self-hosted servers
+connect directly with operator-issued pairing codes (`pair-code create`) under
+**使用自己的服务器** without needing any OAuth app or email delivery setup.
 
 **GitHub (recommended, no cost).** Create a GitHub OAuth App (Settings →
 Developer settings → OAuth Apps), set its homepage to your domain, tick
