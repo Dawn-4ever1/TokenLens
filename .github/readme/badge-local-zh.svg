@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="136" height="24" role="img" aria-label="本机优先: 隐私安全">
+  <title>本机优先: 隐私安全</title>
+  <clipPath id="r"><rect width="136" height="24" rx="5"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="68" height="24" fill="#24292F"/>
+    <rect x="68" width="68" height="24" fill="#0F766E"/>
+  </g>
+  <rect x="0.5" y="0.5" width="135" height="23" rx="4.5" fill="none" stroke="#8B949E" stroke-opacity="0.3"/>
+  <g fill="#FFFFFF" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,PingFang SC,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600">
+    <text x="34" y="16">本机优先</text>
+    <text x="102" y="16">隐私安全</text>
+  </g>
+</svg>

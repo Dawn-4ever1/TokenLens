@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="166" height="24" role="img" aria-label="Local-First: Privacy Safe">
+  <title>Local-First: Privacy Safe</title>
+  <clipPath id="r"><rect width="166" height="24" rx="5"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="78" height="24" fill="#24292F"/>
+    <rect x="78" width="88" height="24" fill="#0F766E"/>
+  </g>
+  <rect x="0.5" y="0.5" width="165" height="23" rx="4.5" fill="none" stroke="#8B949E" stroke-opacity="0.3"/>
+  <g fill="#FFFFFF" text-anchor="middle" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,PingFang SC,Helvetica,Arial,sans-serif" font-size="11.5" font-weight="600">
+    <text x="39" y="16">Local-First</text>
+    <text x="122" y="16">Privacy Safe</text>
+  </g>
+</svg>

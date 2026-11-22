@@ -35,9 +35,9 @@ SOFTWARE.
 
 ## Product and vendor marks
 
-The agent and model-vendor marks under `app/src/assets/brands/` and in
-`app/src/components/brandMarks.tsx` (Claude, OpenAI, GitHub Copilot, Gemini,
-Qoder, DeepSeek and others) are trademarks of their respective owners. They are
+The agent and model-vendor marks under `app/src/assets/brands/`,
+`.github/readme/brands/`, and in `app/src/components/brandMarks.tsx` (Claude,
+OpenAI, GitHub Copilot, Gemini, Qoder, DeepSeek and others) are trademarks of their respective owners. They are
 shown only to identify which tool or model a number belongs to, and do not
 imply any endorsement. Sources are listed in `app/src/assets/brands/README.md`.
 The MIT license of this project does not cover these marks. Owners who want a
