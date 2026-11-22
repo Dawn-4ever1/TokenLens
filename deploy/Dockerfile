@@ -24,7 +24,8 @@ RUN sed -i 's|^members = .*|members = ["crates/usage-event", "server"]|' Cargo.t
  && cargo build --release -p tokenlens-server ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} \
  && rm -rf server/src target/release/.fingerprint/tokenlens-server-* target/release/deps/tokenlens_server* target/release/deps/libtokenlens_server* target/release/tokenlens-server
 COPY server server
-RUN cargo build --release -p tokenlens-server ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} \
+RUN find server -type f -exec touch {} + \
+ && cargo build --release -p tokenlens-server ${BUILD_JOBS:+--jobs "$BUILD_JOBS"} \
  && install -s -m 0755 target/release/tokenlens-server /tokenlens-server
 
 FROM debian:bookworm-slim

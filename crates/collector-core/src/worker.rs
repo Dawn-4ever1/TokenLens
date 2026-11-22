@@ -393,7 +393,8 @@ mod tests {
         let script = format!("printf '%s\\n%s\\n' '{event}' '{done}'; exit 3");
         let failure = run(shell(&script), Duration::from_secs(10), None).expect_err("exit");
         assert_eq!(failure.kind, FailureKind::Exit(Some(3)));
-        let failure = run(shell("sleep 5"), Duration::from_millis(200), None).expect_err("timeout");
+        let failure =
+            run(shell("exec sleep 5"), Duration::from_millis(200), None).expect_err("timeout");
         assert_eq!(failure.kind, FailureKind::Timeout);
         assert!(failure.usage.wall < Duration::from_secs(4));
     }
