@@ -121,19 +121,12 @@ fn open_now(app: &AppHandle) {
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     #[cfg(windows)]
     let config = windows_config_without_native_title(config);
-    match WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
-        Ok(window) => {
-            #[cfg(windows)]
-            remove_windows_titlebar_icon(&window);
-            let _ = window.set_focus();
-        }
-        Err(_) =>
-        {
-            #[cfg(target_os = "macos")]
-            if app.webview_windows().is_empty() {
-                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
-            }
-        }
+    if let Ok(window) = WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+        #[cfg(windows)]
+        remove_windows_titlebar_icon(&window);
+        let _ = window.set_focus();
+    } else {
+        on_destroyed(app);
     }
 }
 
