@@ -1,18 +1,23 @@
-//! Read title metadata already stored by coding agents, not conversation text.
+//! Read stored title metadata (and explicit Antigravity subagent parent
+//! links) already saved by coding agents, never conversation text.
 //!
-//! tokscale-core owns usage parsing. This adapter only fills title fields that
-//! its locked revision does not expose; it never changes keys, tokens, costs,
-//! models or attribution. No prompt or assistant content is used as a title.
+//! tokscale-core owns usage parsing. This adapter only fills title or parent
+//! metadata that its locked revision does not expose; it never changes keys,
+//! tokens, costs, models or attribution. No prompt, preview, or assistant
+//! content is used as a title.
 
 use std::collections::{BTreeMap, HashSet};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokscale_core::UnifiedMessage;
 use walkdir::WalkDir;
 
 pub const MAX_TITLE_BYTES: usize = 512;
+const MAX_SESSION_ID_BYTES: usize = 128;
+const MAX_T3_PAYLOAD_BYTES: i64 = 1024 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_DECODED_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
@@ -75,8 +80,23 @@ fn parse_json_bytes(record: &[u8]) -> Option<Value> {
 }
 
 /// Streams a plain or zstd-compressed JSONL file with bounded memory and only
-/// invokes JSON parsing on lines matching at least one byte needle.
+/// invokes JSON parsing on lines matching at least one byte needle. Returning
+/// `false` from `on_value` stops reading that file early.
 fn visit_matching_json_lines(path: &Path, needles: &[&[u8]], mut on_value: impl FnMut(Value)) {
+    visit_matching_json_lines_until(path, needles, |value| {
+        on_value(value);
+        true
+    });
+}
+
+fn visit_matching_json_lines_until(
+    path: &Path,
+    needles: &[&[u8]],
+    mut on_value: impl FnMut(Value) -> bool,
+) {
+    if !crate::roots::is_real_file(path) {
+        return;
+    }
     let Ok(file) = std::fs::File::open(path) else {
         return;
     };
@@ -122,14 +142,42 @@ fn visit_matching_json_lines(path: &Path, needles: &[&[u8]], mut on_value: impl 
             Ok(count) => {
                 decoded = decoded.saturating_add(count as u64);
                 if record.len() as u64 > MAX_RECORD_BYTES {
-                    // Read errors or oversized records stop this metadata lane;
-                    // usage parsing remains upstream's responsibility.
-                    break;
+                    // Drain the rest of the oversized line up to '\n' so later
+                    // small title events still remain reachable.
+                    if !record.ends_with(b"\n") {
+                        loop {
+                            let Ok(buf) = reader.fill_buf() else {
+                                decoded = MAX_DECODED_BYTES;
+                                break;
+                            };
+                            if buf.is_empty() {
+                                decoded = MAX_DECODED_BYTES;
+                                break;
+                            }
+                            if let Some(pos) = buf.iter().position(|&byte| byte == b'\n') {
+                                let consume = pos + 1;
+                                decoded = decoded.saturating_add(consume as u64);
+                                reader.consume(consume);
+                                break;
+                            }
+                            let len = buf.len();
+                            decoded = decoded.saturating_add(len as u64);
+                            reader.consume(len);
+                            if decoded >= MAX_DECODED_BYTES {
+                                break;
+                            }
+                        }
+                    }
+                    if decoded >= MAX_DECODED_BYTES {
+                        break;
+                    }
+                    continue;
                 }
                 if matches_any(&record, needles)
                     && let Some(value) = parse_json_bytes(&record)
+                    && !on_value(value)
                 {
-                    on_value(value);
+                    break;
                 }
                 if decoded >= MAX_DECODED_BYTES {
                     break;
@@ -205,6 +253,17 @@ fn read_dsh(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
     read_dsh_for(home, use_env_roots, None)
 }
 
+fn dsh_transcript_version(path: &Path) -> u64 {
+    let Some(name) = transcript_name(path) else {
+        return 0;
+    };
+    let base = name.strip_suffix(".zstd").unwrap_or(name);
+    base.strip_prefix("session.v")
+        .and_then(|rest| rest.strip_suffix(".jsonl"))
+        .and_then(|version| version.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 fn read_dsh_for(
     home: &Path,
     use_env_roots: bool,
@@ -219,7 +278,7 @@ fn read_dsh_for(
         home.join(".dsh")
     }
     .join("sessions");
-    metadata_files(&root, |path| {
+    let mut files = metadata_files(&root, |path| {
         if !dsh_transcript(path) {
             return false;
         }
@@ -231,13 +290,19 @@ fn read_dsh_for(
                 .is_some_and(|id| ids.contains(id)),
             None => true,
         }
-    })
-    .into_iter()
-    .filter_map(|path| {
-        let id = path.parent()?.file_name()?.to_str()?.to_owned();
-        dsh_file(&path).map(|title| (id, title))
-    })
-    .collect()
+    });
+    files.sort_by(|left, right| {
+        dsh_transcript_version(left)
+            .cmp(&dsh_transcript_version(right))
+            .then_with(|| left.cmp(right))
+    });
+    files
+        .into_iter()
+        .filter_map(|path| {
+            let id = path.parent()?.file_name()?.to_str()?.to_owned();
+            dsh_file(&path).map(|title| (id, title))
+        })
+        .collect()
 }
 
 /// Last title record wins. Forked DSH logs retain the parent's title records;
@@ -256,6 +321,7 @@ fn title_from_claude_line(value: &Value) -> Option<(u8, String)> {
     let title = match kind {
         "summary" | "ai-title" => value
             .get("summary")
+            .or_else(|| value.get("aiTitle"))
             .or_else(|| value.get("title"))
             .and_then(Value::as_str),
         "custom-title" => value
@@ -321,6 +387,11 @@ fn read_claude_for(
     for path in metadata_files(&claude_root(home, use_env_roots), |path| {
         path.extension()
             .is_some_and(|extension| extension == "jsonl")
+            && needed.is_none_or(|ids| {
+                path.file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|id| ids.contains(id))
+            })
     }) {
         for (id, (priority, title)) in claude_file(&path) {
             if needed.is_some_and(|ids| !ids.contains(id.as_str())) {
@@ -352,8 +423,8 @@ fn root_path(home: &Path, use_env_roots: bool, env: &str, fallback: &str) -> Pat
 }
 
 fn json_file(path: &Path) -> Option<Value> {
-    let metadata = std::fs::metadata(path).ok()?;
-    if !metadata.is_file() || metadata.len() > MAX_INDEX_BYTES {
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_INDEX_BYTES {
         return None;
     }
     serde_json::from_slice(&std::fs::read(path).ok()?).ok()
@@ -443,25 +514,31 @@ fn read_kiro(home: &Path) -> BTreeMap<String, String> {
     )
 }
 
-fn sqlite_json_titles(path: &Path, query: &str) -> BTreeMap<String, String> {
+fn decode_json_blob(data: Vec<u8>, data_type: &str) -> Option<Value> {
+    let bytes = if data_type.eq_ignore_ascii_case("zstd") {
+        zstd::stream::read::Decoder::new(data.as_slice())
+            .ok()
+            .map(|decoder| decoder.take(32 * 1024 * 1024 + 1))
+            .and_then(|mut decoder| {
+                let mut bytes = Vec::new();
+                decoder.read_to_end(&mut bytes).ok().map(|_| bytes)
+            })
+    } else if data_type.eq_ignore_ascii_case("json") {
+        Some(data)
+    } else {
+        None
+    };
+    bytes
+        .filter(|bytes| bytes.len() <= 32 * 1024 * 1024)
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+}
+
+fn sqlite_json_titles(path: &Path, needed: Option<&HashSet<String>>) -> BTreeMap<String, String> {
     let mut titles = BTreeMap::new();
-    if !path.is_file() {
-        return titles;
-    }
-    let Ok(connection) = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
+    let Some(connection) = open_readonly_sqlite(path) else {
         return titles;
     };
-    let _ = connection.pragma_update(None, "query_only", "ON");
-    let Ok(mut statement) = connection.prepare(query) else {
-        return titles;
-    };
-    let Ok(mut rows) = statement.query([]) else {
-        return titles;
-    };
-    while let Ok(Some(row)) = rows.next() {
+    let mut extract_row = |row: &rusqlite::Row<'_>| {
         let id = row.get::<_, Option<String>>(0).ok().flatten();
         let data = row.get::<_, Option<Vec<u8>>>(1).ok().flatten();
         let data_type = row
@@ -470,27 +547,40 @@ fn sqlite_json_titles(path: &Path, query: &str) -> BTreeMap<String, String> {
             .flatten()
             .unwrap_or_else(|| "json".into());
         let Some((id, data)) = id.zip(data) else {
-            continue;
+            return;
         };
-        let bytes = if data_type.eq_ignore_ascii_case("zstd") {
-            zstd::stream::read::Decoder::new(data.as_slice())
-                .ok()
-                .map(|decoder| decoder.take(32 * 1024 * 1024 + 1))
-                .and_then(|mut decoder| {
-                    let mut bytes = Vec::new();
-                    decoder.read_to_end(&mut bytes).ok().map(|_| bytes)
-                })
-        } else if data_type.eq_ignore_ascii_case("json") {
-            Some(data)
-        } else {
-            None
-        };
-        if let Some(value) = bytes
-            .filter(|bytes| bytes.len() <= 32 * 1024 * 1024)
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        if let Some(value) = decode_json_blob(data, &data_type)
             && let Some(title) = explicit_title(&value)
         {
             titles.insert(id, title);
+        }
+    };
+    if let Some(ids) = needed {
+        if ids.is_empty() {
+            return titles;
+        }
+        let Ok(mut statement) =
+            connection.prepare("SELECT id, data, data_type FROM threads WHERE id = ?1")
+        else {
+            return titles;
+        };
+        for id in ids {
+            if let Ok(mut rows) = statement.query([id.as_str()]) {
+                while let Ok(Some(row)) = rows.next() {
+                    extract_row(row);
+                }
+            }
+        }
+    } else {
+        let Ok(mut statement) = connection.prepare("SELECT id, data, data_type FROM threads")
+        else {
+            return titles;
+        };
+        let Ok(mut rows) = statement.query([]) else {
+            return titles;
+        };
+        while let Ok(Some(row)) = rows.next() {
+            extract_row(row);
         }
     }
     titles
@@ -515,10 +605,14 @@ fn data_root(home: &Path, use_env_roots: bool) -> PathBuf {
     }
 }
 
-fn read_zed(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
+fn read_zed(
+    home: &Path,
+    use_env_roots: bool,
+    needed: Option<&HashSet<String>>,
+) -> BTreeMap<String, String> {
     sqlite_json_titles(
         &data_root(home, use_env_roots).join("zed/threads/threads.db"),
-        "SELECT id, data, data_type FROM threads",
+        needed,
     )
 }
 
@@ -577,49 +671,87 @@ fn read_devin_for(
     use_env_roots: bool,
     needed: Option<&HashSet<String>>,
 ) -> BTreeMap<String, String> {
-    let path = data_root(home, use_env_roots).join("devin/cli/sessions.db");
-    let mut titles = sqlite_titles(&path, "SELECT id, NULLIF(title, '') FROM sessions");
-    let root = home.join("Library/Application Support/Devin/User/acp-events");
-    for path in metadata_files(&root, |path| {
-        if !path
-            .extension()
-            .is_some_and(|extension| extension == "ndjson")
-        {
-            return false;
+    let mut titles = BTreeMap::new();
+    let mut cli_paths = vec![
+        data_root(home, use_env_roots).join("devin/cli/sessions.db"),
+        home.join("AppData/Roaming/devin/cli/sessions.db"),
+    ];
+    if use_env_roots
+        && let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty())
+    {
+        cli_paths.push(PathBuf::from(appdata).join("devin/cli/sessions.db"));
+    }
+    cli_paths.sort();
+    cli_paths.dedup();
+    for path in cli_paths {
+        titles.extend(sqlite_titles(
+            &path,
+            "SELECT id, NULLIF(title, '') FROM sessions",
+        ));
+    }
+    let mut acp_roots = vec![
+        home.join("Library/Application Support/Devin/User/acp-events"),
+        home.join(".config/Devin/User/acp-events"),
+        home.join(".config/devin/User/acp-events"),
+        home.join("AppData/Roaming/Devin/User/acp-events"),
+    ];
+    if use_env_roots {
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+            let xdg = PathBuf::from(xdg);
+            acp_roots.push(xdg.join("Devin/User/acp-events"));
+            acp_roots.push(xdg.join("devin/User/acp-events"));
         }
-        match needed {
-            Some(ids) => path
+        if let Some(appdata) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            acp_roots.push(PathBuf::from(appdata).join("Devin/User/acp-events"));
+        }
+    }
+    acp_roots.sort();
+    acp_roots.dedup();
+    for root in acp_roots {
+        for path in metadata_files(&root, |path| {
+            if !path
+                .extension()
+                .is_some_and(|extension| extension == "ndjson")
+            {
+                return false;
+            }
+            match needed {
+                Some(ids) => path
+                    .file_stem()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|id| ids.contains(id)),
+                None => true,
+            }
+        }) {
+            let file_id = path
                 .file_stem()
                 .and_then(|name| name.to_str())
-                .is_some_and(|id| ids.contains(id)),
-            None => true,
+                .unwrap_or("unknown");
+            visit_matching_json_lines(&path, &[b"\"session_info_update\""], |value| {
+                if value
+                    .pointer("/notification/sessionUpdate")
+                    .and_then(Value::as_str)
+                    == Some("session_info_update")
+                    && let Some(title) =
+                        metadata_text(value.pointer("/notification/title").and_then(Value::as_str))
+                {
+                    titles.insert(file_id.to_owned(), title);
+                }
+            });
         }
-    }) {
-        let file_id = path
-            .file_stem()
-            .and_then(|name| name.to_str())
-            .unwrap_or("unknown");
-        visit_matching_json_lines(&path, &[b"\"session_info_update\""], |value| {
-            if value
-                .pointer("/notification/sessionUpdate")
-                .and_then(Value::as_str)
-                == Some("session_info_update")
-                && let Some(title) =
-                    metadata_text(value.pointer("/notification/title").and_then(Value::as_str))
-            {
-                titles.insert(file_id.to_owned(), title);
-            }
-        });
     }
     titles
 }
 fn openclaw_index(path: &Path) -> BTreeMap<String, String> {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else {
+        return BTreeMap::new();
+    };
+    if !metadata.file_type().is_file() || metadata.len() > MAX_INDEX_BYTES {
+        return BTreeMap::new();
+    }
     let Ok(bytes) = std::fs::read(path) else {
         return BTreeMap::new();
     };
-    if bytes.len() as u64 > MAX_INDEX_BYTES {
-        return BTreeMap::new();
-    }
     let Ok(Value::Object(index)) = serde_json::from_slice::<Value>(&bytes) else {
         return BTreeMap::new();
     };
@@ -649,10 +781,18 @@ fn openclaw_index(path: &Path) -> BTreeMap<String, String> {
 }
 
 fn read_openclaw(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
-    let root = root_path(home, use_env_roots, "OPENCLAW_HOME", ".openclaw").join("agents");
+    let mut roots =
+        vec![root_path(home, use_env_roots, "OPENCLAW_HOME", ".openclaw").join("agents")];
+    for legacy in [".clawdbot", ".moltbot", ".moldbot"] {
+        roots.push(home.join(legacy).join("agents"));
+    }
+    roots.sort();
+    roots.dedup();
     let mut titles = BTreeMap::new();
-    for path in metadata_files(&root, |path| transcript_name(path) == Some("sessions.json")) {
-        titles.extend(openclaw_index(&path));
+    for root in roots {
+        for path in metadata_files(&root, |path| transcript_name(path) == Some("sessions.json")) {
+            titles.extend(openclaw_index(&path));
+        }
     }
     titles
 }
@@ -660,40 +800,10 @@ fn read_openclaw(home: &Path, use_env_roots: bool) -> BTreeMap<String, String> {
 /// Read only a known metadata column. Unsupported/older schemas return no
 /// title rather than guessing or opening a database read-write.
 fn sqlite_titles(path: &Path, query: &str) -> BTreeMap<String, String> {
-    let mut titles = BTreeMap::new();
-    if !path.is_file() {
-        return titles;
-    }
-    let Ok(connection) = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return titles;
+    let Some(connection) = open_readonly_sqlite(path) else {
+        return BTreeMap::new();
     };
-    let _ = connection.pragma_update(None, "query_only", "ON");
-    let Ok(mut statement) = connection.prepare(query) else {
-        return titles;
-    };
-    let Ok(rows) = statement.query([]) else {
-        return titles;
-    };
-    let mut rows = rows;
-    while let Ok(Some(row)) = rows.next() {
-        let id = row
-            .get::<_, Option<String>>(0)
-            .ok()
-            .flatten()
-            .and_then(|value| metadata_text(Some(&value)));
-        let title = row
-            .get::<_, Option<String>>(1)
-            .ok()
-            .flatten()
-            .and_then(|value| metadata_text(Some(&value)));
-        if let (Some(id), Some(title)) = (id, title) {
-            titles.insert(id, title);
-        }
-    }
-    titles
+    sqlite_titles_on(&connection, query)
 }
 
 fn read_codex_for(
@@ -741,17 +851,24 @@ fn read_senpi_for(
     }) {
         let mut id = None;
         let mut title = None;
-        visit_matching_json_lines(
-            &path,
-            &[b"\"session\"", b"\"session_info\""],
-            |value| match value.get("type").and_then(Value::as_str) {
-                Some("session") => id = value.get("id").and_then(Value::as_str).map(str::to_owned),
-                Some("session_info") => {
-                    title = metadata_text(value.get("name").and_then(Value::as_str))
+        visit_matching_json_lines_until(&path, &[b"\"session\"", b"\"session_info\""], |value| {
+            match value.get("type").and_then(Value::as_str) {
+                Some("session") => {
+                    id = value.get("id").and_then(Value::as_str).map(str::to_owned);
+                    if let (Some(ids), Some(session_id)) = (needed, id.as_deref())
+                        && !ids.contains(session_id)
+                    {
+                        return false;
+                    }
+                    true
                 }
-                _ => {}
-            },
-        );
+                Some("session_info") => {
+                    title = metadata_text(value.get("name").and_then(Value::as_str));
+                    true
+                }
+                _ => true,
+            }
+        });
         if let (Some(id), Some(title)) = (id, title)
             && needed.is_none_or(|ids| ids.contains(id.as_str()))
         {
@@ -826,6 +943,190 @@ pub fn qoder_session_titles(connection: &rusqlite::Connection) -> BTreeMap<Strin
     read_qoder_metadata(connection)
 }
 
+fn valid_session_id(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    (!value.is_empty()
+        && value.len() <= MAX_SESSION_ID_BYTES
+        && value != "unknown"
+        && !value.chars().any(char::is_control))
+    .then(|| value.to_owned())
+}
+
+fn open_readonly_sqlite(path: &Path) -> Option<rusqlite::Connection> {
+    if !crate::roots::is_real_file(path) {
+        return None;
+    }
+    let connection = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()?;
+    let _ = connection.busy_timeout(Duration::from_millis(500));
+    let _ = connection.pragma_update(None, "query_only", "ON");
+    Some(connection)
+}
+
+#[derive(Default)]
+struct AntigravityMeta {
+    titles: BTreeMap<String, String>,
+    parents: BTreeMap<String, String>,
+}
+
+fn read_antigravity_summary_db(path: &Path, meta: &mut AntigravityMeta) {
+    let Some(connection) = open_readonly_sqlite(path) else {
+        return;
+    };
+    if let Ok(mut statement) = connection.prepare(
+        "SELECT NULLIF(TRIM(conversation_id), ''), NULLIF(TRIM(title), ''), NULLIF(TRIM(parent_conversation_id), '')
+         FROM conversation_summaries",
+    ) {
+        if let Ok(mut rows) = statement.query([]) {
+            while let Ok(Some(row)) = rows.next() {
+                let id = valid_session_id(row.get::<_, Option<String>>(0).ok().flatten().as_deref());
+                let Some(id) = id else {
+                    continue;
+                };
+                if let Some(title) =
+                    metadata_text(row.get::<_, Option<String>>(1).ok().flatten().as_deref())
+                {
+                    meta.titles.insert(id.clone(), title);
+                }
+                if let Some(parent) =
+                    valid_session_id(row.get::<_, Option<String>>(2).ok().flatten().as_deref())
+                    && parent != id
+                {
+                    meta.parents.insert(id, parent);
+                }
+            }
+        }
+        return;
+    }
+    if let Ok(mut statement) = connection.prepare(
+        "SELECT NULLIF(TRIM(conversation_id), ''), NULLIF(TRIM(title), '')
+         FROM conversation_summaries",
+    ) && let Ok(mut rows) = statement.query([])
+    {
+        while let Ok(Some(row)) = rows.next() {
+            let Some(id) =
+                valid_session_id(row.get::<_, Option<String>>(0).ok().flatten().as_deref())
+            else {
+                continue;
+            };
+            if let Some(title) =
+                metadata_text(row.get::<_, Option<String>>(1).ok().flatten().as_deref())
+            {
+                meta.titles.insert(id, title);
+            }
+        }
+    }
+}
+
+fn read_t3_antigravity_thread_titles(path: &Path) -> BTreeMap<String, String> {
+    let mut titles = BTreeMap::new();
+    let Some(connection) = open_readonly_sqlite(path) else {
+        return titles;
+    };
+    let Ok(mut statement) = connection.prepare(
+        "SELECT pt.payload_json, NULLIF(TRIM(t.title), '')
+         FROM orchestration_v2_projection_provider_threads pt
+         JOIN orchestration_v2_projection_threads t ON t.thread_id = pt.thread_id
+         WHERE pt.provider = 'antigravity'
+           AND t.deleted_at IS NULL
+           AND LENGTH(pt.payload_json) <= ?1
+         ORDER BY t.updated_at ASC, pt.updated_at ASC, pt.provider_thread_id ASC",
+    ) else {
+        return titles;
+    };
+    let Ok(mut rows) = statement.query([MAX_T3_PAYLOAD_BYTES]) else {
+        return titles;
+    };
+    while let Ok(Some(row)) = rows.next() {
+        let payload = row.get::<_, Option<String>>(0).ok().flatten();
+        let title = metadata_text(row.get::<_, Option<String>>(1).ok().flatten().as_deref());
+        let (Some(payload), Some(title)) = (payload, title) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        if let Some(native_id) = valid_session_id(
+            value
+                .pointer("/nativeThreadRef/nativeId")
+                .and_then(Value::as_str),
+        ) {
+            titles.insert(native_id, title);
+        }
+    }
+    titles
+}
+
+fn read_antigravity_extension_meta(home: &Path, use_env_roots: bool) -> AntigravityMeta {
+    let mut meta = AntigravityMeta::default();
+    let gemini_dir = home.join(".gemini");
+    let standalone_dir = gemini_dir.join("antigravity");
+    if crate::roots::is_real_dir(&gemini_dir) && crate::roots::is_real_dir(&standalone_dir) {
+        let db = standalone_dir.join("conversation_summaries.db");
+        if !crate::roots::is_symlink(&db) {
+            read_antigravity_summary_db(&db, &mut meta);
+        }
+    }
+    for acp in crate::roots::t3_antigravity_acp_dirs(home, use_env_roots) {
+        let db = acp.join("conversation_summaries.db");
+        if !crate::roots::is_symlink(&db) {
+            read_antigravity_summary_db(&db, &mut meta);
+        }
+    }
+    if let Some(state_db) = crate::roots::t3_state_db_path(home, use_env_roots) {
+        meta.titles
+            .extend(read_t3_antigravity_thread_titles(&state_db));
+    }
+    meta
+}
+
+fn read_antigravity_cli_meta(home: &Path, use_env_roots: bool) -> AntigravityMeta {
+    let mut meta = AntigravityMeta::default();
+    let base = root_path(home, use_env_roots, "GEMINI_CLI_HOME", ".gemini");
+    if base == home
+        || home.starts_with(&base)
+        || crate::roots::is_forbidden(&base, "antigravity-cli")
+        || !crate::roots::is_real_dir(&base)
+    {
+        return meta;
+    }
+    let cli_dir = base.join("antigravity-cli");
+    if !crate::roots::is_real_dir(&cli_dir)
+        || crate::roots::is_forbidden(&cli_dir, "antigravity-cli")
+    {
+        return meta;
+    }
+    let db = cli_dir.join("conversation_summaries.db");
+    if !crate::roots::is_symlink(&db) {
+        read_antigravity_summary_db(&db, &mut meta);
+    }
+    meta
+}
+
+fn resolve_root_session<'a>(
+    session_id: &'a str,
+    parents: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    let mut current = parents.get(session_id)?.as_str();
+    if current == session_id {
+        return None;
+    }
+    let mut visited = HashSet::from([session_id, current]);
+    for _ in 0..16 {
+        let Some(next) = parents.get(current).map(String::as_str) else {
+            break;
+        };
+        if !visited.insert(next) {
+            return None;
+        }
+        current = next;
+    }
+    (current != session_id).then_some(current)
+}
+
 pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::roots::WatchRoot> {
     let mut roots = Vec::new();
     let mut push = |client: &str, path: PathBuf| {
@@ -835,13 +1136,36 @@ pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::root
             metadata_only: true,
         })
     };
+    if let Some(db) = crate::roots::standalone_antigravity_summary_db(home) {
+        push("antigravity-extension", db);
+    }
+    let cli_base = root_path(home, use_env_roots, "GEMINI_CLI_HOME", ".gemini");
+    if cli_base != home
+        && !home.starts_with(&cli_base)
+        && !crate::roots::is_symlink(&cli_base)
+        && !crate::roots::is_symlink(&cli_base.join("antigravity-cli"))
+    {
+        let cli_db = cli_base.join("antigravity-cli/conversation_summaries.db");
+        if !crate::roots::is_symlink(&cli_db) {
+            push("antigravity-cli", cli_db);
+        }
+    }
+    for acp in crate::roots::t3_antigravity_acp_dirs(home, use_env_roots) {
+        let db = acp.join("conversation_summaries.db");
+        if !crate::roots::is_symlink(&db) {
+            push("antigravity-extension", db);
+        }
+    }
     let codex = root_path(home, use_env_roots, "CODEX_HOME", ".codex");
     push("codex", codex.join("session_index.jsonl"));
     // Watch only the title database (and its -wal via RootMap), not the whole
     // ~/.zcode/v2 directory, so unrelated desktop files never trigger scans.
     push("zcode", home.join(".zcode/v2/tasks-index.sqlite"));
     push("kiro", home.join(".kiro/sessions"));
-    push("copilot", home.join(".copilot/data.db"));
+    push(
+        "copilot",
+        root_path(home, use_env_roots, "COPILOT_HOME", ".copilot").join("data.db"),
+    );
     push(
         "openclaw",
         root_path(home, use_env_roots, "OPENCLAW_HOME", ".openclaw").join("agents"),
@@ -868,14 +1192,14 @@ pub fn metadata_watch_roots(home: &Path, use_env_roots: bool) -> Vec<crate::root
                 continue;
             };
             let data_dir = PathBuf::from(data_dir);
-            push(
-                "crush",
-                if data_dir.is_absolute() {
-                    data_dir
-                } else {
-                    PathBuf::from(project_path).join(data_dir)
-                },
-            );
+            let db_path = if data_dir.is_absolute() {
+                data_dir.join("crush.db")
+            } else {
+                PathBuf::from(project_path).join(data_dir).join("crush.db")
+            };
+            if !crate::roots::is_symlink(&db_path) {
+                push("crush", db_path);
+            }
         }
     }
     push(
@@ -920,12 +1244,26 @@ fn codex_uuid_suffix(session_id: &str) -> Option<&str> {
 }
 
 pub fn enrich_messages(messages: &mut [UnifiedMessage], home: &Path, use_env_roots: bool) {
+    let mut needs_ag_ext = false;
+    let mut needs_ag_cli = false;
     let mut needed_by_client: BTreeMap<String, HashSet<String>> = BTreeMap::new();
     for message in messages.iter() {
+        let client = message.client.as_str();
+        if matches!(client, "antigravity-extension" | "antigravity") {
+            if message.session_title.is_none() || message.parent_session_id.is_none() {
+                needs_ag_ext = true;
+            }
+            continue;
+        }
+        if client == "antigravity-cli" {
+            if message.session_title.is_none() || message.parent_session_id.is_none() {
+                needs_ag_cli = true;
+            }
+            continue;
+        }
         if message.session_title.is_some() {
             continue;
         }
-        let client = message.client.as_str();
         if !matches!(
             client,
             "devin-cli"
@@ -952,9 +1290,12 @@ pub fn enrich_messages(messages: &mut [UnifiedMessage], home: &Path, use_env_roo
             ids.insert(uuid.to_owned());
         }
     }
-    if needed_by_client.is_empty() {
+    if needed_by_client.is_empty() && !needs_ag_ext && !needs_ag_cli {
         return;
     }
+
+    let ag_ext = needs_ag_ext.then(|| read_antigravity_extension_meta(home, use_env_roots));
+    let ag_cli = needs_ag_cli.then(|| read_antigravity_cli_meta(home, use_env_roots));
 
     let mut by_client: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for (client, needed) in &needed_by_client {
@@ -965,7 +1306,7 @@ pub fn enrich_messages(messages: &mut [UnifiedMessage], home: &Path, use_env_roo
             "copilot" => read_copilot(home, use_env_roots),
             "amp" => read_amp(home, use_env_roots),
             "kiro" => read_kiro(home),
-            "zed" => read_zed(home, use_env_roots),
+            "zed" => read_zed(home, use_env_roots, Some(needed)),
             "crush" => read_crush(home, use_env_roots),
             "dsh" => read_dsh_for(home, use_env_roots, Some(needed)),
             "claude" => read_claude_for(home, use_env_roots, Some(needed)),
@@ -977,10 +1318,33 @@ pub fn enrich_messages(messages: &mut [UnifiedMessage], home: &Path, use_env_roo
     }
 
     for message in messages.iter_mut() {
+        let client = message.client.as_str();
+        let ag_meta = match client {
+            "antigravity-extension" | "antigravity" => ag_ext.as_ref(),
+            "antigravity-cli" => ag_cli.as_ref(),
+            _ => None,
+        };
+        if let Some(meta) = ag_meta {
+            if message.parent_session_id.is_none()
+                && let Some(parent) =
+                    resolve_root_session(message.session_id.as_str(), &meta.parents)
+            {
+                message.parent_session_id = Some(parent.into());
+            }
+            if message.session_title.is_none() {
+                let root_id = message
+                    .parent_session_id
+                    .as_deref()
+                    .unwrap_or(message.session_id.as_str());
+                if let Some(title) = meta.titles.get(root_id) {
+                    message.session_title = Some(title.as_str().into());
+                }
+            }
+            continue;
+        }
         if message.session_title.is_some() {
             continue;
         }
-        let client = message.client.as_str();
         let Some(titles) = by_client.get(client) else {
             continue;
         };
@@ -1253,5 +1617,385 @@ mod tests {
             b"abc\"user/message\"def",
             b"\"session/title\""
         ));
+    }
+
+    #[test]
+    fn antigravity_reads_summary_titles_ignoring_preview_and_supports_legacy_schema() {
+        let home = tempfile::tempdir().expect("home");
+        let ag_dir = home.path().join(".gemini/antigravity");
+        std::fs::create_dir_all(&ag_dir).expect("ag dir");
+        let sum_db = ag_dir.join("conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&sum_db).expect("open sum db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('s1', '  Standalone Title  ', 'do not read preview', '');
+             INSERT INTO conversation_summaries VALUES ('s2', '   ', 'only preview present', '');",
+        )
+        .expect("seed");
+        drop(conn);
+
+        let cli_dir = home.path().join(".gemini/antigravity-cli");
+        std::fs::create_dir_all(&cli_dir).expect("cli dir");
+        let cli_db = cli_dir.join("conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&cli_db).expect("open cli db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('c1', 'CLI Legacy Schema Title', 'do not read');",
+        )
+        .expect("seed cli");
+        drop(conn);
+
+        let make = |client: &str, id: &str| {
+            UnifiedMessage::new(client, "m", "p", id, 1, TokenBreakdown::default(), 0.0)
+        };
+        let mut messages = vec![
+            make("antigravity-extension", "s1"),
+            make("antigravity-extension", "s2"),
+            make("antigravity-cli", "c1"),
+        ];
+        enrich_messages(&mut messages, home.path(), false);
+        assert_eq!(
+            messages[0].session_title.as_deref(),
+            Some("Standalone Title")
+        );
+        assert_eq!(messages[1].session_title, None);
+        assert_eq!(
+            messages[2].session_title.as_deref(),
+            Some("CLI Legacy Schema Title")
+        );
+    }
+
+    #[test]
+    fn antigravity_t3_sidebar_titles_override_acp_summary_and_ignore_deleted_or_empty() {
+        let home = tempfile::tempdir().expect("home");
+        let acp_dir = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-1/antigravity-acp");
+        std::fs::create_dir_all(&acp_dir).expect("acp dir");
+        let sum_db = acp_dir.join("conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&sum_db).expect("open sum db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('t1', 'English ACP Title', '');
+             INSERT INTO conversation_summaries VALUES ('t2', 'Fallback ACP Title', '');
+             INSERT INTO conversation_summaries VALUES ('t3', 'Alive Over Deleted', '');
+             INSERT INTO conversation_summaries VALUES ('t4', 'Not Clobbered By Codex', '');",
+        )
+        .expect("seed acp");
+        drop(conn);
+
+        let state_db = home.path().join(".t3/userdata/statev2.sqlite");
+        let conn = rusqlite::Connection::open(&state_db).expect("open state db");
+        conn.execute_batch(
+            "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
+             CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, provider TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+             INSERT INTO orchestration_v2_projection_threads VALUES ('th-1', '中文侧栏标题', '2026-11-23T10:00:00Z', NULL);
+             INSERT INTO orchestration_v2_projection_threads VALUES ('th-2', '   ', '2026-11-23T10:00:00Z', NULL);
+             INSERT INTO orchestration_v2_projection_threads VALUES ('th-3', 'Deleted Title', '2026-11-23T10:00:00Z', '2026-11-23T11:00:00Z');
+             INSERT INTO orchestration_v2_projection_threads VALUES ('th-4', 'Codex Title', '2026-11-23T10:00:00Z', NULL);
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-1', 'th-1', 'antigravity', '2026-11-23T10:00:00Z', '{\"nativeThreadRef\":{\"nativeId\":\"t1\"}}');
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-2', 'th-2', 'antigravity', '2026-11-23T10:00:00Z', '{\"nativeThreadRef\":{\"nativeId\":\"t2\"}}');
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-3', 'th-3', 'antigravity', '2026-11-23T10:00:00Z', '{\"nativeThreadRef\":{\"nativeId\":\"t3\"}}');
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-4', 'th-4', 'codex', '2026-11-23T10:00:00Z', '{\"nativeThreadRef\":{\"nativeId\":\"t4\"}}');
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-bad', 'th-1', 'antigravity', '2026-11-23T10:00:00Z', '{bad-json');",
+        )
+        .expect("seed statev2");
+        drop(conn);
+
+        let make = |id: &str| {
+            UnifiedMessage::new(
+                "antigravity-extension",
+                "m",
+                "p",
+                id,
+                1,
+                TokenBreakdown::default(),
+                0.0,
+            )
+        };
+        let mut messages = vec![make("t1"), make("t2"), make("t3"), make("t4")];
+        enrich_messages(&mut messages, home.path(), false);
+        assert_eq!(messages[0].session_title.as_deref(), Some("中文侧栏标题"));
+        assert_eq!(
+            messages[1].session_title.as_deref(),
+            Some("Fallback ACP Title")
+        );
+        assert_eq!(
+            messages[2].session_title.as_deref(),
+            Some("Alive Over Deleted")
+        );
+        assert_eq!(
+            messages[3].session_title.as_deref(),
+            Some("Not Clobbered By Codex")
+        );
+    }
+
+    #[test]
+    fn antigravity_subagents_resolve_to_root_and_inherit_root_title_with_cycle_guard() {
+        let home = tempfile::tempdir().expect("home");
+        let ag_dir = home.path().join(".gemini/antigravity");
+        std::fs::create_dir_all(&ag_dir).expect("ag dir");
+        let sum_db = ag_dir.join("conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&sum_db).expect("open sum db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('root', 'Root Title', '');
+             INSERT INTO conversation_summaries VALUES ('child', 'Child Own Title Must Not Clobber', 'root');
+             INSERT INTO conversation_summaries VALUES ('grandchild', '', 'child');
+             INSERT INTO conversation_summaries VALUES ('self-loop', 'Self Title', 'self-loop');
+             INSERT INTO conversation_summaries VALUES ('cycle-a', 'Cycle A', 'cycle-b');
+             INSERT INTO conversation_summaries VALUES ('cycle-b', 'Cycle B', 'cycle-a');",
+        )
+        .expect("seed hierarchy");
+        drop(conn);
+
+        let make = |id: &str| {
+            UnifiedMessage::new(
+                "antigravity-extension",
+                "m",
+                "p",
+                id,
+                1,
+                TokenBreakdown::default(),
+                0.0,
+            )
+        };
+        let mut messages = vec![
+            make("root"),
+            make("child"),
+            make("grandchild"),
+            make("self-loop"),
+            make("cycle-a"),
+        ];
+        enrich_messages(&mut messages, home.path(), false);
+        assert_eq!(messages[0].parent_session_id, None);
+        assert_eq!(messages[0].session_title.as_deref(), Some("Root Title"));
+
+        assert_eq!(messages[1].parent_session_id.as_deref(), Some("root"));
+        assert_eq!(messages[1].session_title.as_deref(), Some("Root Title"));
+
+        assert_eq!(messages[2].parent_session_id.as_deref(), Some("root"));
+        assert_eq!(messages[2].session_title.as_deref(), Some("Root Title"));
+
+        assert_eq!(messages[3].parent_session_id, None);
+        assert_eq!(messages[3].session_title.as_deref(), Some("Self Title"));
+
+        assert_eq!(messages[4].parent_session_id, None);
+        assert_eq!(messages[4].session_title.as_deref(), Some("Cycle A"));
+    }
+
+    #[test]
+    fn antigravity_preserves_existing_titles_and_parent_ids() {
+        let home = tempfile::tempdir().expect("home");
+        let ag_dir = home.path().join(".gemini/antigravity");
+        std::fs::create_dir_all(&ag_dir).expect("ag dir");
+        let sum_db = ag_dir.join("conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&sum_db).expect("open sum db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('root-new', 'New Root Title', '');
+             INSERT INTO conversation_summaries VALUES ('root-existing', 'Existing Root Title', '');
+             INSERT INTO conversation_summaries VALUES ('sub-1', '', 'root-new');",
+        )
+        .expect("seed");
+        drop(conn);
+
+        let mut msg = UnifiedMessage::new(
+            "antigravity-extension",
+            "m",
+            "p",
+            "sub-1",
+            1,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        msg.parent_session_id = Some(SharedStr::from("root-existing"));
+        msg.session_title = Some(SharedStr::from("Preset Title"));
+
+        let mut msg_fill_title = UnifiedMessage::new(
+            "antigravity-extension",
+            "m",
+            "p",
+            "sub-1",
+            1,
+            TokenBreakdown::default(),
+            0.0,
+        );
+        msg_fill_title.parent_session_id = Some(SharedStr::from("root-existing"));
+
+        let mut messages = vec![msg, msg_fill_title];
+        enrich_messages(&mut messages, home.path(), false);
+        assert_eq!(
+            messages[0].parent_session_id.as_deref(),
+            Some("root-existing")
+        );
+        assert_eq!(messages[0].session_title.as_deref(), Some("Preset Title"));
+        assert_eq!(
+            messages[1].parent_session_id.as_deref(),
+            Some("root-existing")
+        );
+        assert_eq!(
+            messages[1].session_title.as_deref(),
+            Some("Existing Root Title")
+        );
+    }
+
+    #[test]
+    fn antigravity_cli_reads_gemini_cli_home_summary_titles() {
+        let home = tempfile::tempdir().expect("home");
+        let custom_cli_home = home.path().join("custom-gemini-cli");
+        let cli_dir = custom_cli_home.join("antigravity-cli");
+        std::fs::create_dir_all(&cli_dir).expect("cli dir");
+        let conn =
+            rusqlite::Connection::open(cli_dir.join("conversation_summaries.db")).expect("db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('cli-1', 'CLI Summary Title', '');",
+        )
+        .expect("seed");
+        drop(conn);
+
+        let cli_base = root_path(home.path(), false, "GEMINI_CLI_HOME", ".gemini");
+        assert_eq!(cli_base, home.path().join(".gemini"));
+
+        let mut meta = AntigravityMeta::default();
+        read_antigravity_summary_db(&cli_dir.join("conversation_summaries.db"), &mut meta);
+        assert_eq!(
+            meta.titles.get("cli-1").map(String::as_str),
+            Some("CLI Summary Title")
+        );
+    }
+
+    #[test]
+    fn batch_b_title_fixes_cover_claude_dsh_senpi_zed_devin_openclaw_and_crush() {
+        let home = tempfile::tempdir().expect("home");
+
+        // Claude `aiTitle` + `needed` pre-filtering.
+        let claude_proj = home.path().join(".claude/projects/proj");
+        std::fs::create_dir_all(&claude_proj).unwrap();
+        std::fs::write(
+            claude_proj.join("s-needed.jsonl"),
+            "{\"type\":\"ai-title\",\"aiTitle\":\"Claude AI Camel Title\",\"sessionId\":\"s-needed\"}\n",
+        )
+        .unwrap();
+        std::fs::write(claude_proj.join("s-bad.jsonl"), "{not-valid-needed").unwrap();
+        let needed = HashSet::from(["s-needed".to_owned()]);
+        let claude = read_claude_for(home.path(), false, Some(&needed));
+        assert_eq!(
+            claude.get("s-needed").map(String::as_str),
+            Some("Claude AI Camel Title")
+        );
+
+        // DSH numeric version sort (`v10` beats `v2`) + oversized line drain.
+        let dsh_dir = home.path().join(".dsh/sessions/proj/dsh-1");
+        std::fs::create_dir_all(&dsh_dir).unwrap();
+        std::fs::write(
+            dsh_dir.join("session.v2.jsonl"),
+            "{\"type\":\"session/title\",\"data\":{\"title\":\"Older v2\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dsh_dir.join("session.v10.jsonl"),
+            "{\"type\":\"session/title\",\"data\":{\"title\":\"Newer v10\"}}\n",
+        )
+        .unwrap();
+        let dsh = read_dsh_for(home.path(), false, None);
+        assert_eq!(dsh.get("dsh-1").map(String::as_str), Some("Newer v10"));
+
+        let huge_path = home.path().join("huge.jsonl");
+        let mut huge = vec![b' '; (MAX_RECORD_BYTES as usize) + 64];
+        huge.extend_from_slice(
+            b"\n{\"type\":\"session/title\",\"data\":{\"title\":\"After Huge Line\"}}\n",
+        );
+        std::fs::write(&huge_path, huge).unwrap();
+        assert_eq!(dsh_file(&huge_path).as_deref(), Some("After Huge Line"));
+
+        // Senpi `needed` early-exit honors header session id.
+        let senpi_dir = home.path().join(".senpi/agent/sessions/proj");
+        std::fs::create_dir_all(&senpi_dir).unwrap();
+        std::fs::write(
+            senpi_dir.join("a.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"id\":\"keep-id\"}\n",
+                "{\"type\":\"session_info\",\"name\":\"Keep Title\"}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            senpi_dir.join("b.jsonl"),
+            concat!(
+                "{\"type\":\"session\",\"id\":\"skip-id\"}\n",
+                "{\"type\":\"session_info\",\"name\":\"Skip Title\"}\n"
+            ),
+        )
+        .unwrap();
+        let senpi = read_senpi_for(
+            home.path(),
+            false,
+            Some(&HashSet::from(["keep-id".to_owned()])),
+        );
+        assert_eq!(senpi.len(), 1);
+        assert_eq!(senpi.get("keep-id").map(String::as_str), Some("Keep Title"));
+
+        // Zed `needed` lookup decodes only requested threads.
+        let zed_db = data_root(home.path(), false).join("zed/threads/threads.db");
+        std::fs::create_dir_all(zed_db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&zed_db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE threads (id TEXT PRIMARY KEY, data BLOB, data_type TEXT);
+             INSERT INTO threads VALUES ('z1', X'7b227469746c65223a225a6564204f6e65227d', 'json');
+             INSERT INTO threads VALUES ('z2', 'not-json', 'json');",
+        )
+        .unwrap();
+        drop(conn);
+        let zed = read_zed(home.path(), false, Some(&HashSet::from(["z1".to_owned()])));
+        assert_eq!(zed.get("z1").map(String::as_str), Some("Zed One"));
+        assert!(!zed.contains_key("z2"));
+
+        // Devin cross-platform `acp-events` under `.config`.
+        let devin_acp = home.path().join(".config/Devin/User/acp-events");
+        std::fs::create_dir_all(&devin_acp).unwrap();
+        std::fs::write(
+            devin_acp.join("dev-1.ndjson"),
+            "{\"notification\":{\"sessionUpdate\":\"session_info_update\",\"title\":\"Devin Linux Title\"}}\n",
+        )
+        .unwrap();
+        let devin = read_devin_for(home.path(), false, None);
+        assert_eq!(
+            devin.get("dev-1").map(String::as_str),
+            Some("Devin Linux Title")
+        );
+
+        // OpenClaw legacy `.clawdbot` directory.
+        let legacy_oc = home.path().join(".clawdbot/agents/main");
+        std::fs::create_dir_all(&legacy_oc).unwrap();
+        std::fs::write(
+            legacy_oc.join("sessions.json"),
+            r#"{"k":{"sessionId":"oc-1","displayName":"Legacy Clawdbot"}}"#,
+        )
+        .unwrap();
+        let oc = read_openclaw(home.path(), false);
+        assert_eq!(oc.get("oc-1").map(String::as_str), Some("Legacy Clawdbot"));
+
+        // Crush watches `crush.db` directly rather than the entire `.` project root.
+        let crush_reg = data_root(home.path(), false).join("crush/projects.json");
+        std::fs::create_dir_all(crush_reg.parent().unwrap()).unwrap();
+        let repo = home.path().join("my-repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(
+            &crush_reg,
+            serde_json::json!({
+                "projects": [{"path": repo.to_string_lossy(), "data_dir": "."}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let roots = metadata_watch_roots(home.path(), false);
+        assert!(
+            roots
+                .iter()
+                .any(|r| r.client == "crush" && r.path == repo.join("crush.db"))
+        );
+        assert!(!roots.iter().any(|r| r.client == "crush" && r.path == repo));
     }
 }

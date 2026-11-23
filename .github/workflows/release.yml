@@ -34,13 +34,14 @@ jobs:
       - name: Draft release
         run: |
           version="${TAG#v}"
+          sed "s/{{VERSION}}/$version/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
           if gh release view "$TAG" >/dev/null 2>&1; then
             [ "$(gh release view "$TAG" --json isDraft --jq .isDraft)" = true ] || {
               echo 'Refusing to replace an already-published Release.' >&2; exit 1;
             }
-            echo "Draft $TAG already exists; builds will replace its assets."
+            gh release edit "$TAG" --title "TokenLens $version" --notes-file "$RUNNER_TEMP/notes.md"
+            echo "Draft $TAG updated; builds will replace its assets."
           else
-            sed "s/{{VERSION}}/$version/g" .github/release-notes.md > "$RUNNER_TEMP/notes.md"
             gh release create "$TAG" --draft --verify-tag \
               --title "TokenLens $version" --notes-file "$RUNNER_TEMP/notes.md"
           fi

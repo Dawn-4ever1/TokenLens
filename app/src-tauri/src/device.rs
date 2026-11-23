@@ -3,6 +3,7 @@
 //! or uploaded. The random request id only makes one pairing retry idempotent.
 
 use std::path::Path;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use usage_event::envelope::FormFactor;
@@ -12,6 +13,8 @@ const BINDING_FILE: &str = "account-device-binding";
 /// A new random id is created before a server-side device exists. Save this
 /// first, otherwise a lost HTTP response could create a duplicate on retry.
 pub fn client_binding_id(state_dir: &Path) -> std::io::Result<String> {
+    static BINDING_LOCK: Mutex<()> = Mutex::new(());
+    let _guard = BINDING_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let path = state_dir.join(BINDING_FILE);
     if let Ok(text) = std::fs::read_to_string(&path) {
         let id = text.trim();
@@ -23,21 +26,34 @@ pub fn client_binding_id(state_dir: &Path) -> std::io::Result<String> {
     getrandom::fill(&mut bytes).map_err(std::io::Error::other)?;
     let id = URL_SAFE_NO_PAD.encode(bytes);
     std::fs::create_dir_all(state_dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&path)
-            .and_then(|mut file| {
-                std::io::Write::write_all(&mut file, format!("{id}\n").as_bytes())
-            })?;
+    let temporary = state_dir.join(format!("{BINDING_FILE}.tmp"));
+    let write_result = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&temporary)
+                .and_then(|mut file| {
+                    std::io::Write::write_all(&mut file, format!("{id}\n").as_bytes())
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            std::fs::write(&temporary, format!("{id}\n"))
+        }
+    };
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
     }
-    #[cfg(not(unix))]
-    std::fs::write(&path, format!("{id}\n"))?;
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
     Ok(id)
 }
 
@@ -48,8 +64,13 @@ fn valid_binding_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
 }
 
-#[cfg(target_os = "macos")]
 pub fn detected_form_factor() -> FormFactor {
+    static DETECTED: OnceLock<FormFactor> = OnceLock::new();
+    *DETECTED.get_or_init(detect_form_factor)
+}
+
+#[cfg(target_os = "macos")]
+fn detect_form_factor() -> FormFactor {
     // Current macOS versions expose an internal family id (e.g. Mac18,5)
     // through ioreg, not necessarily the retail "Mac mini" product name.
     // system_profiler's Model Name is only the family, never the user-chosen
@@ -92,7 +113,7 @@ unsafe extern "system" {
 }
 
 #[cfg(windows)]
-pub fn detected_form_factor() -> FormFactor {
+fn detect_form_factor() -> FormFactor {
     let mut status = SystemPowerStatus {
         ac_line_status: 255,
         battery_flag: 255,
@@ -111,7 +132,7 @@ pub fn detected_form_factor() -> FormFactor {
 }
 
 #[cfg(not(any(target_os = "macos", windows)))]
-pub fn detected_form_factor() -> FormFactor {
+fn detect_form_factor() -> FormFactor {
     FormFactor::Laptop
 }
 

@@ -283,7 +283,6 @@ fn filter_clause(
         ("device_id", &filters.devices),
         ("client", &filters.clients),
         ("model_id", &filters.models),
-        ("project_hash", &filters.projects),
     ] {
         if items.is_empty() {
             continue;
@@ -293,6 +292,33 @@ fn filter_clause(
             vec!["?"; items.len()].join(", ")
         ));
         values.extend(items.iter().cloned().map(SqlValue::Text));
+    }
+    if !filters.projects.is_empty() {
+        let has_none = filters.projects.iter().any(|item| item == NO_PROJECT_KEY);
+        let named = filters
+            .projects
+            .iter()
+            .filter(|item| item.as_str() != NO_PROJECT_KEY)
+            .cloned()
+            .collect::<Vec<_>>();
+        match (has_none, named.is_empty()) {
+            (true, true) => clause.push_str(" AND project_hash IS NULL"),
+            (true, false) => {
+                clause.push_str(&format!(
+                    " AND (project_hash IS NULL OR project_hash IN ({}))",
+                    vec!["?"; named.len()].join(", ")
+                ));
+                values.extend(named.into_iter().map(SqlValue::Text));
+            }
+            (false, false) => {
+                clause.push_str(&format!(
+                    " AND project_hash IN ({})",
+                    vec!["?"; named.len()].join(", ")
+                ));
+                values.extend(named.into_iter().map(SqlValue::Text));
+            }
+            (false, true) => {}
+        }
     }
     (clause, values)
 }
@@ -397,29 +423,33 @@ impl Totals {
     }
 
     fn add(&mut self, other: &Self) {
-        self.input += other.input;
-        self.output += other.output;
-        self.cache_read += other.cache_read;
-        self.cache_write += other.cache_write;
-        self.reasoning += other.reasoning;
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cache_read = self.cache_read.saturating_add(other.cache_read);
+        self.cache_write = self.cache_write.saturating_add(other.cache_write);
+        self.reasoning = self.reasoning.saturating_add(other.reasoning);
         self.cost += other.cost;
-        self.priced += other.priced;
-        self.unpriced_tokens += other.unpriced_tokens;
+        self.priced = self.priced.saturating_add(other.priced);
+        self.unpriced_tokens = self.unpriced_tokens.saturating_add(other.unpriced_tokens);
         self.credits = match (self.credits, other.credits) {
             (None, None) => None,
             (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
         };
-        self.messages += other.messages;
-        self.measured += other.measured;
-        self.estimated += other.estimated;
-        self.unknown += other.unknown;
-        self.unknown_tokens += other.unknown_tokens;
-        self.events += other.events;
-        self.partial += other.partial;
+        self.messages = self.messages.saturating_add(other.messages);
+        self.measured = self.measured.saturating_add(other.measured);
+        self.estimated = self.estimated.saturating_add(other.estimated);
+        self.unknown = self.unknown.saturating_add(other.unknown);
+        self.unknown_tokens = self.unknown_tokens.saturating_add(other.unknown_tokens);
+        self.events = self.events.saturating_add(other.events);
+        self.partial = self.partial.saturating_add(other.partial);
     }
 
     pub const fn total(&self) -> i64 {
-        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+            .saturating_add(self.reasoning)
     }
 
     /// 04 §8.2: a single precision stays as is, anything mixed is `mixed`.
@@ -903,15 +933,28 @@ impl Bucket {
 
     /// Every bucket of the range in order, so charts have no gaps.
     fn labels(self, from: NaiveDate, to: NaiveDate) -> QueryResult<Vec<String>> {
-        let days = usize::try_from((to - from).num_days() + 1).unwrap_or(usize::MAX);
+        let total_days = (to - from).num_days() + 1;
+        let days = usize::try_from(total_days).unwrap_or(usize::MAX);
+        match self {
+            Self::Hour if days.saturating_mul(24) > MAX_HOUR_BUCKETS => {
+                return Err(QueryError::Bad);
+            }
+            Self::Day if days > MAX_BUCKETS => {
+                return Err(QueryError::Bad);
+            }
+            Self::Week if total_days > (MAX_BUCKETS as i64) * 7 + 7 => {
+                return Err(QueryError::Bad);
+            }
+            Self::Month if total_days > (MAX_BUCKETS as i64) * 31 + 31 => {
+                return Err(QueryError::Bad);
+            }
+            _ => {}
+        }
         let limit = if self == Self::Hour {
             MAX_HOUR_BUCKETS
         } else {
             MAX_BUCKETS
         };
-        if days > MAX_BUCKETS || (self == Self::Hour && days.saturating_mul(24) > limit) {
-            return Err(QueryError::Bad);
-        }
         let mut labels = Vec::new();
         let mut seen = HashSet::new();
         let mut day = from;
@@ -924,6 +967,9 @@ impl Bucket {
             } else {
                 let label = self.label(day.and_time(chrono::NaiveTime::MIN));
                 if seen.insert(label.clone()) {
+                    if labels.len() >= limit {
+                        return Err(QueryError::Bad);
+                    }
                     labels.push(label);
                 }
             }
@@ -1367,22 +1413,15 @@ pub fn sessions(
            MAX(COALESCE(SUM(CASE WHEN parent_session_id IS NULL THEN is_turn_start ELSE 0 END), 0),
                MAX(parent_session_id IS NULL)) AS turns,
            COUNT(DISTINCT CASE WHEN parent_session_id IS NOT NULL THEN session_id END),
-           group_concat(DISTINCT model_id), MAX(project_label),
+           json_group_array(DISTINCT model_id), MAX(project_label),
            SUM(input + output + cache_read + cache_write + reasoning) AS total_tokens,
-           COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0.0) AS cost,
-           (SELECT ce.session_title FROM usage_events ce
-            WHERE ce.tenant_id = counted_events.tenant_id
-              AND ce.device_id = counted_events.device_id
-              AND ce.client = counted_events.client
-              AND COALESCE(ce.parent_session_id, ce.session_id) = COALESCE(counted_events.parent_session_id, counted_events.session_id)
-              AND ce.session_title IS NOT NULL
-            ORDER BY ce.ts DESC, ce.rowid DESC LIMIT 1) AS latest_title
+           COALESCE(SUM(COALESCE(cost_usd, est_cost_usd)), 0.0) AS cost
          {grouped_sql}
          ORDER BY {order}, device_id, client, root
          LIMIT ? OFFSET ?"
     ))?;
     let base = 3 + TOTALS_WIDTH;
-    let rows = statement
+    let mut rows = statement
         .query_map(params_from_iter(page_values.iter()), |row| {
             let device_id = row.get::<_, String>(0)?;
             let client = row.get::<_, String>(1)?;
@@ -1390,8 +1429,8 @@ pub fn sessions(
             let totals = Totals::read(row, 3)?;
             let models = row
                 .get::<_, Option<String>>(base + 4)?
-                .map(|joined| {
-                    let mut models = joined.split(',').map(str::to_owned).collect::<Vec<_>>();
+                .and_then(|joined| serde_json::from_str::<Vec<String>>(&joined).ok())
+                .map(|mut models| {
                     models.sort();
                     models
                 })
@@ -1406,7 +1445,7 @@ pub fn sessions(
                 device_id,
                 client,
                 models,
-                title: row.get(base + 8)?,
+                title: None,
                 project_label: row.get(base + 5)?,
                 started_at: iso(row.get(base)?).unwrap_or_default(),
                 last_used_at: iso(row.get(base + 1)?).unwrap_or_default(),
@@ -1416,6 +1455,38 @@ pub fn sessions(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
+    if !rows.is_empty() {
+        let mut title_stmt = conn.prepare_cached(
+            "SELECT session_title FROM (
+               SELECT ts, rowid AS row_id, session_title
+               FROM usage_events
+               WHERE tenant_id = ?1 AND device_id = ?2 AND client = ?3
+                 AND session_id = ?4 AND parent_session_id IS NULL
+                 AND counted = 1 AND session_title IS NOT NULL
+               UNION ALL
+               SELECT ts, rowid AS row_id, session_title
+               FROM usage_events
+               WHERE tenant_id = ?1 AND device_id = ?2 AND client = ?3
+                 AND parent_session_id = ?4
+                 AND counted = 1 AND session_title IS NOT NULL
+               ORDER BY ts DESC, row_id DESC
+               LIMIT 1
+             )",
+        )?;
+        for session in &mut rows {
+            session.title = title_stmt
+                .query_row(
+                    params![
+                        tenant_id,
+                        &session.device_id,
+                        &session.client,
+                        &session.session_id
+                    ],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+        }
+    }
     let next = request.offset + rows.len();
     Ok(SessionPage {
         range: scope.out(tz),
@@ -1627,7 +1698,7 @@ pub fn session_detail(
             turn.models.insert(event.model.clone());
             turn.totals.add(&event.totals);
             if let Some(duration) = event.duration_ms {
-                turn.duration = Some(turn.duration.unwrap_or(0) + duration);
+                turn.duration = Some(turn.duration.unwrap_or(0).saturating_add(duration));
             }
         }
         if let Some(id) = &stream {
@@ -1904,9 +1975,16 @@ pub fn devices(
             Totals::read(row, 2)?,
         ))
     })?;
+    let active_device_ids = devices
+        .iter()
+        .map(|device| device.device_id.as_str())
+        .collect::<HashSet<_>>();
     let mut clients = BTreeSet::new();
     for row in rows {
         let (device, client, totals) = row?;
+        if !active_device_ids.contains(device.as_str()) {
+            continue;
+        }
         clients.insert(client.clone());
         let entry = per_device.entry(device).or_default();
         entry.0.add(&totals);

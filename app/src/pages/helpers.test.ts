@@ -9,7 +9,7 @@ describe("autoBucket", () => {
     expect(autoBucket({ from: "2026-10-13", to: "2026-11-11" }, undefined, "2026-11-11")).toBe("day");
     expect(autoBucket({}, "2025-01-01", "2026-11-11")).toBe("week");
     expect(autoBucket({}, "2023-01-01", "2026-11-11")).toBe("month");
-    expect(autoBucket({}, undefined, "2026-11-11")).toBe("hour");
+    expect(autoBucket({}, undefined, "2026-11-11")).toBe("day");
   });
 });
 

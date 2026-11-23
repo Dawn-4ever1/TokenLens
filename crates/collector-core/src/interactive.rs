@@ -27,6 +27,7 @@ pub fn rerun_isolated(direct_flag: &str, explicit_home: Option<&Path>) -> std::i
         std::env::args_os().skip(1),
         direct_flag,
         &upstream_dir,
+        explicit_home,
     )
     .stdin(Stdio::null())
     .stderr(Stdio::piped())
@@ -51,6 +52,7 @@ fn child_command(
     args: impl IntoIterator<Item = OsString>,
     direct_flag: &str,
     upstream_dir: &Path,
+    explicit_home: Option<&Path>,
 ) -> Command {
     let mut command = Command::new(program);
     command
@@ -58,6 +60,13 @@ fn child_command(
         .arg(OsStr::new(direct_flag))
         .env("TOKSCALE_RECOVERY_DISABLE", "1")
         .env("TOKSCALE_CONFIG_DIR", upstream_dir);
+    if let Some(home) = explicit_home {
+        command.env("HOME", home);
+        command.env("USERPROFILE", home);
+        for name in crate::watch::AGENT_ROOT_ENV_VARS {
+            command.env_remove(name);
+        }
+    }
     command
 }
 
@@ -68,13 +77,39 @@ pub fn redact_home(line: &str, home: &str) -> String {
     if escaped != home {
         line = line.replace(home, "~");
     }
+    let trimmed_home = home.trim_end_matches(['/', '\\']);
+    if trimmed_home.len() >= 2 && trimmed_home.as_bytes()[1] == b':' {
+        let forward = trimmed_home.replace('\\', "/");
+        if forward != home {
+            line = line.replace(&forward, "~");
+        }
+        let backward = trimmed_home.replace('/', r"\");
+        if backward != home && backward != escaped {
+            line = line.replace(&backward, "~");
+        }
+        let doubled = backward.replace('\\', r"\\");
+        if doubled != escaped {
+            line = line.replace(&doubled, "~");
+        }
+    }
 
-    // Some upstream diagnostics turn an absolute Windows path into a slug;
-    // redact that username too.
-    // Diagnostics can contain Windows paths even when processed on macOS/Linux.
+    // Some upstream diagnostics turn an absolute path into a slug;
+    // redact that username too. Replace drive-prefixed slugs before `-Users-`
+    // so `C-Users-<user>` never partially collapses into `C~`.
     if let Some(username) = home.rsplit(['/', '\\']).find(|part| !part.is_empty()) {
-        let slug = format!("C-Users-{username}");
-        line = line.replace(&slug, "~");
+        if let Some(drive) = trimmed_home
+            .chars()
+            .next()
+            .filter(|_| trimmed_home.as_bytes().get(1) == Some(&b':'))
+        {
+            for ch in [drive.to_ascii_uppercase(), drive.to_ascii_lowercase()] {
+                line = line.replace(&format!("{ch}-Users-{username}"), "~");
+            }
+        }
+        line = line.replace(&format!("C-Users-{username}"), "~");
+        for prefix in ["-Users-", "-home-"] {
+            line = line.replace(&format!("{prefix}{username}"), "~");
+        }
     }
     line
 }
@@ -118,6 +153,27 @@ mod tests {
                 "--~-Documents-demo"
             );
         }
+        assert_eq!(
+            redact_home(
+                r#"Examples: "~/.dsh/sessions/-Users-alice-secret-repo/a.jsonl""#,
+                "/Users/alice"
+            ),
+            r#"Examples: "~/.dsh/sessions/~-secret-repo/a.jsonl""#
+        );
+        assert_eq!(
+            redact_home(
+                r#"Examples: "~/.claude/projects/-home-alice-work/s.jsonl""#,
+                "/home/alice"
+            ),
+            r#"Examples: "~/.claude/projects/~-work/s.jsonl""#
+        );
+        assert_eq!(
+            redact_home(
+                "--D-Users-alice-Documents-demo D:/Users/alice/x",
+                r"D:\Users\alice"
+            ),
+            "--~-Documents-demo ~/x"
+        );
     }
 
     #[test]
@@ -128,6 +184,7 @@ mod tests {
             ["scan".into(), "--dry-run".into()],
             "--direct",
             upstream,
+            Some(Path::new("/synthetic/home")),
         );
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(args, ["scan", "--dry-run", "--direct"]);
@@ -140,5 +197,12 @@ mod tests {
             OsStr::new("TOKSCALE_CONFIG_DIR"),
             Some(upstream.as_os_str())
         )));
+        assert!(env.contains(&(OsStr::new("HOME"), Some(OsStr::new("/synthetic/home")))));
+        assert!(env.contains(&(
+            OsStr::new("USERPROFILE"),
+            Some(OsStr::new("/synthetic/home"))
+        )));
+        assert!(env.contains(&(OsStr::new("CODEX_HOME"), None)));
+        assert!(env.contains(&(OsStr::new("COPILOT_HOME"), None)));
     }
 }

@@ -360,3 +360,20 @@ async fn public_routes_do_not_expose_files_or_relax_private_api_authentication()
         .expect("health");
     assert_eq!(health.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn stats_page_displays_configured_time_zone_label() {
+    let h =
+        Harness::start_in_with_stats(chrono_tz::America::New_York, Some("tz-stats-token")).await;
+    let body = h
+        .http
+        .get(format!("{}/stats/tz-stats-token", h.base))
+        .send()
+        .await
+        .expect("stats")
+        .text()
+        .await
+        .expect("text");
+    assert!(body.contains("America/New_York"), "{body}");
+    assert!(!body.contains("北京时间"), "{body}");
+}

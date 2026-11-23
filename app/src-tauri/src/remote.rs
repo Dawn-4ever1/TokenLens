@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use collector_core::credentials::Credentials;
 use collector_core::transport::{HttpResponse, Transport, UreqTransport};
@@ -128,6 +129,7 @@ fn json_body(response: HttpResponse) -> CmdResult<Value> {
 /// server running inside this app; callers do not need to know which.
 pub struct Remote {
     http: UreqTransport,
+    quick_http: UreqTransport,
     local: Mutex<Option<Arc<LocalServer>>>,
 }
 
@@ -135,6 +137,10 @@ impl Remote {
     pub fn new() -> Self {
         Self {
             http: UreqTransport::new(),
+            quick_http: UreqTransport::with_timeouts(
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+            ),
             local: Mutex::new(None),
         }
     }
@@ -164,11 +170,24 @@ impl Remote {
     }
 
     pub fn get(&self, credentials: &Credentials, path: &str) -> CmdResult<Value> {
+        self.get_with(&self.http, credentials, path)
+    }
+
+    pub fn get_quick(&self, credentials: &Credentials, path: &str) -> CmdResult<Value> {
+        self.get_with(&self.quick_http, credentials, path)
+    }
+
+    fn get_with(
+        &self,
+        http: &UreqTransport,
+        credentials: &Credentials,
+        path: &str,
+    ) -> CmdResult<Value> {
         let url = url_for(credentials, path);
         let token = Some(credentials.read_token.as_str());
         let response = match self.local_for(credentials)? {
             Some(local) => local.get(&url, token),
-            None => self.http.get(&url, token),
+            None => http.get(&url, token),
         }
         .map_err(|_| CommandError::new("network"))?;
         json_body(response)

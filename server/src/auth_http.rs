@@ -88,9 +88,17 @@ where
     .await?
 }
 
+async fn read_db<T, F>(state: &AppState, work: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce(&rusqlite::Connection, i64) -> T + Send + 'static,
+{
+    state.read_db(work).await
+}
+
 async fn profile_json(state: &AppState, account: &Account) -> serde_json::Value {
     let account_id = account.id.clone();
-    let profile = run_db(state, move |conn, _| {
+    let profile = read_db(state, move |conn, _| {
         accounts::identity_profile(conn, &account_id).ok().flatten()
     })
     .await
@@ -142,7 +150,7 @@ async fn authorized_account(state: &AppState, headers: &HeaderMap) -> Result<Acc
     let Some(token) = bearer(headers) else {
         return Err(ApiError::Unauthorized);
     };
-    run_db(state, move |conn, now| {
+    read_db(state, move |conn, now| {
         accounts::authenticate(conn, &token, now)
             .map_err(|_| ApiError::Internal)?
             .ok_or(ApiError::Unauthorized)
@@ -181,9 +189,14 @@ async fn read_body(body: Body) -> Result<Vec<u8>, ApiError> {
         })
 }
 
-pub async fn request_code(State(state): State<AppState>, body: Body) -> Response {
-    let Ok(bytes) = read_body(body).await else {
-        return ApiError::BadRequest.into_response();
+pub async fn request_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_response(),
     };
     let Ok(request) = serde_json::from_slice::<EmailRequest>(&bytes) else {
         return ApiError::BadRequest.into_response();
@@ -194,7 +207,8 @@ pub async fn request_code(State(state): State<AppState>, body: Body) -> Response
     let Some(mailer) = Mailer::from_env() else {
         return account_error(AccountError::Unavailable);
     };
-    if !state.allow_auth(&email) {
+    let client_key = http::client_rate_key(&headers);
+    if !state.allow_auth_scoped("email-code-ip", &client_key) || !state.allow_auth(&email) {
         return account_error(AccountError::TooManyRequests);
     }
     let stage_email = email.clone();
@@ -212,13 +226,26 @@ pub async fn request_code(State(state): State<AppState>, body: Body) -> Response
     };
     let send_email = email.clone();
     let send_result = run_blocking(move || mailer.send_code(&send_email, code.expose())).await;
-    if !matches!(send_result, Ok(Ok(()))) {
-        let delete_email = email.clone();
-        let _ = run_db(&state, move |conn, _| {
-            let _ = accounts::delete_challenge(conn, &delete_email);
-        })
-        .await;
-        return account_error(AccountError::Unavailable);
+    match send_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(status = error.status(), "sign-in email delivery failed");
+            let invalidate_email = email.clone();
+            let _ = run_db(&state, move |conn, now| {
+                let _ = accounts::invalidate_challenge(conn, &invalidate_email, now);
+            })
+            .await;
+            return account_error(AccountError::Unavailable);
+        }
+        Err(_) => {
+            tracing::warn!("sign-in email task panicked");
+            let invalidate_email = email.clone();
+            let _ = run_db(&state, move |conn, now| {
+                let _ = accounts::invalidate_challenge(conn, &invalidate_email, now);
+            })
+            .await;
+            return account_error(AccountError::Unavailable);
+        }
     }
     let mark_email = email;
     let _ = run_db(&state, move |conn, _| {
@@ -228,9 +255,10 @@ pub async fn request_code(State(state): State<AppState>, body: Body) -> Response
     json(&serde_json::json!({"sent": true, "retryAfterSeconds": accounts::SEND_INTERVAL_MS / 1000}))
 }
 
-pub async fn login(State(state): State<AppState>, body: Body) -> Response {
-    let Ok(bytes) = read_body(body).await else {
-        return ApiError::BadRequest.into_response();
+pub async fn login(State(state): State<AppState>, headers: HeaderMap, body: Body) -> Response {
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_response(),
     };
     let Ok(request) = serde_json::from_slice::<LoginRequest>(&bytes) else {
         return ApiError::BadRequest.into_response();
@@ -238,7 +266,8 @@ pub async fn login(State(state): State<AppState>, body: Body) -> Response {
     let Some(email) = accounts::normalize_email(&request.email) else {
         return account_error(AccountError::BadEmail);
     };
-    if !state.allow_auth(&email) {
+    let client_key = http::client_rate_key(&headers);
+    if !state.allow_auth_scoped("email-login-ip", &client_key) || !state.allow_auth(&email) {
         return account_error(AccountError::TooManyRequests);
     }
     let code = request.code;
@@ -309,10 +338,12 @@ pub async fn pairing_code(
             Ok(request) => request.rotate,
             Err(_) => return ApiError::BadRequest.into_response(),
         },
-        Err(_) => return ApiError::BadRequest.into_response(),
+        Err(error) => return error.into_response(),
     };
-    let Some(cipher) = state.pairing_cipher().and_then(|value| value.ok()) else {
-        return ApiError::Internal.into_response();
+    let cipher = match state.pairing_cipher() {
+        Some(Ok(cipher)) => cipher,
+        Some(Err(_)) => return ApiError::Internal.into_response(),
+        None => return account_error(AccountError::Unavailable),
     };
     let tenant_id = account.tenant_id;
     let result = match run_db(&state, move |conn, now| {
@@ -340,8 +371,9 @@ pub async fn pair_device(
         Ok(account) => account,
         Err(error) => return error.into_response(),
     };
-    let Ok(bytes) = read_body(body).await else {
-        return ApiError::BadRequest.into_response();
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_response(),
     };
     let Ok(request) = serde_json::from_slice::<NewDeviceRequest>(&bytes) else {
         return ApiError::BadRequest.into_response();
@@ -399,7 +431,7 @@ pub async fn account_avatar(State(state): State<AppState>, headers: HeaderMap) -
         Err(error) => return error.into_response(),
     };
     let account_id = account.id;
-    let profile = match run_db(&state, move |conn, _| {
+    let profile = match read_db(&state, move |conn, _| {
         accounts::identity_profile(conn, &account_id).ok().flatten()
     })
     .await
@@ -420,9 +452,14 @@ pub async fn account_avatar(State(state): State<AppState>, headers: HeaderMap) -
         return ApiError::NotFound.into_response();
     };
     let mut response = (StatusCode::OK, [(header::CONTENT_TYPE, mime)], bytes).into_response();
-    response.headers_mut().insert(
+    let out_headers = response.headers_mut();
+    out_headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("private, max-age=3600"),
+    );
+    out_headers.insert(
+        "x-content-type-options",
+        header::HeaderValue::from_static("nosniff"),
     );
     response
 }
@@ -457,12 +494,21 @@ pub async fn github_start(State(state): State<AppState>, headers: HeaderMap) -> 
 
 /// One poll of a started device flow. GitHub's answer decides whether the
 /// user is still pending, approved, or refused.
-pub async fn github_poll(State(state): State<AppState>, body: Body) -> Response {
+pub async fn github_poll(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     let Some(github) = state.github() else {
         return account_error(AccountError::Unavailable);
     };
-    let Ok(bytes) = read_body(body).await else {
-        return ApiError::BadRequest.into_response();
+    let client_key = http::client_rate_key(&headers);
+    if !state.allow_auth_scoped_with("github-poll", &client_key, 120, 600) {
+        return account_error(AccountError::TooManyRequests);
+    }
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_response(),
     };
     let Ok(request) = serde_json::from_slice::<GitHubPollRequest>(&bytes) else {
         return ApiError::BadRequest.into_response();
@@ -554,10 +600,24 @@ fn html_page(status: StatusCode, title: &str, message: &str) -> Response {
         body,
     )
         .into_response();
-    response.headers_mut().insert(
+    let headers = response.headers_mut();
+    headers.insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
     );
+    headers.insert(
+        "content-security-policy",
+        header::HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'"),
+    );
+    headers.insert(
+        "x-content-type-options",
+        header::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        header::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert("x-frame-options", header::HeaderValue::from_static("DENY"));
     response
 }
 
@@ -571,7 +631,7 @@ pub async fn google_start(State(state): State<AppState>, headers: HeaderMap) -> 
     if !state.allow_auth_scoped("google-start", &client_key) {
         return account_error(AccountError::TooManyRequests);
     }
-    let Some(started) = state.google_flows().start(state.now_ms()) else {
+    let Some(started) = state.google_flows().start_for(&client_key, state.now_ms()) else {
         return account_error(AccountError::TooManyRequests);
     };
     json(&serde_json::json!({
@@ -587,6 +647,7 @@ pub async fn google_start(State(state): State<AppState>, headers: HeaderMap) -> 
 /// exactly like the GitHub poll.
 pub async fn google_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if state.google().is_none() {
@@ -594,6 +655,14 @@ pub async fn google_callback(
             StatusCode::SERVICE_UNAVAILABLE,
             "登录不可用",
             "服务器还没有配置 Google 登录。",
+        );
+    }
+    let client_key = http::client_rate_key(&headers);
+    if !state.allow_auth_scoped_with("google-callback", &client_key, 60, 300) {
+        return html_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "请求过多",
+            "操作过于频繁，请稍后重试。",
         );
     }
     let flow_state = params.get("state").map(String::as_str).unwrap_or_default();
@@ -631,7 +700,10 @@ pub async fn google_callback(
             "授权信息不对，请回到 TokenLens 重新开始。",
         );
     };
-    let Some(verifier) = state.google_flows().verifier(flow_state, state.now_ms()) else {
+    let Some(verifier) = state
+        .google_flows()
+        .claim_verifier(flow_state, state.now_ms())
+    else {
         return html_page(
             StatusCode::BAD_REQUEST,
             "登录没有完成",
@@ -678,7 +750,8 @@ pub async fn google_callback(
     .await;
     match outcome {
         Ok(Ok(login)) => {
-            state.google_flows().complete(
+            let session_token = login.session.expose().to_owned();
+            let stored = state.google_flows().complete(
                 flow_state,
                 crate::google::Outcome::Ready {
                     session: login.session,
@@ -688,6 +761,17 @@ pub async fn google_callback(
                 },
                 state.now_ms(),
             );
+            if !stored {
+                let _ = run_db(&state, move |conn, now| {
+                    let _ = accounts::logout(conn, &session_token, now);
+                })
+                .await;
+                return html_page(
+                    StatusCode::BAD_REQUEST,
+                    "登录没有完成",
+                    "授权已过期或不存在，请回到 TokenLens 重新开始。",
+                );
+            }
             html_page(
                 StatusCode::OK,
                 "登录成功",
@@ -709,12 +793,21 @@ pub async fn google_callback(
     }
 }
 /// One poll of a started Google flow. The session is delivered once.
-pub async fn google_poll(State(state): State<AppState>, body: Body) -> Response {
+pub async fn google_poll(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     if state.google().is_none() {
         return account_error(AccountError::Unavailable);
     }
-    let Ok(bytes) = read_body(body).await else {
-        return ApiError::BadRequest.into_response();
+    let client_key = http::client_rate_key(&headers);
+    if !state.allow_auth_scoped_with("google-poll", &client_key, 120, 600) {
+        return account_error(AccountError::TooManyRequests);
+    }
+    let bytes = match read_body(body).await {
+        Ok(bytes) => bytes,
+        Err(error) => return error.into_response(),
     };
     let Ok(request) = serde_json::from_slice::<GooglePollRequest>(&bytes) else {
         return ApiError::BadRequest.into_response();

@@ -29,7 +29,7 @@ export function StatusProvider({ children }: { children: ReactNode }) {
     try {
       const next = await app.status();
       if (revision.current !== current) return;
-      setStatus(next);
+      setStatus((previous) => (previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
       setError(null);
     } catch (next) {
       if (revision.current === current) setError(next);
@@ -52,11 +52,14 @@ export function StatusProvider({ children }: { children: ReactNode }) {
     }, 5000);
     let unlisten: (() => void) | undefined;
     if (isTauri()) {
-      void import("@tauri-apps/api/event").then(({ listen }) =>
-        listen("status-changed", () => void refresh()).then((stop) => {
-          unlisten = stop;
-        }),
-      );
+      void import("@tauri-apps/api/event")
+        .then(({ listen }) =>
+          listen("status-changed", () => void refresh()).then((stop) => {
+            if (!active) stop();
+            else unlisten = stop;
+          }),
+        )
+        .catch(() => undefined);
     }
     return () => {
       active = false;

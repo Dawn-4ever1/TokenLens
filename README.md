@@ -47,7 +47,7 @@
         <source media="(prefers-color-scheme: light)" srcset=".github/readme/session-detail-light.webp">
         <img src=".github/readme/session-detail-light.webp" alt="TokenLens Session detail drawer showing per-turn token breakdown, cache composition bar, and turn table." width="100%">
       </picture>
-      <p><strong>Session &amp; Per-Turn Drill-Down</strong><br>Search sessions by saved title, ID, model, or project. Inspect every turn's token split, latency, and cost, with subagent streams rolled cleanly into their parent session.</p>
+      <p><strong>Session &amp; Per-Turn Drill-Down</strong><br>Search sessions by saved title, ID, model, or project. Inspect session cost summaries alongside every turn's token split and latency, with subagent streams rolled cleanly into their parent session.</p>
     </td>
   </tr>
   <tr>
@@ -62,7 +62,7 @@
     <td width="50%" valign="top">
       <p><strong>Built for Daily Checking</strong></p>
       <ul>
-        <li><strong>Instant scope switching</strong> — Toggle between <em>All Account</em>, <em>This Computer</em>, <em>Other Devices</em>, or any individual machine right from the header.</li>
+        <li><strong>Instant scope switching</strong> — Toggle between <em>All Account</em>, <em>This Computer</em>, or any individual machine right from the header.</li>
         <li><strong>Cross-filter &amp; drill down</strong> — Filter by date range, agent, model, or project; click any agent row or calendar day to jump straight into matching sessions.</li>
         <li><strong>Click any number for exact digits</strong> — Toggle between compact abbreviations (<code>147M</code>) and full exact counts anywhere on screen.</li>
         <li><strong>Offline-resilient queue</strong> — Local SQLite storage and an independent outbox ensure zero missed events while offline, with automatic backfill when connected.</li>

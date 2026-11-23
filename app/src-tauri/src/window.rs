@@ -4,7 +4,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(windows)]
-use std::sync::OnceLock;
+use std::sync::{Mutex, PoisonError};
 
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
 
@@ -37,28 +37,39 @@ fn remove_windows_titlebar_icon(window: &tauri::WebviewWindow) {
         CreateIcon, ICON_SMALL, SendMessageW, WM_SETICON,
     };
 
-    // `CreateIcon` returns a handle owned by the caller. Keep this one tiny
-    // process-lifetime handle alive and reuse it for every dashboard window;
-    // the OS reclaims the process resource when the app exits. A 1-bit AND
-    // mask full of ones makes every pixel transparent.
-    static TRANSPARENT_ICON: OnceLock<isize> = OnceLock::new();
-    let icon = *TRANSPARENT_ICON.get_or_init(|| {
-        const MASK: [u8; 32] = [0xff; 32];
-        const XOR: [u8; 32] = [0; 32];
-        // SAFETY: the bitmap buffers are valid for the duration of the call;
-        // the returned handle is retained for the process lifetime above.
-        unsafe {
-            CreateIcon(
-                std::ptr::null_mut(),
-                16,
-                16,
-                1,
-                1,
-                MASK.as_ptr(),
-                XOR.as_ptr(),
-            ) as isize
+    // `CreateIcon` returns a handle owned by the caller. Keep one non-zero
+    // process-lifetime handle and reuse it for every dashboard window; the OS
+    // reclaims the process resource when the app exits.
+    static TRANSPARENT_ICON: Mutex<Option<isize>> = Mutex::new(None);
+    let icon = {
+        let mut cached = TRANSPARENT_ICON
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if cached.is_none() {
+            const MASK: [u8; 32] = [0xff; 32];
+            const XOR: [u8; 32] = [0; 32];
+            // SAFETY: the bitmap buffers are valid for the duration of the call;
+            // non-zero HICONs are retained for the process lifetime above.
+            let created = unsafe {
+                CreateIcon(
+                    std::ptr::null_mut(),
+                    16,
+                    16,
+                    1,
+                    1,
+                    MASK.as_ptr(),
+                    XOR.as_ptr(),
+                ) as isize
+            };
+            if created != 0 {
+                *cached = Some(created);
+            }
         }
-    });
+        *cached
+    };
+    let Some(icon) = icon else {
+        return;
+    };
 
     let Ok(handle) = window.window_handle() else {
         return;
@@ -81,6 +92,8 @@ fn remove_windows_titlebar_icon(window: &tauri::WebviewWindow) {
 // Programmatic closes (the tray's Quit item and macOS's app menu) must not
 // trigger the one-time Windows background notice meant for clicking X.
 static SUPPRESS_CLOSE_NOTICE: AtomicBool = AtomicBool::new(false);
+#[cfg(windows)]
+static CLOSE_NOTICE_PENDING: AtomicBool = AtomicBool::new(false);
 
 pub fn open(app: &AppHandle) {
     let handle = app.clone();
@@ -108,44 +121,72 @@ fn open_now(app: &AppHandle) {
     let _ = app.set_activation_policy(tauri::ActivationPolicy::Regular);
     #[cfg(windows)]
     let config = windows_config_without_native_title(config);
-    if let Ok(window) = WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
-        #[cfg(windows)]
-        remove_windows_titlebar_icon(&window);
-        let _ = window.set_focus();
+    match WebviewWindowBuilder::from_config(app, &config).and_then(|b| b.build()) {
+        Ok(window) => {
+            #[cfg(windows)]
+            remove_windows_titlebar_icon(&window);
+            let _ = window.set_focus();
+        }
+        Err(_) =>
+        {
+            #[cfg(target_os = "macos")]
+            if app.webview_windows().is_empty() {
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+        }
     }
 }
 
 pub fn close(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN) {
         SUPPRESS_CLOSE_NOTICE.store(true, Ordering::SeqCst);
-        let _ = window.close();
+        if window.close().is_err() {
+            SUPPRESS_CLOSE_NOTICE.store(false, Ordering::SeqCst);
+        }
     }
 }
 
 /// Shows the one-time Windows notice after a user closes the dashboard window.
-/// The marker is persisted with the app state so reopening the app does not
-/// repeat the message. Notification failures never block closing the window.
+/// The marker is persisted only after delivery succeeds so a failed toast can
+/// retry later. Runs off the UI thread so toast COM calls never block close.
 pub fn on_close_requested(app: &AppHandle) {
     if SUPPRESS_CLOSE_NOTICE.swap(false, Ordering::SeqCst) {
         return;
     }
     #[cfg(windows)]
     {
-        let state = app.state::<AppState>();
-        let marker = state.paths.state_dir.join("window-close-notice-shown");
-        if marker.exists() {
+        if CLOSE_NOTICE_PENDING.swap(true, Ordering::SeqCst) {
             return;
         }
-        if std::fs::create_dir_all(&state.paths.state_dir)
-            .and_then(|()| std::fs::write(&marker, b"1"))
-            .is_err()
-        {
-            return;
+        let state_dir = app.state::<AppState>().paths.state_dir.clone();
+        let spawned = std::thread::Builder::new()
+            .name("close-notice".to_owned())
+            .spawn(move || {
+                struct ResetGuard;
+                impl Drop for ResetGuard {
+                    fn drop(&mut self) {
+                        CLOSE_NOTICE_PENDING.store(false, Ordering::SeqCst);
+                    }
+                }
+                let _guard = ResetGuard;
+                let marker = state_dir.join("window-close-notice-shown");
+                if marker.exists() {
+                    return;
+                }
+                if notify_rust::Notification::new()
+                    .app_id("dev.tokenlens.desktop")
+                    .summary("TokenLens")
+                    .body("看板窗口已关闭，TokenLens 仍在后台采集。需要查看数据时，从托盘打开。")
+                    .show()
+                    .is_ok()
+                    && std::fs::create_dir_all(&state_dir).is_ok()
+                {
+                    let _ = std::fs::write(&marker, b"1");
+                }
+            });
+        if spawned.is_err() {
+            CLOSE_NOTICE_PENDING.store(false, Ordering::SeqCst);
         }
-        let _ = notify_rust::Notification::new()
-            .summary("TokenLens")
-            .body("看板窗口已关闭，TokenLens 仍在后台采集。需要查看数据时，从托盘打开。")
-            .show();
     }
     #[cfg(not(windows))]
     let _ = app;

@@ -483,3 +483,99 @@ async fn the_client_secret_never_leaves_the_server() {
         assert!(!row.contains(CLIENT_SECRET), "{row}");
     }
 }
+
+#[tokio::test]
+async fn google_callback_sets_security_headers_rejects_replay_and_caps_per_client() {
+    let stub = Stub::start();
+    let h = harness_with(&stub).await;
+    let (flow_id, state, _) = start_flow(&h).await;
+
+    let resp = h
+        .http
+        .get(format!(
+            "{}/api/auth/google/callback?code=stub-auth-code&state={state}",
+            h.base
+        ))
+        .send()
+        .await
+        .expect("callback");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let headers = resp.headers();
+    assert_eq!(
+        headers["content-security-policy"],
+        "default-src 'none'; style-src 'unsafe-inline'"
+    );
+    assert_eq!(headers["x-content-type-options"], "nosniff");
+    assert_eq!(headers["referrer-policy"], "no-referrer");
+    assert_eq!(headers["x-frame-options"], "DENY");
+
+    // Replaying the same callback state must fail and not re-exchange with Google.
+    let replay = h
+        .http
+        .get(format!(
+            "{}/api/auth/google/callback?code=stub-auth-code&state={state}",
+            h.base
+        ))
+        .send()
+        .await
+        .expect("replay");
+    assert_eq!(replay.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(stub.verifiers.lock().expect("lock").len(), 1);
+
+    let (_, body) = poll(&h, &flow_id).await;
+    assert_eq!(body["status"], "ok", "{body}");
+
+    // Per-IP active flow limit caps concurrent flows before AUTH_REQUESTS_PER_WINDOW.
+    for _ in 0..8 {
+        let started = h
+            .http
+            .post(format!("{}/api/auth/google/start", h.base))
+            .header("x-forwarded-for", "203.0.113.77")
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("start");
+        assert_eq!(started.status(), StatusCode::OK);
+    }
+    let blocked = h
+        .http
+        .post(format!("{}/api/auth/google/start", h.base))
+        .header("x-forwarded-for", "203.0.113.77")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("blocked start");
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other_client = h
+        .http
+        .post(format!("{}/api/auth/google/start", h.base))
+        .header("x-forwarded-for", "198.51.100.77")
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("other client start");
+    assert_eq!(other_client.status(), StatusCode::OK);
+
+    // Poll rate limit is independent per IP.
+    for _ in 0..120 {
+        let resp = h
+            .http
+            .post(format!("{}/api/auth/google/poll", h.base))
+            .header("x-forwarded-for", "203.0.113.99")
+            .json(&json!({ "flowId": "" }))
+            .send()
+            .await
+            .expect("poll");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    let limited_poll = h
+        .http
+        .post(format!("{}/api/auth/google/poll", h.base))
+        .header("x-forwarded-for", "203.0.113.99")
+        .json(&json!({ "flowId": "" }))
+        .send()
+        .await
+        .expect("limited poll");
+    assert_eq!(limited_poll.status(), StatusCode::TOO_MANY_REQUESTS);
+}

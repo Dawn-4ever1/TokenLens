@@ -12,14 +12,23 @@ import { deviceTone } from "./Overview";
 import { ConnectServer } from "./Pairing";
 
 export function Devices() {
-  const { query, timeZone } = useData();
+  const { query, refresh, setFilters, timeZone } = useData();
   const { status } = useStatus();
   const connected = Boolean(status?.server);
+  const selfHosted = Boolean(status?.server && status.server !== status.cloudServer && !status.accountEmail);
   const devices = useDashboard<DevicesData>("devices", query());
   const [adding, setAdding] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const data = devices.data;
   const max = Math.max(0, ...(data?.usage ?? []).map((usage) => usage.totalTokens));
+  const pruneDevice = (deviceId: string) => {
+    setFilters((previous) =>
+      previous.devices.includes(deviceId)
+        ? { ...previous, devices: previous.devices.filter((id) => id !== deviceId) }
+        : previous,
+    );
+    refresh();
+  };
   return (
     <div className="space-y-[var(--stack-space)]">
       <div className="flex flex-wrap items-center gap-3">
@@ -53,7 +62,8 @@ export function Devices() {
                   minCollectorVersion={data.minCollectorVersion}
                   timeZone={timeZone}
                   connected={connected}
-                  onChanged={devices.reload}
+                  onChanged={refresh}
+                  onRevoked={() => pruneDevice(device.deviceId)}
                 />
               ))}
             </div>
@@ -65,6 +75,7 @@ export function Devices() {
         open={adding}
         onOpenChange={setAdding}
         connected={connected}
+        selfHosted={selfHosted}
         onConnect={() => {
           setAdding(false);
           setConnecting(true);
@@ -83,6 +94,7 @@ function DeviceCard({
   timeZone,
   connected,
   onChanged,
+  onRevoked,
 }: {
   device: DeviceStatus;
   usage: DeviceUsage | undefined;
@@ -92,6 +104,7 @@ function DeviceCard({
   /** Controls cloud credentials; never selects which dashboard is shown. */
   connected: boolean;
   onChanged: () => void;
+  onRevoked: () => void;
 }) {
   const tone = deviceTone(device);
   const [dialog, setDialog] = useState<"rename" | "form-factor" | "rotate" | "revoke" | null>(null);
@@ -156,7 +169,7 @@ function DeviceCard({
       {!connected && device.isCurrent ? (
         <LocalDeviceDialog open={dialog === "revoke"} onClose={() => setDialog(null)} onChanged={onChanged} />
       ) : (
-        <RevokeDialog open={dialog === "revoke"} device={device} onClose={() => setDialog(null)} onDone={onChanged} />
+        <RevokeDialog open={dialog === "revoke"} device={device} onClose={() => setDialog(null)} onDone={onRevoked} />
       )}
     </Card>
   );
@@ -220,7 +233,11 @@ function LocalDeviceDialog({ open, onClose, onChanged }: { open: boolean; onClos
   const { set } = useStatus();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (open) setError(null);
+  }, [open]);
   const confirm = async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -269,11 +286,13 @@ function RenameDialog({ open, device, onClose, onDone }: { open: boolean; device
     }
   }, [open, device.displayName]);
   const submit = () => {
+    if (busy) return;
     if (!validDisplayName(name)) {
       setError("名称需要 1–64 个字符。");
       return;
     }
     setBusy(true);
+    setError(null);
     app
       .renameDevice(device.deviceId, name.trim())
       .then(() => {
@@ -284,7 +303,7 @@ function RenameDialog({ open, device, onClose, onDone }: { open: boolean; device
       .finally(() => setBusy(false));
   };
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()} title="重命名设备">
+    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title="重命名设备">
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -295,11 +314,11 @@ function RenameDialog({ open, device, onClose, onDone }: { open: boolean; device
         <Field label="显示名称" hint="只用于看板里区分设备">
           <input value={name} onChange={(event) => setName(event.target.value)} maxLength={64} autoFocus className={inputClass} />
         </Field>
-        {error && <p className="text-xs text-bad">{error}</p>}
+        {error && <p role="alert" className="text-xs text-bad">{error}</p>}
         <div className="flex justify-end gap-2">
-          <Button onClick={onClose}>取消</Button>
+          <Button onClick={onClose} disabled={busy}>取消</Button>
           <Button type="submit" variant="primary" disabled={busy}>
-            保存
+            {busy ? "保存中…" : "保存"}
           </Button>
         </div>
       </form>
@@ -369,7 +388,11 @@ function RotateDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
   const { set } = useStatus();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open) setError(null);
+  }, [open]);
   const confirm = () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     app
@@ -383,13 +406,13 @@ function RotateDialog({ open, onClose, onDone }: { open: boolean; onClose: () =>
       .finally(() => setBusy(false));
   };
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()} title="更换这台电脑的凭据">
+    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title="更换这台电脑的凭据">
       <p className="text-[13px] leading-6 text-ink-2">
         凭据是这台电脑连接服务器时使用的身份钥匙，不是账号密码，也不是服务器地址。更换后旧钥匙立即失效，新钥匙自动保存；历史用量不变，采集和同步继续。一般只在怀疑钥匙泄露时使用。
       </p>
-      {error && <p className="mt-3 text-xs text-bad">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
-        <Button onClick={onClose}>取消</Button>
+        <Button onClick={onClose} disabled={busy}>取消</Button>
         <Button variant="primary" onClick={confirm} disabled={busy}>
           {busy ? "更换中…" : "更换"}
         </Button>
@@ -402,7 +425,11 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
   const { set } = useStatus();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (open) setError(null);
+  }, [open]);
   const confirm = () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     app
@@ -416,7 +443,7 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
       .finally(() => setBusy(false));
   };
   return (
-    <Dialog open={open} onOpenChange={(next) => !next && onClose()} title={`移除「${device.displayName}」`}>
+    <Dialog open={open} onOpenChange={(next) => !busy && !next && onClose()} title={`移除「${device.displayName}」`}>
       <div className="space-y-2 text-[13px] leading-6 text-ink-2">
         <p>这台设备会停止服务器同步，也不能再查看这个服务器上的看板。本机记录继续运行，已上传的历史用量保留。</p>
         {device.isCurrent ? (
@@ -425,9 +452,9 @@ function RevokeDialog({ open, device, onClose, onDone }: { open: boolean; device
           <p>以后想再加入，在那台电脑上重新登录同一个云端账号即可。</p>
         )}
       </div>
-      {error && <p className="mt-3 text-xs text-bad">{error}</p>}
+      {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
       <div className="mt-5 flex justify-end gap-2">
-        <Button onClick={onClose}>取消</Button>
+        <Button onClick={onClose} disabled={busy}>取消</Button>
         <Button variant="danger" onClick={confirm} disabled={busy}>
           {busy ? "移除中…" : "移除"}
         </Button>
@@ -442,11 +469,13 @@ function AddDevice({
   open,
   onOpenChange,
   connected,
+  selfHosted,
   onConnect,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   connected: boolean;
+  selfHosted: boolean;
   onConnect: () => void;
 }) {
   if (!connected) {
@@ -465,6 +494,22 @@ function AddDevice({
         <div className="mt-5 flex justify-end gap-2">
           <Button onClick={() => onOpenChange(false)}>取消</Button>
           <Button variant="primary" onClick={onConnect}>登录这台电脑的云端</Button>
+        </div>
+      </Dialog>
+    );
+  }
+  if (selfHosted) {
+    return (
+      <Dialog open={open} onOpenChange={onOpenChange} title="添加设备">
+        <ol className="list-decimal space-y-2 pl-5 text-sm leading-6 text-ink-2">
+          <li>在另一台电脑上安装并打开 TokenLens。</li>
+          <li>打开登录窗口底部的「使用自己的服务器」，输入当前服务器地址和服务器管理员生成的一次性配对码。</li>
+        </ol>
+        <p className="mt-4 rounded-[var(--radius-control)] bg-surface-2 px-4 py-3 text-[13px] leading-6 text-ink-2">
+          可在自建服务器终端运行 <code className="font-mono">tokenlens-server pair-code create</code> 生成配对码，10 分钟内有效。
+        </p>
+        <div className="mt-5 flex justify-end">
+          <Button variant="primary" onClick={() => onOpenChange(false)}>完成</Button>
         </div>
       </Dialog>
     );
@@ -491,7 +536,7 @@ function Coverage({ data, timeZone }: { data: DevicesData; timeZone: string }) {
   if (!data.devices.length || !columns.length) return null;
   // The first unused column gets a divider so the two groups read apart.
   const divider = (client: string) => used.length > 0 && client === unused[0] && "border-l border-line";
-  const sticky = "sticky left-0 z-10 bg-surface";
+  const sticky = "coverage-sticky sticky left-0 z-10 bg-surface";
   return (
     <Card title="Agent 覆盖" subtitle="装过或用过的 agent 排在最前；其余按热度排序。「—」表示这台电脑上没有装或没用过">
       <div className="overflow-x-auto">

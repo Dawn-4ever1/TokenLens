@@ -3,10 +3,11 @@
 //! The child prints one JSON object per line. Its stderr may contain upstream
 //! messages with paths, so the parent only counts those lines.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,7 @@ pub enum FailureKind {
     Spawn,
     Exit(Option<i32>),
     Timeout,
+    Cancelled,
     Protocol,
     InvalidEvent,
     MissingDone,
@@ -46,6 +48,7 @@ impl FailureKind {
             Self::Exit(Some(code)) => format!("exit-{code}"),
             Self::Exit(None) => "signal".to_owned(),
             Self::Timeout => "timeout".to_owned(),
+            Self::Cancelled => "cancelled".to_owned(),
             Self::Protocol => "protocol".to_owned(),
             Self::InvalidEvent => "invalid-event".to_owned(),
             Self::MissingDone => "missing-done".to_owned(),
@@ -91,6 +94,7 @@ struct Parsed {
 /// never blocks on a full pipe.
 fn parse_stdout(reader: impl Read, keep: Option<&KeepPayload>) -> Parsed {
     let mut parsed = Parsed::default();
+    let mut index_by_key: HashMap<String, usize> = HashMap::new();
     for line in BufReader::new(reader).split(b'\n') {
         let Ok(line) = line else {
             parsed.error.get_or_insert(FailureKind::Protocol);
@@ -115,13 +119,20 @@ fn parse_stdout(reader: impl Read, keep: Option<&KeepPayload>) -> Parsed {
                     .filter(|keep| keep(&event.event_key, &hash))
                     .and_then(|_| event.to_json_value().ok())
                     .map(|value| crate::canonical_json(&value));
-                parsed.events.push(ScannedEvent {
+                let scanned = ScannedEvent {
                     hash,
                     key: event.event_key,
                     client: event.client,
                     ts: event.ts,
                     payload,
-                });
+                };
+                if let Some(&index) = index_by_key.get(&scanned.key) {
+                    parsed.events[index] = scanned;
+                } else {
+                    let index = parsed.events.len();
+                    index_by_key.insert(scanned.key.clone(), index);
+                    parsed.events.push(scanned);
+                }
             }
             Ok(WorkerLine::Done { counts, cached, .. }) => parsed.done = Some((counts, cached)),
             Err(_) => parsed.error = Some(FailureKind::Protocol),
@@ -144,18 +155,30 @@ fn count_lines(reader: impl Read) -> u64 {
     count
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitOutcome {
+    Exited(Option<i32>),
+    TimedOut,
+    Cancelled,
+}
+
 #[cfg(unix)]
 fn wait_child(
     child: &mut std::process::Child,
     deadline: Instant,
-) -> (Option<Option<i32>>, Option<Duration>, Option<u64>) {
+    cancel: Option<&AtomicBool>,
+) -> (WaitOutcome, Option<Duration>, Option<u64>) {
     let pid = child.id() as libc::pid_t;
-    let mut killed = false;
+    let mut killed_reason: Option<WaitOutcome> = None;
     loop {
         let mut status = 0;
         // SAFETY: rusage is plain data and the pid is our own unreaped child.
         let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
-        let flags = if killed { 0 } else { libc::WNOHANG };
+        let flags = if killed_reason.is_some() {
+            0
+        } else {
+            libc::WNOHANG
+        };
         let result = unsafe { libc::wait4(pid, &mut status, flags, &mut usage) };
         if result == pid {
             let to_duration = |time: libc::timeval| {
@@ -168,22 +191,36 @@ fn wait_child(
             } else {
                 (usage.ru_maxrss as u64).saturating_mul(1024)
             };
-            let exit = if killed {
-                None
-            } else if libc::WIFEXITED(status) {
-                Some(Some(libc::WEXITSTATUS(status)))
-            } else {
-                Some(None)
+            let outcome = match killed_reason {
+                Some(reason) => reason,
+                None if libc::WIFEXITED(status) => {
+                    WaitOutcome::Exited(Some(libc::WEXITSTATUS(status)))
+                }
+                None => WaitOutcome::Exited(None),
             };
-            return (exit, Some(cpu), Some(rss));
+            return (outcome, Some(cpu), Some(rss));
         }
         if result < 0 {
-            return (Some(None), None, None);
+            if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return (
+                killed_reason.unwrap_or(WaitOutcome::Exited(None)),
+                None,
+                None,
+            );
         }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            killed = true;
-            continue;
+        if killed_reason.is_none() {
+            if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                let _ = child.kill();
+                killed_reason = Some(WaitOutcome::Cancelled);
+                continue;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                killed_reason = Some(WaitOutcome::TimedOut);
+                continue;
+            }
         }
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -193,17 +230,23 @@ fn wait_child(
 fn wait_child(
     child: &mut std::process::Child,
     deadline: Instant,
-) -> (Option<Option<i32>>, Option<Duration>, Option<u64>) {
+    cancel: Option<&AtomicBool>,
+) -> (WaitOutcome, Option<Duration>, Option<u64>) {
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return (Some(status.code()), None, None),
+            Ok(Some(status)) => return (WaitOutcome::Exited(status.code()), None, None),
+            Ok(None) if cancel.is_some_and(|flag| flag.load(Ordering::Relaxed)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return (WaitOutcome::Cancelled, None, None);
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return (None, None, None);
+                return (WaitOutcome::TimedOut, None, None);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(_) => return (Some(None), None, None),
+            Err(_) => return (WaitOutcome::Exited(None), None, None),
         }
     }
 }
@@ -237,9 +280,18 @@ pub fn lower_own_priority() {
 }
 
 pub fn run(
+    command: Command,
+    timeout: Duration,
+    keep: Option<KeepPayload>,
+) -> Result<WorkerOutput, WorkerFailure> {
+    run_cancellable(command, timeout, keep, None)
+}
+
+pub fn run_cancellable(
     mut command: Command,
     timeout: Duration,
     keep: Option<KeepPayload>,
+    cancel: Option<Arc<AtomicBool>>,
 ) -> Result<WorkerOutput, WorkerFailure> {
     command
         .stdin(Stdio::null())
@@ -258,7 +310,7 @@ pub fn run(
             .unwrap_or_default()
     });
     let stderr_thread = std::thread::spawn(move || stderr.map(count_lines).unwrap_or(0));
-    let (exit, cpu, max_rss_bytes) = wait_child(&mut child, start + timeout);
+    let (outcome, cpu, max_rss_bytes) = wait_child(&mut child, start + timeout, cancel.as_deref());
     let parsed = stdout_thread.join().unwrap_or_default();
     let usage = ChildUsage {
         wall: start.elapsed(),
@@ -266,10 +318,11 @@ pub fn run(
         max_rss_bytes,
         stderr_lines: stderr_thread.join().unwrap_or(0),
     };
-    match exit {
-        None => return Err(failure(FailureKind::Timeout, usage)),
-        Some(Some(0)) => {}
-        Some(code) => return Err(failure(FailureKind::Exit(code), usage)),
+    match outcome {
+        WaitOutcome::TimedOut => return Err(failure(FailureKind::Timeout, usage)),
+        WaitOutcome::Cancelled => return Err(failure(FailureKind::Cancelled, usage)),
+        WaitOutcome::Exited(Some(0)) => {}
+        WaitOutcome::Exited(code) => return Err(failure(FailureKind::Exit(code), usage)),
     }
     if let Some(kind) = parsed.error {
         return Err(failure(kind, usage));
@@ -397,5 +450,47 @@ mod tests {
             run(shell("exec sleep 5"), Duration::from_millis(200), None).expect_err("timeout");
         assert_eq!(failure.kind, FailureKind::Timeout);
         assert!(failure.usage.wall < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn duplicate_event_keys_collapse_to_last_and_cancel_stops_worker_promptly() {
+        let first = synthetic_event();
+        let mut second = first.clone();
+        second.output = 999;
+        let first_line = serde_json::to_string(&WorkerLine::Event {
+            event: Box::new(first),
+        })
+        .unwrap();
+        let second_line = serde_json::to_string(&WorkerLine::Event {
+            event: Box::new(second.clone()),
+        })
+        .unwrap();
+        let done = serde_json::to_string(&WorkerLine::Done {
+            counts: [("codex".to_owned(), 2)].into(),
+            cached: false,
+            elapsed_ms: 5,
+        })
+        .unwrap();
+        let script = format!("printf '%s\\n%s\\n%s\\n' '{first_line}' '{second_line}' '{done}'");
+        let keep: KeepPayload = Arc::new(|_, _| true);
+        let output = run(shell(&script), Duration::from_secs(10), Some(keep)).unwrap();
+        assert_eq!(output.events.len(), 1);
+        assert_eq!(output.events[0].hash, crate::event_value_hash(&second));
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(80));
+            signal.store(true, Ordering::SeqCst);
+        });
+        let failure = run_cancellable(
+            shell("exec sleep 5"),
+            Duration::from_secs(10),
+            None,
+            Some(cancel),
+        )
+        .expect_err("cancelled");
+        assert_eq!(failure.kind, FailureKind::Cancelled);
+        assert!(failure.usage.wall < Duration::from_secs(2));
     }
 }

@@ -774,3 +774,61 @@ async fn download_asset_supports_resumable_byte_ranges_and_prunes_older_versions
     assert_eq!(bad_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(bad_range.headers()["content-range"], "bytes */38");
 }
+
+#[tokio::test]
+async fn one_byte_probes_do_not_count_and_dot_segments_are_blocked() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let upstream = upstream();
+    let mirror = open_mirror(root.path(), Arc::clone(&upstream));
+    mirror.sync().await.expect("sync");
+    let harness =
+        Harness::start_with_mirror_and_stats(Arc::clone(&mirror), Some("probe-stats-token")).await;
+    let url = format!(
+        "{}/downloads/v1.2.3/TokenLens_1.2.3_x64-setup.exe?source=website",
+        harness.base
+    );
+
+    let probe = harness
+        .http
+        .get(&url)
+        .header("range", "bytes=0-0")
+        .send()
+        .await
+        .expect("probe");
+    assert_eq!(probe.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(probe.bytes().await.expect("byte").len(), 1);
+    harness.state.flush_site_metrics().await;
+    assert_eq!(
+        harness.count(
+            "SELECT COALESCE(SUM(count), 0) FROM site_daily_counts WHERE metric = 'download_file_windows'"
+        ),
+        0
+    );
+
+    let real = harness
+        .http
+        .get(&url)
+        .header("range", "BYTES=0-7")
+        .send()
+        .await
+        .expect("case-insensitive range");
+    assert_eq!(real.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(real.bytes().await.expect("bytes").as_ref(), b"offline ");
+    harness.state.flush_site_metrics().await;
+    assert_eq!(
+        harness.count("SELECT count FROM site_daily_counts WHERE metric = 'download_file_windows'"),
+        1
+    );
+
+    let current = "https://github.com/Dawn-4ever1/TokenLens/releases/download/v1.2.3/latest.json";
+    for bad in [
+        "https://github.com/Dawn-4ever1/TokenLens/releases/download/v1.2.3/../v1.2.3/latest.json",
+        "https://github.com/Dawn-4ever1/TokenLens/releases/download/v1.2.3/%2e%2e/latest.json",
+        "https://github.com/Dawn-4ever1/TokenLens/releases/download//v1.2.3/latest.json",
+    ] {
+        assert!(
+            tokenlens_server::release_mirror::checked_redirect(current, bad).is_err(),
+            "{bad} must be rejected"
+        );
+    }
+}

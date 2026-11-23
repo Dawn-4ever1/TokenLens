@@ -5,6 +5,9 @@ on:
     branches: ["main"]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -69,3 +72,36 @@ jobs:
         run: npm test
       - name: Release and privacy script tests
         run: node --test scripts/release-metadata.test.mjs scripts/check-bundle-privacy.test.mjs
+
+  rust-platform-check:
+    name: Rust compile check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_TERM_COLOR: always
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Placeholder frontend dist for Tauri embed check
+        shell: bash
+        run: mkdir -p app/dist && touch app/dist/index.html
+      - name: Install Rust stable
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+      - name: Cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-check-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ci-check-${{ runner.os }}-
+      - name: Check workspace compilation
+        run: cargo check --workspace --all-targets

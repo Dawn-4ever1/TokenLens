@@ -183,7 +183,7 @@ pub async fn site_stats_page(State(state): State<AppState>, Path(token): Path<St
     let Some(rows) = state.site_stats_report(30).await else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "统计暂时不可用").into_response();
     };
-    let content = render_stats_page(&rows, &state.local_time_label());
+    let content = render_stats_page(&rows, &state.local_time_label(), state.time_zone_label());
     let mut response = page(&content, "text/html; charset=utf-8", "no-store");
     let headers = response.headers_mut();
     headers.insert(
@@ -210,7 +210,7 @@ fn token_matches(expected: &str, provided: &str) -> bool {
     difference == 0
 }
 
-fn render_stats_page(rows: &[DayRow], updated: &str) -> String {
+fn render_stats_page(rows: &[DayRow], updated: &str, time_zone: &str) -> String {
     let today = rows
         .last()
         .map_or_else(DailyCounts::default, |row| row.counts);
@@ -266,7 +266,7 @@ fn render_stats_page(rows: &[DayRow], updated: &str) -> String {
         <header class="policy-header">
           <p class="eyebrow">TokenLens · 仅管理员</p>
           <h1>官网访问统计</h1>
-          <p class="policy-updated">更新至 {updated}（北京时间）· 只累计次数，不识别访客</p>
+          <p class="policy-updated">更新至 {updated}（{time_zone}）· 只累计次数，不识别访客</p>
           <p class="policy-lead">这里只记录每天官网被打开和安装包被下载的次数，不保存 IP、浏览器标识或 Cookie，无法知道具体是谁。发布验收、自动检查和镜像同步也可能计入，所以这些数字不是“人数”。</p>
         </header>
         <div class="stats-summary">

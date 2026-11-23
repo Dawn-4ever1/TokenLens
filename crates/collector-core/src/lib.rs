@@ -20,7 +20,7 @@ pub mod worker_cli;
 pub const TOKSCALE_REV: &str = "e9cf1041af784bdaa4e217978f89f2168e731b69";
 /// Changes whenever parsing, mapping, Qoder handling or `event_key` rules
 /// change; a new value makes every event queue for upload once more.
-pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-4.qoder-3.titles-1.key-1";
+pub const PARSER_GENERATION: &str = "tokscale-e9cf1041.map-5.qoder-4.titles-3.key-1";
 
 pub use mapping::{
     EventKeySetDigest, MappingError, canonical_json, event_key_set_digest, event_value_digest,
@@ -101,8 +101,8 @@ impl Config {
                 let mut validated = Vec::new();
                 for id in clients {
                     let id = normalize_id(id);
-                    if id == QODER_CLIENT {
-                        // The international adapter is controlled by `exclude`.
+                    if id == QODER_CLIENT || id == QODER_CN_CLIENT {
+                        // Qoder adapters are controlled via explicit selection and `exclude`.
                         continue;
                     }
                     let Some(client) = ClientId::from_str(&id) else {
@@ -129,7 +129,10 @@ impl Config {
         assert_safe_clients(&selected)?;
         // Upstream interprets an empty list as "all clients"; never let an
         // exclusion-only selection accidentally re-enable qoder.
-        if selected.is_empty() {
+        if selected.is_empty()
+            && (matches!(self.clients, Clients::Auto(_))
+                || (!self.qoder_enabled() && !self.qoder_cn_enabled()))
+        {
             return Err(Error::Config(
                 "no clients remain after auto-discovery and exclusions".to_owned(),
             ));
@@ -137,11 +140,27 @@ impl Config {
         Ok(selected)
     }
 
+    fn explicit_selected(&self, target: &str) -> bool {
+        match &self.clients {
+            Clients::Auto(_) => true,
+            Clients::Explicit(clients) => clients.iter().any(|id| normalize_id(id) == target),
+        }
+    }
+
     pub fn qoder_enabled(&self) -> bool {
-        !self
-            .exclude
-            .iter()
-            .any(|id| normalize_id(id) == QODER_CLIENT)
+        self.explicit_selected(QODER_CLIENT)
+            && !self
+                .exclude
+                .iter()
+                .any(|id| normalize_id(id) == QODER_CLIENT)
+    }
+
+    pub fn qoder_cn_enabled(&self) -> bool {
+        self.explicit_selected(QODER_CN_CLIENT)
+            && !self
+                .exclude
+                .iter()
+                .any(|id| normalize_id(id) == QODER_CN_CLIENT)
     }
 }
 
@@ -422,7 +441,7 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
     let mut listed = upstream;
     let mut combined = messages;
     if include_qoder {
-        let qoder = qoder::scan_home(&options.home, range)?;
+        let qoder = qoder::scan_home_with_env(&options.home, options.use_env_roots, range)?;
         let qoder_events = qoder.events;
         let qoder_ide = qoder_ide::scan_home(&options.home, options.use_env_roots, range)?;
         combined.extend(qoder_events.iter().map(qoder_message_for_summary));
@@ -431,10 +450,7 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
         events.extend(qoder_ide);
         listed.push(QODER_CLIENT.to_owned());
     }
-    if !config
-        .exclude
-        .iter()
-        .any(|id| normalize_id(id) == QODER_CN_CLIENT)
+    if config.qoder_cn_enabled()
         && options
             .clients
             .as_ref()
@@ -444,20 +460,30 @@ pub fn scan_with(config: &Config, options: &ScanOptions) -> Result<ScanReport, E
         let cn_projects = qoder::scan_home_cn(&options.home, options.use_env_roots, range)?;
         // Old bridge copies of international sessions may still sit under
         // ~/.qoder-cn/projects. Session + time + model identify a copied row;
-        // skip it instead of counting it as CN a second time. Even when the
+        // skip it instead of counting it as CN a second time, without ever
+        // deduplicating legitimate CN events against each other. Even when the
         // international client is filtered out, read it for this comparison.
-        let mut seen: std::collections::HashSet<_> = events
+        let mut intl_seen: std::collections::HashSet<_> = events
             .iter()
             .filter(|event| event.client == QODER_CLIENT)
             .map(qoder_fingerprint)
             .collect();
         if !include_qoder {
-            let international = qoder::scan_home(&options.home, range)?;
-            seen.extend(international.events.iter().map(qoder_fingerprint));
+            let international =
+                qoder::scan_home_with_env(&options.home, options.use_env_roots, range)?;
+            let international_ide =
+                qoder_ide::scan_home(&options.home, options.use_env_roots, range)?;
+            intl_seen.extend(
+                international
+                    .events
+                    .into_iter()
+                    .chain(international_ide)
+                    .map(|event| qoder_fingerprint(&event)),
+            );
         }
-        let mut cn_events = Vec::new();
-        for event in cn_ide.into_iter().chain(cn_projects.events) {
-            if seen.insert(qoder_fingerprint(&event)) {
+        let mut cn_events = cn_ide;
+        for event in cn_projects.events {
+            if !intl_seen.contains(&qoder_fingerprint(&event)) {
                 cn_events.push(event);
             }
         }
@@ -1016,5 +1042,185 @@ mod tests {
         )
         .expect("scan with antigravity-extension excluded");
         assert!(excluded.events.is_empty());
+    }
+
+    #[test]
+    fn t3_and_standalone_antigravity_enrich_titles_and_group_subagents_without_changing_keys() {
+        let home = tempfile::tempdir().expect("home");
+        write_antigravity_db(
+            &home
+                .path()
+                .join(".gemini/antigravity/conversations/s-root.db"),
+            &[("resp-s-root", 100, 20, 5, 10)],
+        );
+        write_antigravity_db(
+            &home
+                .path()
+                .join(".gemini/antigravity/conversations/s-sub.db"),
+            &[("resp-s-sub", 50, 10, 2, 5)],
+        );
+        write_antigravity_db(
+            &home.path().join(
+                ".t3/userdata/providers/antigravity/inst-1/antigravity-acp/conversations/t3-root.db",
+            ),
+            &[("resp-t3-root", 200, 40, 10, 20)],
+        );
+        write_antigravity_db(
+            &home.path().join(
+                ".t3/userdata/providers/antigravity/inst-1/antigravity-acp/conversations/t3-sub.db",
+            ),
+            &[("resp-t3-sub", 80, 15, 3, 8)],
+        );
+
+        let options = ScanOptions {
+            home: home.path().to_path_buf(),
+            use_env_roots: false,
+            clients: Some(BTreeSet::from(["antigravity-extension".to_owned()])),
+            range: DateRange::all_history(),
+            upstream_cache: false,
+            project_salt: None,
+        };
+        let before = scan_with(&Config::default(), &options).expect("scan before titles");
+        assert_eq!(before.events.len(), 4);
+        assert!(before.events.iter().all(|e| e.session_title.is_none()));
+        assert!(before.events.iter().all(|e| e.parent_session_id.is_none()));
+        let before_digest = event_key_set_digest(&before.events);
+        let before_tokens: (u64, u64, u64, u64) =
+            before.events.iter().fold((0, 0, 0, 0), |(i, o, cr, r), e| {
+                (
+                    i + e.input,
+                    o + e.output,
+                    cr + e.cache_read,
+                    r + e.reasoning,
+                )
+            });
+
+        let standalone_sum = home
+            .path()
+            .join(".gemini/antigravity/conversation_summaries.db");
+        let conn = rusqlite::Connection::open(&standalone_sum).expect("standalone summary db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('s-root', 'Standalone Root Title', 'never read', '');
+             INSERT INTO conversation_summaries VALUES ('s-sub', '', 'subagent preview', 's-root');",
+        )
+        .expect("seed standalone summaries");
+        drop(conn);
+
+        let t3_sum = home.path().join(
+            ".t3/userdata/providers/antigravity/inst-1/antigravity-acp/conversation_summaries.db",
+        );
+        let conn = rusqlite::Connection::open(&t3_sum).expect("t3 summary db");
+        conn.execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', preview TEXT NOT NULL DEFAULT '', parent_conversation_id TEXT NOT NULL DEFAULT '');
+             INSERT INTO conversation_summaries VALUES ('t3-root', 'Internal English Title', 'never read', '');
+             INSERT INTO conversation_summaries VALUES ('t3-sub', '', 'subagent preview', 't3-root');",
+        )
+        .expect("seed t3 summaries");
+        drop(conn);
+
+        let state_db = home.path().join(".t3/userdata/statev2.sqlite");
+        let conn = rusqlite::Connection::open(&state_db).expect("t3 state db");
+        conn.execute_batch(
+            "CREATE TABLE orchestration_v2_projection_threads (thread_id TEXT PRIMARY KEY, title TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT);
+             CREATE TABLE orchestration_v2_projection_provider_threads (provider_thread_id TEXT PRIMARY KEY, thread_id TEXT, provider TEXT NOT NULL, updated_at TEXT NOT NULL, payload_json TEXT NOT NULL);
+             INSERT INTO orchestration_v2_projection_threads VALUES ('th-1', 'T3 中文侧栏标题', '2026-11-23T10:00:00Z', NULL);
+             INSERT INTO orchestration_v2_projection_provider_threads VALUES ('pt-1', 'th-1', 'antigravity', '2026-11-23T10:00:00Z', '{\"nativeThreadRef\":{\"nativeId\":\"t3-root\"}}');",
+        )
+        .expect("seed statev2");
+        drop(conn);
+
+        let after = scan_with(&Config::default(), &options).expect("scan after titles");
+        assert_eq!(after.events.len(), 4);
+        assert_eq!(event_key_set_digest(&after.events), before_digest);
+        let after_tokens: (u64, u64, u64, u64) =
+            after.events.iter().fold((0, 0, 0, 0), |(i, o, cr, r), e| {
+                (
+                    i + e.input,
+                    o + e.output,
+                    cr + e.cache_read,
+                    r + e.reasoning,
+                )
+            });
+        assert_eq!(after_tokens, before_tokens);
+
+        let by_session: BTreeMap<&str, &usage_event::UsageEvent> = after
+            .events
+            .iter()
+            .map(|e| (e.session_id.as_str(), e))
+            .collect();
+        assert_eq!(
+            by_session["s-root"].session_title.as_deref(),
+            Some("Standalone Root Title")
+        );
+        assert_eq!(by_session["s-root"].parent_session_id, None);
+        assert_eq!(
+            by_session["s-sub"].session_title.as_deref(),
+            Some("Standalone Root Title")
+        );
+        assert_eq!(
+            by_session["s-sub"].parent_session_id.as_deref(),
+            Some("s-root")
+        );
+        assert_eq!(
+            by_session["t3-root"].session_title.as_deref(),
+            Some("T3 中文侧栏标题")
+        );
+        assert_eq!(by_session["t3-root"].parent_session_id, None);
+        assert_eq!(
+            by_session["t3-sub"].session_title.as_deref(),
+            Some("T3 中文侧栏标题")
+        );
+        assert_eq!(
+            by_session["t3-sub"].parent_session_id.as_deref(),
+            Some("t3-root")
+        );
+    }
+
+    #[test]
+    fn qoder_cn_keeps_same_second_cn_events_and_config_respects_explicit_clients() {
+        let home = tempfile::tempdir().expect("home");
+        let cn_projects = home.path().join(".qoder-cn/projects");
+        std::fs::create_dir_all(&cn_projects).unwrap();
+        std::fs::write(
+            cn_projects.join("cn.jsonl"),
+            concat!(
+                r#"{"type":"assistant","sessionId":"cn-sess","timestamp":"2026-11-01T10:00:00Z","message":{"id":"cn-m1","model":"qwen3-coder","usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":0}}}"#,
+                "\n",
+                r#"{"type":"assistant","sessionId":"cn-sess","timestamp":"2026-11-01T10:00:00Z","message":{"id":"cn-m2","model":"qwen3-coder","usage":{"input_tokens":200,"output_tokens":20,"cache_read_input_tokens":0}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let cn_only_cfg = Config {
+            clients: Clients::Explicit(vec!["qoder-cn".into()]),
+            exclude: vec![],
+        };
+        assert!(!cn_only_cfg.qoder_enabled());
+        assert!(cn_only_cfg.qoder_cn_enabled());
+        assert!(cn_only_cfg.selected().unwrap().is_empty());
+
+        let report = scan_with(
+            &cn_only_cfg,
+            &ScanOptions {
+                home: home.path().to_path_buf(),
+                use_env_roots: false,
+                clients: None,
+                range: DateRange::all_history(),
+                upstream_cache: false,
+                project_salt: None,
+            },
+        )
+        .expect("cn only scan");
+        assert_eq!(report.events.len(), 2);
+        assert!(report.events.iter().all(|e| e.client == QODER_CN_CLIENT));
+
+        let codex_only = Config {
+            clients: Clients::Explicit(vec!["codex".into()]),
+            exclude: vec![],
+        };
+        assert!(!codex_only.qoder_enabled());
+        assert!(!codex_only.qoder_cn_enabled());
+        assert_eq!(codex_only.selected().unwrap(), ["codex"]);
     }
 }

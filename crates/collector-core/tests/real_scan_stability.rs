@@ -52,3 +52,59 @@ fn real_local_scans_have_identical_event_key_set_hashes_and_counts() {
         first_qoder.0.sha256
     );
 }
+
+/// Read-only local Antigravity count verification. Prints integer counts only:
+/// no titles, session IDs, keys, or paths are ever written.
+#[test]
+#[ignore]
+fn real_antigravity_metadata_counts_only() {
+    use std::collections::BTreeSet;
+
+    let config = Config::load(&collector_core::default_config_path().expect("config path"))
+        .expect("local config");
+    let report = scan(&config, DateRange::all_history()).expect("full read-only scan");
+    for client in ["antigravity-extension", "antigravity-cli"] {
+        let events: Vec<_> = report
+            .events
+            .iter()
+            .filter(|event| event.client == client)
+            .collect();
+        let roots: BTreeSet<&str> = events
+            .iter()
+            .map(|event| {
+                event
+                    .parent_session_id
+                    .as_deref()
+                    .unwrap_or(event.session_id.as_str())
+            })
+            .collect();
+        let titled_roots: BTreeSet<&str> = events
+            .iter()
+            .filter(|event| event.session_title.is_some())
+            .map(|event| {
+                event
+                    .parent_session_id
+                    .as_deref()
+                    .unwrap_or(event.session_id.as_str())
+            })
+            .collect();
+        let subagents: BTreeSet<&str> = events
+            .iter()
+            .filter(|event| event.parent_session_id.is_some())
+            .map(|event| event.session_id.as_str())
+            .collect();
+        let total_tokens: u64 = events
+            .iter()
+            .map(|event| {
+                event.input + event.output + event.cache_read + event.cache_write + event.reasoning
+            })
+            .sum();
+        println!(
+            "{client}: events={} root_sessions={} titled_roots={} subagent_sessions={} total_tokens={total_tokens}",
+            events.len(),
+            roots.len(),
+            titled_roots.len(),
+            subagents.len(),
+        );
+    }
+}

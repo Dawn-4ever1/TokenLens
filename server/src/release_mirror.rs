@@ -111,6 +111,7 @@ pub struct Snapshot {
     manifest: Vec<u8>,
     directory: PathBuf,
     locations: BTreeMap<String, String>,
+    sizes: BTreeMap<String, u64>,
     // SHA256SUMS authenticates the other six files. This digest authenticates
     // SHA256SUMS itself after it has validated every one of those entries.
     sums_digest: String,
@@ -128,6 +129,10 @@ impl Snapshot {
 
     pub fn location(&self, filename: &str) -> Option<&str> {
         self.locations.get(filename).map(String::as_str)
+    }
+
+    pub fn stat_asset(&self, filename: &str) -> Option<u64> {
+        self.sizes.get(filename).copied()
     }
 
     pub fn file_path(&self, filename: &str) -> Option<PathBuf> {
@@ -323,12 +328,21 @@ fn uri_allowed(uri: &ureq::http::Uri) -> bool {
         // form of IP/localhost endpoint, including in redirects.
         return false;
     }
+    let path = uri.path();
+    let lowered_path = path.to_ascii_lowercase();
+    if path.contains("//")
+        || path.contains('\\')
+        || lowered_path.contains("%2e")
+        || path.split('/').any(|segment| matches!(segment, "." | ".."))
+    {
+        return false;
+    }
     match authority.host() {
         // Release pages carry no query; their assets do carry GitHub's signed
         // download token in the query, which is required and short-lived.
-        "github.com" => uri.query().is_none() && uri.path().starts_with(RELEASE_PATH),
+        "github.com" => uri.query().is_none() && path.starts_with(RELEASE_PATH),
         REDIRECT_HOST => {
-            uri.query().is_some() && uri.path().starts_with("/github-production-release-asset/")
+            uri.query().is_some() && path.starts_with("/github-production-release-asset/")
         }
         _ => false,
     }
@@ -568,11 +582,17 @@ impl ReleaseMirror {
             // is live. Never remove the old current directory first.
             fs::rename(&next_pointer, &pointer)?;
             sync_dir(&self.root)?;
+            let sizes = candidate
+                .files
+                .iter()
+                .map(|(name, bytes)| (name.clone(), bytes.len() as u64))
+                .collect();
             let snapshot = Arc::new(Snapshot {
                 manifest: public_manifest(&candidate, &self.public_base)?,
                 version: candidate.version.clone(),
                 directory: final_dir,
                 locations: asset_locations(&candidate.version, &self.public_base),
+                sizes,
                 sums_digest: hex_sha256(&candidate.files[SUMS_FILE]),
                 checksums: parse_sums(candidate.files[SUMS_FILE].as_slice())?,
             });
@@ -689,11 +709,17 @@ impl ReleaseMirror {
             files: updater_bytes,
         };
         verify_updaters(&candidate, &self.public_key)?;
+        let sizes = candidate
+            .files
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.len() as u64))
+            .collect();
         let snapshot = Snapshot {
             manifest: public_manifest(&candidate, &self.public_base)?,
             version: candidate.version.clone(),
             directory,
             locations: asset_locations(&candidate.version, &self.public_base),
+            sizes,
             sums_digest,
             checksums: sums,
         };
@@ -775,6 +801,9 @@ fn verify_manifest(manifest: Vec<u8>) -> Result<Candidate, MirrorError> {
         serde_json::from_slice(&manifest).map_err(|_| MirrorError::new(ErrorKind::Manifest))?;
     let version =
         Version::parse(&parsed.version).map_err(|_| MirrorError::new(ErrorKind::Manifest))?;
+    if version.build != semver::BuildMetadata::EMPTY {
+        return Err(MirrorError::new(ErrorKind::Manifest));
+    }
     if parsed.platforms.len() != 2
         || parsed.notes.len() > 32 * 1024
         || parsed.pub_date.len() > 64

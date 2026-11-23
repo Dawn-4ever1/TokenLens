@@ -55,7 +55,7 @@ pub fn bridge_change() -> NaiveDateTime {
 }
 
 pub fn hub_client_for(ours: &str) -> String {
-    if ours == collector_core::QODER_CLIENT {
+    if ours == collector_core::QODER_CLIENT || ours == collector_core::QODER_CN_CLIENT {
         return HUB_QODER_CLIENT.to_owned();
     }
     let lower = ours.trim().to_ascii_lowercase();
@@ -880,19 +880,23 @@ pub fn render(
     let _ = writeln!(out, "\n## client 对应关系\n");
     let _ = writeln!(out, "| 我们 | Hub | 说明 |\n|---|---|---|");
     for (ours, hub) in &rec.mapping {
-        let note = if ours == collector_core::QODER_CLIENT {
-            "我们读 Qoder 国际版自己的记录；Hub 的 qodercn 来自桥接镜像"
-        } else if ours == hub {
-            "同名"
-        } else {
-            "Token Monitor 的别名"
-        };
+        let note =
+            if ours == collector_core::QODER_CLIENT || ours == collector_core::QODER_CN_CLIENT {
+                "我们读 Qoder 自己的记录；Hub 的 qodercn 来自桥接镜像"
+            } else if ours == hub {
+                "同名"
+            } else {
+                "Token Monitor 的别名"
+            };
         let _ = writeln!(out, "| {ours} | {hub} | {note} |");
     }
     for hub in &rec.hub_only_clients {
         let _ = writeln!(out, "| （本机没有） | {hub} | 只有 Hub 有 |");
     }
-    if !hub_has_qoder_mirror && rec.mapping.contains_key(collector_core::QODER_CLIENT) {
+    if !hub_has_qoder_mirror
+        && (rec.mapping.contains_key(collector_core::QODER_CLIENT)
+            || rec.mapping.contains_key(collector_core::QODER_CN_CLIENT))
+    {
         let _ = writeln!(out, "\nHub 在这段时间没有 qodercn 数据。");
     }
 

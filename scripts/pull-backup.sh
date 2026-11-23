@@ -8,6 +8,7 @@
 #   TOKENLENS_SSH_KEY=~/.ssh/my_key \
 #   ./scripts/pull-backup.sh [local-backup-dir]
 set -eu
+umask 077
 
 target="${TOKENLENS_SSH_TARGET:-}"
 if [ -z "$target" ]; then
@@ -18,24 +19,37 @@ fi
 dest_dir="${1:-${TOKENLENS_BACKUP_DEST_DIR:-$HOME/Documents/TokenLens-backups}}"
 remote_deploy="${TOKENLENS_REMOTE_DEPLOY_DIR:-/opt/tokenlens/deploy}"
 keep_days="${KEEP_DAYS:-30}"
+case "$keep_days" in
+  ''|*[!0-9]*)
+    echo "KEEP_DAYS must be a non-negative integer, got: $keep_days" >&2
+    exit 2
+    ;;
+esac
+case "$remote_deploy" in
+  ''|*[!A-Za-z0-9_./:@+-]*)
+    echo "TOKENLENS_REMOTE_DEPLOY_DIR contains unsafe characters: $remote_deploy" >&2
+    exit 2
+    ;;
+esac
 
 mkdir -p "$dest_dir"
 chmod 700 "$dest_dir"
 
-ssh_opts="-o BatchMode=yes -o ConnectTimeout=15"
-if [ -n "${TOKENLENS_SSH_KEY:-}" ]; then
-  ssh_opts="$ssh_opts -i $TOKENLENS_SSH_KEY -o IdentitiesOnly=yes"
-fi
+run_ssh() {
+  if [ -n "${TOKENLENS_SSH_KEY:-}" ]; then
+    ssh -o BatchMode=yes -o ConnectTimeout=15 -i "$TOKENLENS_SSH_KEY" -o IdentitiesOnly=yes "$target" "$@"
+  else
+    ssh -o BatchMode=yes -o ConnectTimeout=15 "$target" "$@"
+  fi
+}
 
 # Refresh an online backup on the server first unless SKIP_REMOTE_BACKUP=1.
 if [ "${SKIP_REMOTE_BACKUP:-0}" != "1" ]; then
-  # shellcheck disable=SC2086
-  ssh $ssh_opts "$target" "cd '$remote_deploy' && sudo sh ./backup.sh </dev/null"
+  run_ssh "cd '$remote_deploy' && sudo sh ./backup.sh </dev/null"
 fi
 
 # Read the newest backup filename and its SHA-256 on the server.
-# shellcheck disable=SC2086
-meta=$(ssh $ssh_opts "$target" "sudo sh -c '
+meta=$(run_ssh "sudo sh -c '
   set -eu
   cd \"$remote_deploy\"
   latest=\$(ls -1t backups/tokenlens-*.sqlite 2>/dev/null | head -n 1 || true)
@@ -63,9 +77,12 @@ if [ -f "$local_path" ]; then
   echo "Already present locally: $local_path"
 else
   # Stream over SSH with root read access so backup files remain mode 600 on server.
-  # shellcheck disable=SC2086
-  ssh $ssh_opts "$target" "sudo cat '$remote_deploy/backups/$filename'" > "$tmp_path"
+  run_ssh "sudo cat '$remote_deploy/backups/$filename'" > "$tmp_path"
   chmod 600 "$tmp_path"
+  if [ ! -s "$tmp_path" ]; then
+    echo "Downloaded backup file is empty: $filename" >&2
+    exit 1
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
     actual_sha=$(sha256sum "$tmp_path" | awk '{print $1}')
   else

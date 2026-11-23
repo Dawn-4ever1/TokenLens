@@ -150,7 +150,7 @@ const list = (raw?: string) => (raw ? raw.split(",").filter(Boolean) : []);
 
 function precisionOf(items: Ev[]): Precision {
   const set = new Set(items.map((e) => e.precision));
-  if (set.size === 0) return "measured";
+  if (set.size === 0) return "unknown";
   if (set.size === 1) return [...set][0]!;
   return "mixed";
 }
@@ -233,7 +233,7 @@ function groupKey(e: Ev, by: string): string {
 }
 
 function labelOf(key: string, by: string): string {
-  if (by === "device") return DEVICES.find((d) => d.id === key)?.name ?? key;
+  if (by === "device") return renamed.get(key) ?? DEVICES.find((d) => d.id === key)?.name ?? key;
   if (by === "project" && key === "__none__") return "未标记项目";
   if (key === "__other__") return "其他";
   return key;
@@ -312,7 +312,7 @@ function timeseries(q: Q): Timeseries {
   const groupBy = q.groupBy ?? "none";
   const limit = Number(q.limit ?? 8);
   const buckets = bucketList(range.from, range.to, bucket);
-  if (bucket === "hour" && buckets.length > 2000) throw new ApiError("bad_request", 400);
+  if (buckets.length > 5000 || (bucket === "hour" && buckets.length > 2000)) throw new ApiError("bad_request", 400);
   const ranked = slices(items, groupBy);
   const keep = new Set(ranked.slice(0, limit).map((s) => s.key));
   const groups = new Map<string, Ev[]>();
@@ -399,7 +399,7 @@ function summarize(key: string, group: Ev[]): SessionSummary {
     sessionId: first.root,
     title: first.title,
     deviceId: first.device,
-    deviceName: DEVICES.find((d) => d.id === first.device)?.name ?? first.device,
+    deviceName: renamed.get(first.device) ?? DEVICES.find((d) => d.id === first.device)?.name ?? first.device,
     client: first.client,
     models: [...new Set(group.map((e) => e.model))],
     projectLabel: first.project,
@@ -586,7 +586,7 @@ function filters(): FilterOptions {
 function health(): Health {
   const all = events();
   return {
-    status: "ok", serverVersion: "0.1.0", schemaVersion: 4,
+    status: "ok", serverVersion: "0.1.0", schemaVersion: 14,
     eventCount: all.length, deviceCount: deviceStatuses().length, lastIngestAt: iso(Date.now() - 90_000),
     timeZone: TZ, minCollectorVersion: "0.1.0", minAppVersion: "0.1.0", generatedAt: iso(Date.now()),
   };
@@ -729,6 +729,11 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       state.paired = true;
       state.mode = "local";
       state.server = null;
+      state.accountEmail = null;
+      state.accountProvider = null;
+      state.accountDisplayName = null;
+      state.accountAvatarUrl = null;
+      state.accountSpace = null;
       return { ...state, collector: { ...state.collector } };
     case "remove_local_device":
       if (state.server) throw new ApiError("bad_request", 400);
@@ -866,6 +871,11 @@ export async function command(name: string, args: Record<string, unknown>): Prom
         state.paired = true;
         state.mode = "local";
         state.server = null;
+        state.accountEmail = null;
+        state.accountProvider = null;
+        state.accountDisplayName = null;
+        state.accountAvatarUrl = null;
+        state.accountSpace = null;
       }
       revoked.add(String(args.deviceId));
       return { ...state, collector: { ...state.collector } };

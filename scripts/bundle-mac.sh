@@ -11,8 +11,10 @@ case "$target" in /*) ;; *) target="$repo/$target" ;; esac
 export CARGO_TARGET_DIR="$target"
 export PATH="$HOME/.cargo/bin:$PATH"
 # Panic locations would otherwise embed this machine's home path (and user name).
-# The last matching prefix wins, so the repo maps to `tokenlens`, the rest to `~`.
-export RUSTFLAGS="--remap-path-prefix=$HOME=~ --remap-path-prefix=$repo=tokenlens"
+# The last matching prefix wins, so the repo maps to `tokenlens`, Cargo's
+# cache to `cargo`, and anything else under the home folder to `~`.
+cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+export CARGO_ENCODED_RUSTFLAGS="$(printf '%s\x1f%s\x1f%s' "--remap-path-prefix=$HOME=~" "--remap-path-prefix=$cargo_home=cargo" "--remap-path-prefix=$repo=tokenlens")"
 # Skips the Finder window styling, which needs an Automation permission prompt.
 export CI=true
 
@@ -36,11 +38,14 @@ binary="$bundle/macos/TokenLens.app/Contents/MacOS/tokenlens-app"
 node "$repo/scripts/check-bundle-privacy.mjs" "$binary" --home-only
 # A broken ad-hoc signature makes macOS call a downloaded copy "damaged".
 codesign --verify --deep --strict "$bundle/macos/TokenLens.app"
-hdiutil verify "$bundle"/dmg/*.dmg >/dev/null
+shopt -s nullglob
+dmgs=("$bundle"/dmg/*.dmg)
+[ "${#dmgs[@]}" -eq 1 ] || { echo "Expected exactly one dmg, found ${#dmgs[@]}." >&2; exit 1; }
+hdiutil verify "${dmgs[0]}" >/dev/null
 if [ "$updater" = true ]; then
   [ -s "$bundle/macos/TokenLens.app.tar.gz" ] && [ -s "$bundle/macos/TokenLens.app.tar.gz.sig" ] || {
     echo 'Mac updater archive or signature is missing.' >&2; exit 1;
   }
 fi
-du -sh "$bundle/macos/TokenLens.app" "$bundle"/dmg/*.dmg
+du -sh "$bundle/macos/TokenLens.app" "${dmgs[0]}"
 echo "Bundle ready; no home path inside the app binary."

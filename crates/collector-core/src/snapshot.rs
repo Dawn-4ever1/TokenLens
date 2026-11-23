@@ -114,10 +114,21 @@ impl Snapshot {
         scope: &Scope,
         scanned: Vec<ScannedEvent>,
     ) -> (MergeStats, Vec<ScannedEvent>) {
+        let mut deduped: Vec<ScannedEvent> = Vec::with_capacity(scanned.len());
+        let mut by_key: HashMap<String, usize> = HashMap::with_capacity(scanned.len());
+        for event in scanned {
+            if let Some(&index) = by_key.get(&event.key) {
+                deduped[index] = event;
+            } else {
+                let index = deduped.len();
+                by_key.insert(event.key.clone(), index);
+                deduped.push(event);
+            }
+        }
         let mut stats = MergeStats::default();
         let mut changed = Vec::new();
-        let mut seen = HashSet::with_capacity(scanned.len());
-        for event in scanned {
+        let mut seen = HashSet::with_capacity(deduped.len());
+        for event in deduped {
             let entry = Entry {
                 client: self.client_index(&event.client),
                 day: local_day(event.ts),
@@ -340,5 +351,29 @@ mod tests {
         assert_eq!(snapshot.key_set_sha256(), digest.key_set_sha256);
         assert_eq!(snapshot.value_sha256(), digest.value_sha256);
         assert_eq!(snapshot.clients_with_events(), ["codex".to_owned()].into());
+    }
+
+    #[test]
+    fn duplicate_keys_within_one_scan_converge_without_oscillating() {
+        let t = 1_793_577_600_000;
+        let all = Scope {
+            clients: None,
+            range: DateRange::all_history(),
+        };
+        let mut snapshot = Snapshot::default();
+        let (stats, changed) = snapshot.merge_changes(
+            &all,
+            vec![event("dup", "codex", t, 1), event("dup", "codex", t, 2)],
+        );
+        assert_eq!((stats.new, stats.updated, stats.unchanged), (1, 0, 0));
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].hash, [2; 32]);
+
+        let (stats, changed) = snapshot.merge_changes(
+            &all,
+            vec![event("dup", "codex", t, 1), event("dup", "codex", t, 2)],
+        );
+        assert_eq!((stats.new, stats.updated, stats.unchanged), (0, 0, 1));
+        assert!(changed.is_empty());
     }
 }

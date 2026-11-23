@@ -1,11 +1,13 @@
 const exactFormat = new Intl.NumberFormat("en-US");
 
 export function exact(value: number): string {
+  if (!Number.isFinite(value)) return "—";
   return exactFormat.format(value);
 }
 
 /** K/M/B with about three significant digits; exact value belongs in a tooltip. */
 export function compact(value: number): string {
+  if (!Number.isFinite(value)) return "—";
   const abs = Math.abs(value);
   if (abs < 1e4) return exact(Math.round(value));
   const units: [number, string][] = [
@@ -35,29 +37,31 @@ export function percent(rate: number | null | undefined, digits = 1): string {
 }
 
 export function share(part: number, whole: number): number | null {
-  return whole > 0 ? part / whole : null;
+  return whole > 0 && Number.isFinite(part) && Number.isFinite(whole) ? part / whole : null;
 }
 
 export function usd(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  if (value > 0 && value < 0.01) return "<$0.01";
-  if (value >= 1000) return `$${compact(value)}`;
-  return `$${value.toFixed(2)}`;
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  const sign = value < 0 ? "-" : "";
+  const abs = Math.abs(value);
+  if (abs > 0 && abs < 0.01) return `${sign}<$0.01`;
+  if (abs >= 1000) return `${sign}$${compact(abs)}`;
+  return `${sign}$${abs.toFixed(2)}`;
 }
 
 export function credits(value: number | null | undefined): string {
-  if (value === null || value === undefined) return "—";
-  return value >= 1000 ? compact(value) : value.toFixed(value >= 100 ? 0 : 1);
+  if (value === null || value === undefined || !Number.isFinite(value)) return "—";
+  return Math.abs(value) >= 1000 ? compact(value) : value.toFixed(Math.abs(value) >= 100 ? 0 : 1);
 }
 
 export function toMs(value: string | number | null | undefined): number | null {
   if (value === null || value === undefined) return null;
-  if (typeof value === "number") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? null : ms;
 }
 
-export function relativeTime(value: string | number | null | undefined, now = Date.now()): string {
+export function relativeTime(value: string | number | null | undefined, now = Date.now(), timeZone?: string): string {
   const ms = toMs(value);
   if (ms === null) return "从未";
   const seconds = Math.max(0, Math.round((now - ms) / 1000));
@@ -68,7 +72,7 @@ export function relativeTime(value: string | number | null | undefined, now = Da
   if (hours < 48) return `${hours} 小时前`;
   const days = Math.round(hours / 24);
   if (days < 60) return `${days} 天前`;
-  return dateTime(ms, undefined, false);
+  return dateTime(ms, timeZone, false, true);
 }
 
 const formatters = new Map<string, Intl.DateTimeFormat>();
@@ -102,9 +106,10 @@ export function dateTime(
 }
 
 export function duration(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return "—";
-  if (ms < 1000) return `${Math.round(ms)} 毫秒`;
-  const seconds = Math.round(ms / 1000);
+  if (ms === null || ms === undefined || !Number.isFinite(ms)) return "—";
+  const clamped = Math.max(0, ms);
+  if (clamped < 1000) return `${Math.round(clamped)} 毫秒`;
+  const seconds = Math.round(clamped / 1000);
   if (seconds < 60) return `${seconds} 秒`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return seconds % 60 ? `${minutes} 分 ${seconds % 60} 秒` : `${minutes} 分钟`;
@@ -137,4 +142,8 @@ export function bucketLabel(bucket: string, kind: "hour" | "day" | "week" | "mon
       return `${y}年${Number(m)}月`;
     }
   }
+}
+
+export function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 }

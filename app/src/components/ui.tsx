@@ -4,7 +4,7 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 import { cva, type VariantProps } from "class-variance-authority";
 import { clsx, type ClassValue } from "clsx";
 import { AlertTriangle, RefreshCw, X } from "lucide-react";
-import { forwardRef, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
+import { forwardRef, useRef, type ButtonHTMLAttributes, type HTMLAttributes, type ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
 
 export function cn(...inputs: ClassValue[]) {
@@ -119,22 +119,53 @@ export function Segmented<T extends string>({
   label,
 }: {
   value: T;
-  options: { key: T; label: ReactNode }[];
+  options: { key: T; label: ReactNode; disabled?: boolean }[];
   onChange: (value: T) => void;
   size?: "sm" | "md";
   label?: string;
 }) {
+  const buttonRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  const activeIndex = options.findIndex((option) => option.key === value && !option.disabled);
+  const firstEnabled = options.findIndex((option) => !option.disabled);
+  const focusableIndex = activeIndex >= 0 ? activeIndex : firstEnabled;
+
+  const move = (fromIndex: number, step: number) => {
+    const enabled = options.map((option, index) => (!option.disabled ? index : -1)).filter((index) => index >= 0);
+    if (!enabled.length) return;
+    const currentPos = enabled.indexOf(fromIndex);
+    const nextPos = currentPos < 0 ? 0 : (currentPos + step + enabled.length) % enabled.length;
+    const nextIndex = enabled[nextPos]!;
+    buttonRefs.current[nextIndex]?.focus();
+    onChange(options[nextIndex]!.key);
+  };
+
   return (
     <div role="radiogroup" aria-label={label} data-ui="segmented" className="inline-flex shrink-0 rounded-[var(--radius-control)] bg-surface-2 p-0.5">
-      {options.map((option) => (
+      {options.map((option, index) => (
         <button
           key={option.key}
+          ref={(element) => {
+            buttonRefs.current[index] = element;
+          }}
           type="button"
           role="radio"
           aria-checked={option.key === value}
-          onClick={() => onChange(option.key)}
+          aria-disabled={option.disabled || undefined}
+          tabIndex={option.disabled ? -1 : index === focusableIndex ? 0 : -1}
+          onClick={() => {
+            if (!option.disabled) onChange(option.key);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+              event.preventDefault();
+              move(index, 1);
+            } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+              event.preventDefault();
+              move(index, -1);
+            }
+          }}
           className={cn(
-            "rounded-[calc(var(--radius-control)-2px)] px-2.5 font-medium text-ink-2 transition-colors hover:text-ink",
+            "rounded-[calc(var(--radius-control)-2px)] px-2.5 font-medium text-ink-2 transition-colors hover:text-ink aria-disabled:opacity-40 aria-disabled:hover:text-ink-2",
             size === "sm" ? "h-[var(--control-sm)] text-xs" : "h-[var(--control-md)] text-[13px]",
             option.key === value && "bg-raised text-ink shadow-sm",
           )}
@@ -164,7 +195,12 @@ export function Switch({ checked, onChange, label, disabled }: { checked: boolea
         checked ? "bg-primary" : "bg-line",
       )}
     >
-      <span className={cn("inline-block h-4 w-4 rounded-full bg-white shadow transition-transform", checked ? "translate-x-[18px]" : "translate-x-0.5")} />
+      <span
+        className={cn(
+          "inline-block h-4 w-4 rounded-full shadow transition-transform",
+          checked ? "translate-x-[18px] bg-primary-ink" : "translate-x-0.5 bg-surface",
+        )}
+      />
     </button>
   );
 }
@@ -296,7 +332,7 @@ export function Dialog({
           <DialogPrimitive.Close aria-label="关闭对话框" className="absolute right-4 top-4 rounded-[var(--radius-control)] p-1.5 text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink">
             <span aria-hidden className="block text-lg leading-4">×</span>
           </DialogPrimitive.Close>
-          <DialogPrimitive.Title className={brand ? "sr-only" : "display text-base text-ink"}>{title}</DialogPrimitive.Title>
+          <DialogPrimitive.Title className={brand ? "sr-only" : "display pr-8 truncate text-base text-ink"}>{title}</DialogPrimitive.Title>
           <DialogPrimitive.Description className="sr-only">对话框</DialogPrimitive.Description>
           <div className={brand ? "" : "mt-3"}>{children}</div>
         </DialogPrimitive.Content>

@@ -289,6 +289,10 @@ export interface AppStatus {
   accountAvatarUrl: string | null;
   /** Name of the signed-in space. */
   accountSpace: string | null;
+  /** Minimum app version required by the connected server, if enforced. */
+  minAppVersion?: string | null;
+  /** True when the connected server rejected uploads because this app is too old. */
+  appOutdated?: boolean;
 }
 
 export interface PairCode {

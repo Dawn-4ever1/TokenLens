@@ -3,6 +3,7 @@
 //! the icon. Windows deliberately remains icon-only.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -13,8 +14,6 @@ use tauri::{AppHandle, Manager, Wry};
 
 use crate::collector::now_ms;
 use crate::commands::{self, AppState, AppStatus};
-#[cfg(target_os = "macos")]
-use crate::config;
 use crate::format;
 use crate::remote;
 use crate::window;
@@ -43,6 +42,7 @@ pub enum Poke {
 struct Items {
     today: MenuItem<Wry>,
     status: MenuItem<Wry>,
+    sync: MenuItem<Wry>,
     pause: MenuItem<Wry>,
     autostart: CheckMenuItem<Wry>,
 }
@@ -70,6 +70,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let items = Items {
         today: MenuItem::with_id(app, TODAY, "今日 —", false, none)?,
         status: MenuItem::with_id(app, STATUS, "读取中", false, none)?,
+        sync: MenuItem::with_id(app, SYNC, "立即同步", true, none)?,
         pause: MenuItem::with_id(app, PAUSE, "暂停采集", true, none)?,
         autostart: CheckMenuItem::with_id(
             app,
@@ -81,7 +82,6 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         )?,
     };
     let open = MenuItem::with_id(app, OPEN, "打开看板", true, none)?;
-    let sync = MenuItem::with_id(app, SYNC, "立即同步", true, none)?;
     let quit = MenuItem::with_id(app, QUIT, "退出 TokenLens", true, none)?;
     let menu = Menu::with_items(
         app,
@@ -90,7 +90,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             &items.status,
             &PredefinedMenuItem::separator(app)?,
             &open,
-            &sync,
+            &items.sync,
             &items.pause,
             &items.autostart,
             &PredefinedMenuItem::separator(app)?,
@@ -165,14 +165,22 @@ pub fn on_menu_event(app: &AppHandle, event: &MenuEvent) {
             });
         }
         QUIT => {
+            static QUITTING: AtomicBool = AtomicBool::new(false);
+            if QUITTING.swap(true, Ordering::SeqCst) {
+                return;
+            }
             let app = app.clone();
-            let _ = std::thread::Builder::new()
+            if std::thread::Builder::new()
                 .name("quit".to_owned())
                 .spawn(move || {
                     window::close(&app);
                     app.state::<AppState>().collector.stop();
                     app.exit(0);
-                });
+                })
+                .is_err()
+            {
+                QUITTING.store(false, Ordering::SeqCst);
+            }
         }
         _ => {}
     }
@@ -198,7 +206,7 @@ pub fn state_label(status: &AppStatus) -> &'static str {
         "服务器同步出错，本机继续记录"
     } else if upload == "pairing_required" {
         "凭据失效，需重新配对"
-    } else if upload == "upgrade_required" {
+    } else if upload == "upgrade_required" || status.app_outdated {
         "需要升级应用"
     } else if upload.starts_with("blocked:") {
         "上传被服务器拒绝"
@@ -244,35 +252,62 @@ fn menu_bar_tooltip(status: &AppStatus) -> String {
     }
 }
 
-fn fetch_today(app: &AppHandle) -> Option<f64> {
+fn fetch_today(app: &AppHandle, day: chrono::NaiveDate) -> Option<f64> {
     let state = app.state::<AppState>();
     let credentials = state.credentials()?;
     // The server buckets by its own time zone; for the people using this
     // project it is the same as this computer's.
-    let day = chrono::Local::now().date_naive().to_string();
+    let day = day.to_string();
     let query = [("from", &day), ("to", &day)]
         .into_iter()
         .map(|(key, value)| (key.to_owned(), value.clone()))
         .collect();
     let path = remote::dashboard_path("summary", &query).ok()?;
-    let reply = state.remote.get(&credentials, &path).ok()?;
-    reply.get("totalTokens").and_then(Value::as_f64)
+    match state.remote.get_quick(&credentials, &path) {
+        Ok(reply) => reply.get("totalTokens").and_then(Value::as_f64),
+        Err(error) if !crate::local::is_local(&credentials) && error.kind == "unauthorized" => {
+            let app = app.clone();
+            drop(tauri::async_runtime::spawn_blocking(move || {
+                let _ = commands::handle_server_unauthorized(&app, credentials);
+            }));
+            None
+        }
+        Err(_) => None,
+    }
 }
 
 fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
     let tray = app.state::<Tray<Wry>>();
     let mut today: Option<f64> = None;
+    let mut today_day: Option<chrono::NaiveDate> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut fetch_at = Instant::now();
     loop {
         let status = commands::status(app);
+        let current_day = chrono::Local::now().date_naive();
         let now = Instant::now();
+        if today_day.is_some_and(|day| day != current_day) {
+            today = None;
+            today_day = Some(current_day);
+            fetch_at = now;
+        }
         if now >= fetch_at {
-            today = if status.paired {
-                fetch_today(app).or(today)
+            if status.paired {
+                match fetch_today(app, current_day) {
+                    Some(value) => {
+                        today = Some(value);
+                        today_day = Some(current_day);
+                    }
+                    None => {
+                        if today_day != Some(current_day) {
+                            today = None;
+                        }
+                    }
+                }
             } else {
-                None
-            };
+                today = None;
+                today_day = None;
+            }
             fetched_at = Some(now);
             fetch_at = now + TODAY_EVERY;
         }
@@ -280,11 +315,14 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
         let _ = items.today.set_text(today_line(today));
         #[cfg(target_os = "macos")]
         {
-            let enabled = config::menu_bar_total_enabled(&app.state::<AppState>().paths.state_dir);
+            let enabled = app.state::<AppState>().menu_bar_total();
             let _ = tray.icon.set_title(menu_bar_title(today, enabled));
             let _ = tray.icon.set_tooltip(Some(menu_bar_tooltip(&status)));
         }
         let _ = items.status.set_text(status_line(&status, now_ms()));
+        let _ = items
+            .sync
+            .set_enabled(status.paired && !status.collector.paused);
         let _ = items.pause.set_text(if status.collector.paused {
             "恢复采集"
         } else {
@@ -307,6 +345,7 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
                 }
                 Poke::Paired => {
                     today = None;
+                    today_day = None;
                     fetched_at = None;
                     // Asking before the first upload lands would show 0.
                     fetch_at = Instant::now() + TODAY_MIN_GAP;
@@ -398,6 +437,8 @@ mod tests {
             account_display_name: None,
             account_avatar_url: None,
             account_space: None,
+            min_app_version: None,
+            app_outdated: false,
         }
     }
 
@@ -409,6 +450,9 @@ mod tests {
             status_line(&status, 1_000 + 5 * 60_000),
             "后台采集中 · 最后同步 5 分钟前"
         );
+        status.app_outdated = true;
+        assert_eq!(state_label(&status), "需要升级应用");
+        status.app_outdated = false;
         status.collector.upload_state = Some("backoff:network".into());
         assert_eq!(state_label(&status), "等待重试上传");
         status.collector.upload_state = Some("pairing_required".into());

@@ -2,6 +2,7 @@
 //! system keychain under its own account name; the WebView only ever calls
 //! Tauri commands and never sees the session or any device token.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -19,6 +20,21 @@ const SESSION_ACCOUNT: &str = "account";
 const MAX_EMAIL_CHARS: usize = 254;
 const MAX_AVATAR_BYTES: u64 = 256 * 1024;
 
+fn account_transport() -> &'static UreqTransport {
+    static TRANSPORT: OnceLock<UreqTransport> = OnceLock::new();
+    TRANSPORT.get_or_init(UreqTransport::new)
+}
+
+fn avatar_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| ureq::Agent::new_with_config(avatar_config(true)))
+}
+
+fn remote_avatar_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| ureq::Agent::new_with_config(avatar_config(false)))
+}
+
 /// The WebView only receives a bounded raster data URL. Fetch public provider
 /// avatars here, with a separate anonymous client, never the session transport.
 fn avatar_data_url(value: &Value, provider: Option<&str>) -> Option<String> {
@@ -28,8 +44,7 @@ fn avatar_data_url(value: &Value, provider: Option<&str>) -> Option<String> {
     } else {
         github_avatar_url(input)?
     };
-    let agent = ureq::Agent::new_with_config(avatar_config(true));
-    download_avatar(&agent, &avatar)
+    download_avatar(avatar_agent(), &avatar)
 }
 
 fn github_avatar_url(input: &str) -> Option<String> {
@@ -177,19 +192,29 @@ fn download_avatar(agent: &ureq::Agent, url: &str) -> Option<String> {
 /// proxy). Older servers answer 404 and the caller falls back to a direct
 /// download.
 fn remote_avatar_data_url(server: &str, session: &str) -> Option<String> {
-    let response = UreqTransport::new()
-        .get(&format!("{server}/api/account/avatar"), Some(session))
+    let response = remote_avatar_agent()
+        .get(&format!("{server}/api/account/avatar"))
+        .header("Authorization", format!("Bearer {session}"))
+        .header("Accept", "image/png,image/jpeg,image/gif,image/webp")
+        .call()
         .ok()?;
-    if response.status != 200 {
+    if response.status().as_u16() != 200 {
         return None;
     }
-    avatar_body_data_url(&response.body)
+    let body = response
+        .into_body()
+        .with_config()
+        .limit(MAX_AVATAR_BYTES)
+        .read_to_vec()
+        .ok()?;
+    avatar_body_data_url(&body)
 }
 
 fn keyring_entry(service: &str) -> Result<keyring::Entry, CommandError> {
     keyring::Entry::new(service, SESSION_ACCOUNT).map_err(|_| CommandError::new("keychain"))
 }
 
+#[cfg_attr(test, allow(dead_code))]
 pub fn load_session(service: &str) -> Option<String> {
     let entry = keyring_entry(service).ok()?;
     match entry.get_password() {
@@ -204,10 +229,15 @@ pub fn save_session(service: &str, session: &str) -> CmdResult<()> {
         .map_err(|_| CommandError::new("keychain"))
 }
 
-pub fn delete_session(service: &str) {
-    if let Ok(entry) = keyring_entry(service) {
-        let _ = entry.delete_credential();
+fn map_delete_result(result: Result<(), keyring::Error>) -> CmdResult<()> {
+    match result {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(CommandError::new("keychain")),
     }
+}
+
+pub fn delete_session(service: &str) -> CmdResult<()> {
+    map_delete_result(keyring_entry(service)?.delete_credential())
 }
 
 pub fn clean_email(email: &str) -> Option<String> {
@@ -253,7 +283,7 @@ pub fn request_code(server: &str, email: &str) -> CmdResult<()> {
     let email = clean_email(email).ok_or(CommandError::new("bad_email"))?;
     let payload = serde_json::to_vec(&json!({ "email": email }))
         .map_err(|_| CommandError::new("bad_request"))?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(&format!("{server}/api/auth/code"), None, false, &payload)
         .map_err(|_| CommandError::new("network"))?;
     if response.status == 200 {
@@ -280,7 +310,7 @@ pub fn login(server: &str, email: &str, code: &str) -> CmdResult<SignedIn> {
     let code = clean_code(code).ok_or(CommandError::new("bad_code"))?;
     let payload = serde_json::to_vec(&json!({ "email": email, "code": code }))
         .map_err(|_| CommandError::new("bad_request"))?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(&format!("{server}/api/auth/login"), None, false, &payload)
         .map_err(|_| CommandError::new("network"))?;
     if response.status != 200 {
@@ -318,7 +348,7 @@ fn preferred_avatar(
 }
 
 fn session_get(server: &str, session: &str, path: &str) -> CmdResult<Value> {
-    let response = UreqTransport::new()
+    let response = account_transport()
         .get(&format!("{server}{path}"), Some(session))
         .map_err(|_| CommandError::new("network"))?;
     if response.status != 200 {
@@ -339,7 +369,7 @@ fn session_post_allow_legacy(
     allow_unknown_binding: bool,
 ) -> CmdResult<Value> {
     let payload = serde_json::to_vec(body).map_err(|_| CommandError::new("bad_request"))?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(&format!("{server}{path}"), Some(session), false, &payload)
         .map_err(|_| CommandError::new("network"))?;
     if response.status == 400
@@ -357,7 +387,7 @@ fn session_post_allow_legacy(
             return Err(CommandError::new("server"));
         };
         let payload = serde_json::to_vec(&legacy).map_err(|_| CommandError::new("bad_request"))?;
-        let response = UreqTransport::new()
+        let response = account_transport()
             .post(&format!("{server}{path}"), Some(session), false, &payload)
             .map_err(|_| CommandError::new("network"))?;
         if response.status != 200 {
@@ -371,23 +401,31 @@ fn session_post_allow_legacy(
     body_json(&response)
 }
 
-/// `(email, provider, display_name, avatar_data_url)` from `/api/auth/me`.
-pub type AccountProfile = (String, Option<String>, Option<String>, Option<String>);
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountProfile {
+    pub email: String,
+    pub provider: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub space_name: Option<String>,
+}
 
 pub fn account_info(server: &str, session: &str) -> CmdResult<AccountProfile> {
-    let body = session_get(server, session, "/api/auth/me")?;
+    let server = server_url(server)?;
+    let body = session_get(&server, session, "/api/auth/me")?;
     let email = body["email"]
         .as_str()
         .map(str::to_owned)
         .ok_or(CommandError::new("server"))?;
     let provider = body["provider"].as_str().map(str::to_owned);
-    let avatar_url = preferred_avatar(server, session, &body, provider.as_deref());
-    Ok((
+    let avatar_url = preferred_avatar(&server, session, &body, provider.as_deref());
+    Ok(AccountProfile {
         email,
         provider,
-        body["displayName"].as_str().map(str::to_owned),
+        display_name: body["displayName"].as_str().map(str::to_owned),
         avatar_url,
-    ))
+        space_name: body["spaceName"].as_str().map(str::to_owned),
+    })
 }
 
 /// Creates this computer's device inside the signed-in space and returns the
@@ -446,8 +484,9 @@ pub fn create_device(
 
 /// The space's replaceable pairing code, shown only after signing in.
 pub fn pair_code(server: &str, session: &str, rotate: bool) -> CmdResult<String> {
+    let server = server_url(server)?;
     let body = session_post(
-        server,
+        &server,
         session,
         "/api/account/pair-code",
         &json!({ "rotate": rotate }),
@@ -479,7 +518,7 @@ pub enum GitHubPoll {
 
 pub fn github_start(server: &str) -> CmdResult<GitHubStart> {
     let server = server_url(server)?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(
             &format!("{server}/api/auth/github/start"),
             None,
@@ -505,7 +544,7 @@ pub fn github_poll(server: &str, device_code: &str) -> CmdResult<GitHubPoll> {
     let server = server_url(server)?;
     let payload = serde_json::to_vec(&json!({ "deviceCode": device_code }))
         .map_err(|_| CommandError::new("bad_request"))?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(
             &format!("{server}/api/auth/github/poll"),
             None,
@@ -564,7 +603,7 @@ pub enum GooglePoll {
 
 pub fn google_start(server: &str) -> CmdResult<GoogleStart> {
     let server = server_url(server)?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(
             &format!("{server}/api/auth/google/start"),
             None,
@@ -587,7 +626,7 @@ pub fn google_poll(server: &str, flow_id: &str) -> CmdResult<GooglePoll> {
     let server = server_url(server)?;
     let payload = serde_json::to_vec(&json!({ "flowId": flow_id }))
         .map_err(|_| CommandError::new("bad_request"))?;
-    let response = UreqTransport::new()
+    let response = account_transport()
         .post(
             &format!("{server}/api/auth/google/poll"),
             None,
@@ -609,7 +648,10 @@ pub fn google_poll(server: &str, flow_id: &str) -> CmdResult<GooglePoll> {
 }
 
 pub fn logout(server: &str, session: &str) {
-    let _ = session_post(server, session, "/api/auth/logout", &json!({}));
+    let Ok(server) = server_url(server) else {
+        return;
+    };
+    let _ = session_post(&server, session, "/api/auth/logout", &json!({}));
 }
 
 #[cfg(test)]
@@ -805,5 +847,51 @@ mod tests {
                 "{status} {mime}"
             );
         }
+    }
+
+    #[test]
+    fn delete_session_ignores_missing_entry_and_propagates_keychain_errors() {
+        assert!(map_delete_result(Ok(())).is_ok());
+        assert!(map_delete_result(Err(keyring::Error::NoEntry)).is_ok());
+        assert_eq!(
+            map_delete_result(Err(keyring::Error::PlatformFailure(Box::new(
+                std::io::Error::other("keychain locked"),
+            )))),
+            Err(CommandError::new("keychain"))
+        );
+    }
+
+    #[test]
+    fn remote_avatar_client_is_bounded_and_reads_valid_raster_images() {
+        let png = STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aPa0AAAAASUVORK5CYII=")
+            .expect("PNG fixture");
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let server = format!("http://{}", listener.local_addr().expect("address"));
+        let png_bytes = png.clone();
+        let fixture = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept fixture");
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 8192);
+                stream.read_exact(&mut byte).expect("request");
+                request.push(byte[0]);
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                png_bytes.len()
+            );
+            stream.write_all(header.as_bytes()).unwrap();
+            stream.write_all(&png_bytes).unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        let data_url = remote_avatar_data_url(&server, "tls_fixture");
+        let request = fixture.join().unwrap();
+        assert!(request.starts_with("GET /api/account/avatar HTTP/1.1\r\n"));
+        assert_eq!(
+            data_url,
+            Some(format!("data:image/png;base64,{}", STANDARD.encode(&png)))
+        );
     }
 }

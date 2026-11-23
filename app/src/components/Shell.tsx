@@ -168,6 +168,12 @@ function Sidebar({ mac, status }: { mac: boolean; status: AppStatus | null }) {
   );
 }
 
+function isNarrowViewport(): boolean {
+  if (typeof window === "undefined") return false;
+  if (typeof window.matchMedia === "function") return !window.matchMedia("(min-width: 1100px)").matches;
+  return window.innerWidth < 1100;
+}
+
 function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
   status: AppStatus | null;
   busy: boolean;
@@ -188,15 +194,39 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
   const [imageFailed, setImageFailed] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [narrow, setNarrow] = useState(isNarrowViewport);
   useEffect(() => {
-    if (!menuOpen) return;
-    const onResize = () => {
-      if (window.innerWidth >= 1100) setMenuOpen(false);
+    setImageFailed(false);
+  }, [status?.accountAvatarUrl]);
+  useEffect(() => {
+    const update = () => {
+      const next = isNarrowViewport();
+      setNarrow(next);
+      if (!next) setMenuOpen(false);
     };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [menuOpen]);
+    update();
+    const query = typeof window.matchMedia === "function" ? window.matchMedia("(min-width: 1100px)") : null;
+    query?.addEventListener("change", update);
+    window.addEventListener("resize", update);
+    return () => {
+      query?.removeEventListener("change", update);
+      window.removeEventListener("resize", update);
+    };
+  }, []);
   if (name) {
+    const identityContent = (
+      <>
+        {status?.accountAvatarUrl && !imageFailed ? (
+          <img
+            src={status.accountAvatarUrl}
+            alt=""
+            className="h-5 w-5 shrink-0 rounded-full min-[1100px]:h-6 min-[1100px]:w-6"
+            onError={() => setImageFailed(true)}
+          />
+        ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
+        <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+      </>
+    );
     return (
       <div className="px-1">
         {/* In the collapsed rail the avatar sits directly above Settings,
@@ -207,48 +237,46 @@ function AccountEntry({ status, busy, error, onSignIn, onSignOut }: {
           aria-label={accountLabel}
           className="group flex h-9 w-full items-center justify-center gap-3 rounded-lg px-1 min-[1100px]:h-11 min-[1100px]:justify-start min-[1100px]:px-2"
         >
-          <Popover
-            open={menuOpen}
-            onOpenChange={(next) => {
-              if (!next || window.innerWidth < 1100) setMenuOpen(next);
-            }}
-          >
-            <Tip content={accountLabel} side="right">
-              <PopoverTrigger asChild>
+          {narrow ? (
+            <Popover open={menuOpen} onOpenChange={setMenuOpen}>
+              <Tip content={accountLabel} side="right">
+                <PopoverTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label="打开账号菜单"
+                    data-account-identity
+                    className="flex min-w-0 flex-none items-center justify-center rounded-full p-0 text-left"
+                  >
+                    {identityContent}
+                  </button>
+                </PopoverTrigger>
+              </Tip>
+              <PopoverContent side="right" align="end" className="w-52 p-2">
+                <div className="truncate px-2 py-1 text-xs font-medium text-ink" title={accountLabel}>{accountLabel}</div>
                 <button
                   type="button"
-                  aria-label="打开账号菜单"
-                  data-account-identity
-                  className="flex min-w-0 flex-none items-center justify-center rounded-full p-0 text-left min-[1100px]:flex-1 min-[1100px]:cursor-default min-[1100px]:justify-start min-[1100px]:gap-3 min-[1100px]:rounded-none"
+                  disabled={busy}
+                  onClick={() => {
+                    setMenuOpen(false);
+                    setConfirming(true);
+                  }}
+                  className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-bad hover:bg-surface-2 disabled:opacity-50"
                 >
-                  {status?.accountAvatarUrl && !imageFailed ? (
-                    <img
-                      src={status.accountAvatarUrl}
-                      alt=""
-                      className="h-5 w-5 shrink-0 rounded-full min-[1100px]:h-6 min-[1100px]:w-6"
-                      onError={() => setImageFailed(true)}
-                    />
-                  ) : <UserRound className="h-4 w-4 shrink-0 text-ink-2 min-[1100px]:h-5 min-[1100px]:w-5" aria-hidden />}
-                  <span data-account-name className="hidden min-w-0 flex-1 truncate text-xs font-medium text-ink min-[1100px]:inline">{name}</span>
+                  <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                  退出登录
                 </button>
-              </PopoverTrigger>
-            </Tip>
-            <PopoverContent side="right" align="end" className="w-52 p-2">
-              <div className="truncate px-2 py-1 text-xs font-medium text-ink" title={accountLabel}>{accountLabel}</div>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setMenuOpen(false);
-                  setConfirming(true);
-                }}
-                className="mt-1 flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-bad hover:bg-surface-2 disabled:opacity-50"
+              </PopoverContent>
+            </Popover>
+          ) : (
+            <Tip content={accountLabel} side="right">
+              <div
+                data-account-identity
+                className="flex min-w-0 flex-1 items-center justify-start gap-3 text-left"
               >
-                <LogOut className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                退出登录
-              </button>
-            </PopoverContent>
-          </Popover>
+                {identityContent}
+              </div>
+            </Tip>
+          )}
           <div className="hidden min-[1100px]:contents">
             <Tip content="退出登录" side="right">
               <button
@@ -308,7 +336,7 @@ export function collectorState(status: AppStatus | null): { tone: "good" | "neut
   const upload = c.uploadState ?? "ok";
   if (upload === "queue_error") return { tone: "bad", label: "服务器同步出错，本机继续记录" };
   if (upload === "pairing_required") return { tone: "bad", label: "凭据失效，需重新配对" };
-  if (upload === "upgrade_required") return { tone: "warn", label: "需要升级应用" };
+  if (status.appOutdated || upload === "upgrade_required") return { tone: "warn", label: "需要升级应用" };
   const local = status.mode === "local";
   if (upload.startsWith("blocked:")) return { tone: "bad", label: local ? "本机数据库拒绝写入" : "上传被服务器拒绝" };
   if (upload.startsWith("backoff:")) return { tone: "warn", label: local ? "等待重试写入" : "等待重试上传" };

@@ -53,20 +53,25 @@ pub fn normalize_email(input: &str) -> Option<String> {
     let email = input.trim().to_ascii_lowercase();
     let (local, domain) = email.split_once('@')?;
     let domain = domain.strip_suffix('.').unwrap_or(domain);
+    let canonical = format!("{local}@{domain}");
+    let allowed_chars = |part: &str| {
+        part.bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'+'))
+    };
     let valid = !local.is_empty()
         && !local.starts_with('.')
         && !local.ends_with('.')
         && !local.contains("..")
         && local.len() <= 64
-        && email.len() <= 254
+        && canonical.len() <= 254
         && domain.contains('.')
+        && !domain.contains('@')
         && !domain.starts_with('.')
         && !domain.ends_with('.')
         && !domain.contains("..")
-        && email.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'-' | b'_' | b'+')
-        });
-    valid.then_some(email)
+        && allowed_chars(local)
+        && allowed_chars(domain);
+    valid.then_some(canonical)
 }
 
 fn random_digits() -> String {
@@ -173,8 +178,8 @@ pub fn login(
     }
     if now >= expires {
         tx.execute(
-            "DELETE FROM email_challenges WHERE email = ?1",
-            params![email],
+            "UPDATE email_challenges SET consumed_at = ?2 WHERE email = ?1 AND consumed_at IS NULL",
+            params![email, now],
         )?;
         tx.commit()?;
         return Err(AccountError::ExpiredCode);
@@ -183,8 +188,8 @@ pub fn login(
         let next = attempts + 1;
         if next >= MAX_ATTEMPTS {
             tx.execute(
-                "DELETE FROM email_challenges WHERE email = ?1",
-                params![email],
+                "UPDATE email_challenges SET attempts = ?2, consumed_at = ?3 WHERE email = ?1 AND consumed_at IS NULL",
+                params![email, next, now],
             )?;
         } else {
             tx.execute(
@@ -213,18 +218,7 @@ pub fn login(
         )
         .optional()?
         .map_or_else(|| create_account(&tx, &email, now), Ok)?;
-    let session = secrets::new_session();
-    tx.execute(
-        "INSERT INTO account_sessions (token_hash, account_id, tenant_id, created_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            sha256_hex(session.expose()),
-            account.id,
-            account.tenant_id,
-            now,
-            now + SESSION_TTL_MS
-        ],
-    )?;
+    let session = open_session(&tx, &account, now)?;
     tx.commit()?;
     Ok(Login { session, account })
 }
@@ -240,9 +234,17 @@ fn open_session(tx: &Transaction<'_>, account: &Account, now: i64) -> Result<Sec
         |row| row.get(0),
     )?;
     if active >= MAX_SESSIONS_PER_ACCOUNT {
+        let overflow = i64::try_from(active + 1 - MAX_SESSIONS_PER_ACCOUNT).unwrap_or(1);
         tx.execute(
-            "DELETE FROM account_sessions WHERE account_id = ?1 AND created_at = (SELECT MIN(created_at) FROM account_sessions WHERE account_id = ?1 AND revoked_at IS NULL)",
-            params![account.id],
+            "DELETE FROM account_sessions
+             WHERE token_hash IN (
+                 SELECT token_hash
+                 FROM account_sessions
+                 WHERE account_id = ?1 AND expires_at > ?2 AND revoked_at IS NULL
+                 ORDER BY created_at ASC, token_hash ASC
+                 LIMIT ?3
+             )",
+            params![account.id, now, overflow],
         )?;
     }
     let session = secrets::new_session();
@@ -385,6 +387,16 @@ pub fn delete_challenge(conn: &Connection, email: &str) -> Result<(), AccountErr
     conn.execute(
         "DELETE FROM email_challenges WHERE email = ?1",
         params![email],
+    )?;
+    Ok(())
+}
+
+/// Marks an email challenge unusable without deleting rate-limit counters.
+pub fn invalidate_challenge(conn: &Connection, email: &str, now: i64) -> Result<(), AccountError> {
+    let email = normalize_email(email).ok_or(AccountError::BadEmail)?;
+    conn.execute(
+        "UPDATE email_challenges SET consumed_at = ?2 WHERE email = ?1 AND consumed_at IS NULL",
+        params![email, now],
     )?;
     Ok(())
 }

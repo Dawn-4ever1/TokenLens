@@ -43,12 +43,20 @@ reviving or overwriting the old one. Existing devices, events, accounts,
 credentials and bindings are retained. Test restoration before replacing the
 running server.
 
+### Upgrading to 0.5.35
+
+Back up and upgrade the server before updating connected desktop apps. Schema
+v14 adds tenant-scoped partial indexes and tightens device-order recounting
+with an automatic pre-migration backup while preserving all devices,
+credentials, accounts, and usage history. Test restoration before replacing the
+running server.
+
 ## 1. Build and start
 
 ```sh
 git clone https://github.com/Dawn-4ever1/TokenLens.git
 cd TokenLens/deploy
-sudo mkdir -p data backups && sudo chown 10001:10001 data backups   # the container runs as uid 10001
+sudo mkdir -p data backups downloads && sudo chown 10001:10001 data backups downloads   # the container runs as uid 10001
 docker compose up -d --build
 docker compose ps                       # should become "healthy"
 curl -s http://127.0.0.1:8787/healthz   # {"status":"ok"}
@@ -158,10 +166,12 @@ creates an isolated space and later sign-ins return to it. Self-hosted servers
 connect directly with operator-issued pairing codes (`pair-code create`) under
 **使用自己的服务器** without needing any OAuth app or email delivery setup.
 
-**GitHub (recommended, no cost).** Create a GitHub OAuth App (Settings →
-Developer settings → OAuth Apps), set its homepage to your domain, tick
-**Enable Device Flow**, then put the client id in `.env`. No client secret is
-needed and the app never stores one.
+**GitHub (recommended, no cost).** Create a GitHub App (Settings →
+Developer settings → GitHub Apps), set its homepage to your domain, tick
+**Enable Device Flow**, set **Account permissions → Email addresses** to
+**Read-only** (leave Webhook off and grant no repository permissions), then put
+its Client ID in `.env`. No client secret is needed and the app never stores
+one.
 
 ```sh
 TOKENLENS_GITHUB_CLIENT_ID=Iv1.xxxxxxxxxxxx

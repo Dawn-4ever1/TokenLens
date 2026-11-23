@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from "react";
 import { usePersistent } from "./store";
 
 export type ThemeMode = "light" | "dark" | "system";
@@ -19,13 +19,27 @@ export interface Settings {
 }
 
 const DEFAULTS: Settings = { theme: "system", direction: "editorial", refreshSeconds: 60, exactNumbers: false };
+const REFRESH_CHOICES = new Set([0, 30, 60, 300]);
+
+export function normalizeSettings(value: unknown): Settings | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const c = value as Partial<Settings>;
+  const theme: ThemeMode = c.theme === "light" || c.theme === "dark" || c.theme === "system" ? c.theme : DEFAULTS.theme;
+  const direction: Direction = c.direction === "editorial" || c.direction === "graphite" || c.direction === "paper" ? c.direction : DEFAULTS.direction;
+  const refreshSeconds = typeof c.refreshSeconds === "number" && Number.isFinite(c.refreshSeconds) && REFRESH_CHOICES.has(c.refreshSeconds)
+    ? c.refreshSeconds
+    : DEFAULTS.refreshSeconds;
+  const exactNumbers = typeof c.exactNumbers === "boolean" ? c.exactNumbers : DEFAULTS.exactNumbers;
+  return { theme, direction, refreshSeconds, exactNumbers };
+}
 
 interface SettingsContext {
   settings: Settings;
   update: (patch: Partial<Settings>) => void;
   dark: boolean;
-  /** Changes whenever colours or chart geometry change (theme or direction). */
+  /** Changes whenever colours or chart geometry change (after DOM attributes update). */
   paletteVersion: string;
+  appliedDirection: Direction;
 }
 
 const Context = createContext<SettingsContext | null>(null);
@@ -34,8 +48,18 @@ function systemDark(): boolean {
   return typeof matchMedia !== "undefined" && matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
+function applyRootTheme(direction: Direction, dark: boolean): { direction: Direction; version: string } {
+  if (typeof document !== "undefined") {
+    const root = document.documentElement;
+    root.classList.toggle("dark", dark);
+    root.dataset.direction = direction;
+    root.style.colorScheme = dark ? "dark" : "light";
+  }
+  return { direction, version: `${direction}-${dark ? "dark" : "light"}` };
+}
+
 export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [settings, setSettings] = usePersistent<Settings>("tokenlens.settings.v1", DEFAULTS);
+  const [settings, setSettings] = usePersistent<Settings>("tokenlens.settings.v1", DEFAULTS, undefined, normalizeSettings);
   const [prefersDark, setPrefersDark] = useState(systemDark);
   useEffect(() => {
     if (typeof matchMedia === "undefined") return;
@@ -45,20 +69,22 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     return () => query.removeEventListener("change", listener);
   }, []);
   const dark = settings.theme === "dark" || (settings.theme === "system" && prefersDark);
-  useEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle("dark", dark);
-    root.dataset.direction = settings.direction;
-    root.style.colorScheme = dark ? "dark" : "light";
+  const [applied, setApplied] = useState(() => applyRootTheme(settings.direction, dark));
+  useLayoutEffect(() => {
+    const next = applyRootTheme(settings.direction, dark);
+    setApplied((previous) =>
+      previous.version === next.version && previous.direction === next.direction ? previous : next,
+    );
   }, [dark, settings.direction]);
   const value = useMemo<SettingsContext>(
     () => ({
       settings,
-      update: (patch) => setSettings((previous) => ({ ...previous, ...patch })),
+      update: (patch) => setSettings((previous) => normalizeSettings({ ...previous, ...patch }) ?? DEFAULTS),
       dark,
-      paletteVersion: `${settings.direction}-${dark ? "dark" : "light"}`,
+      paletteVersion: applied.version,
+      appliedDirection: applied.direction,
     }),
-    [settings, setSettings, dark],
+    [settings, setSettings, dark, applied],
   );
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }

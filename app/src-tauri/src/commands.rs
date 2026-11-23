@@ -2,6 +2,7 @@
 //! ingest and read tokens never leave this process's Rust side.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use collector_core::credentials::{
@@ -48,6 +49,8 @@ pub struct AppState {
     github_device: Mutex<Option<String>>,
     /// A started Google authorization-code flow; the id stays in Rust (D051).
     google_flow: Mutex<Option<String>>,
+    /// Cached macOS menu-bar preference so status polling avoids disk reads.
+    menu_bar_total: AtomicBool,
     /// Serializes pairing, disconnects, credential rotation and account changes.
     connection: Mutex<()>,
 }
@@ -64,6 +67,16 @@ fn load_saved_server(paths: &Paths) -> Result<Option<Credentials>, credentials::
 #[cfg(test)]
 fn load_saved_server(_paths: &Paths) -> Result<Option<Credentials>, credentials::CredentialError> {
     Ok(None)
+}
+
+#[cfg(not(test))]
+fn load_saved_session(paths: &Paths) -> Option<String> {
+    crate::account::load_session(&paths.keychain_service)
+}
+
+#[cfg(test)]
+fn load_saved_session(_paths: &Paths) -> Option<String> {
+    None
 }
 
 impl AppState {
@@ -96,7 +109,8 @@ impl AppState {
                     None
                 }
             };
-        let account_session = crate::account::load_session(&paths.keychain_service);
+        let menu_bar_total = AtomicBool::new(config::menu_bar_total_enabled(&paths.state_dir));
+        let account_session = load_saved_session(&paths);
         Self {
             paths,
             collector,
@@ -115,8 +129,29 @@ impl AppState {
             account_space: Mutex::new(None),
             github_device: Mutex::new(None),
             google_flow: Mutex::new(None),
+            menu_bar_total,
             connection: Mutex::new(()),
         }
+    }
+
+    pub fn menu_bar_total(&self) -> bool {
+        self.menu_bar_total.load(Ordering::Relaxed)
+    }
+
+    fn save_account_session(&self, session: &str) -> CmdResult<()> {
+        #[cfg(test)]
+        if self.credential_override.is_some() {
+            return Ok(());
+        }
+        crate::account::save_session(&self.paths.keychain_service, session)
+    }
+
+    fn delete_account_session(&self) -> CmdResult<()> {
+        #[cfg(test)]
+        if self.credential_override.is_some() {
+            return Ok(());
+        }
+        crate::account::delete_session(&self.paths.keychain_service)
     }
 
     pub fn credentials(&self) -> Option<Credentials> {
@@ -218,6 +253,9 @@ pub struct AppStatus {
     pub account_avatar_url: Option<String>,
     /// Name of the signed-in space, for the account row in the app.
     pub account_space: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_app_version: Option<String>,
+    pub app_outdated: bool,
 }
 
 fn platform() -> &'static str {
@@ -242,10 +280,17 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
     };
     let local = credentials
         .as_ref()
-        .and_then(|_| sync::local_status(&queue).ok().flatten());
+        .and_then(|_| sync::local_summary(&queue).ok().flatten());
     let persisted_upload_state = (!viewing_local && !live.server_queue_error)
         .then(|| local.as_ref().and_then(|l| l.upload_state.clone()))
         .flatten();
+    let app_version = app.package_info().version.to_string();
+    let min_app_version = (!viewing_local)
+        .then_some(live.server_min_app_version)
+        .flatten();
+    let app_outdated = min_app_version
+        .as_deref()
+        .is_some_and(|min| collector_core::transport::version_below(&app_version, min));
     AppStatus {
         paired: credentials.is_some(),
         mode: credentials.as_ref().map(|c| {
@@ -257,7 +302,7 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
         }),
         device_id: credentials.as_ref().map(|c| c.device_id.clone()),
         server: state.server_credentials().map(|c| c.server_url),
-        app_version: app.package_info().version.to_string(),
+        app_version,
         collector: CollectorStatus {
             running: state.collector.is_running(),
             paused: state.is_paused(),
@@ -278,8 +323,7 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
             last_error: live.last_error,
         },
         autostart: autostart_enabled(app),
-        menu_bar_total: cfg!(target_os = "macos")
-            .then(|| config::menu_bar_total_enabled(&state.paths.state_dir)),
+        menu_bar_total: cfg!(target_os = "macos").then(|| state.menu_bar_total()),
         platform: platform(),
         form_factor: crate::device::detected_form_factor(),
         cloud_server: crate::account::CLOUD_URL,
@@ -288,6 +332,8 @@ pub fn status<R: tauri::Runtime>(app: &AppHandle<R>) -> AppStatus {
         account_display_name: lock(&state.account_display_name).clone(),
         account_avatar_url: lock(&state.account_avatar_url).clone(),
         account_space: lock(&state.account_space).clone(),
+        min_app_version,
+        app_outdated,
     }
 }
 
@@ -313,14 +359,37 @@ fn expire_connection_notifier<R: tauri::Runtime>(app: &AppHandle<R>) -> collecto
     Arc::new(move |credentials| expire_server_connection(&app, credentials))
 }
 
+fn ensure_local_initialized(state: &AppState) -> Option<Credentials> {
+    if let Some(credentials) = lock(&state.local_credentials).clone() {
+        return Some(credentials);
+    }
+    match initialize_local(
+        &state.paths,
+        &state.remote,
+        crate::device::detected_form_factor(),
+        "",
+    ) {
+        Ok(credentials) => {
+            *lock(&state.local_credentials) = Some(credentials.clone());
+            if state.collector.live().last_error.as_deref() == Some(LOCAL_ERROR) {
+                state.collector.set_error(None);
+            }
+            Some(credentials)
+        }
+        Err(_) => {
+            state.collector.set_error(Some(LOCAL_ERROR));
+            None
+        }
+    }
+}
+
 /// Starts local collection and optional server sync unless the user paused.
 pub fn start_collector<R: tauri::Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     if state.is_paused() {
         return;
     }
-    let Some(credentials) = lock(&state.local_credentials).clone() else {
-        state.collector.set_error(Some(LOCAL_ERROR));
+    let Some(credentials) = ensure_local_initialized(&state) else {
         return;
     };
     let Some(server) = state.remote.local() else {
@@ -397,6 +466,7 @@ fn forget_pairing_locked<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<()>
     Ok(())
 }
 
+#[cfg(test)]
 fn forget_pairing<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<()> {
     let state = app.state::<AppState>();
     let _connection = lock(&state.connection);
@@ -419,7 +489,8 @@ pub(crate) fn handle_server_unauthorized<R: tauri::Runtime>(
             return Err(CommandError::new("unauthorized"));
         }
         forget_pairing_locked(app)?;
-        clear_account(&state);
+        let _ = state.delete_account_session();
+        clear_account_memory(&state);
     }
     changed(app, Poke::Paired);
     // The rejected read keeps its error; this response already contains only
@@ -436,13 +507,12 @@ fn expire_server_connection<R: tauri::Runtime>(app: &AppHandle<R>, observed: Cre
     }));
 }
 
-fn adopt<R: tauri::Runtime>(
+fn adopt_locked<R: tauri::Runtime>(
     app: &AppHandle<R>,
     next: Credentials,
     rotating: bool,
 ) -> CmdResult<()> {
     let state = app.state::<AppState>();
-    let _connection = lock(&state.connection);
     let saved = state
         .save_server_credentials(&next)
         .map_err(|_| CommandError::new("keychain"));
@@ -458,7 +528,22 @@ fn adopt<R: tauri::Runtime>(
         state.collector.set_error(Some(KEYCHAIN_ERROR));
     }
     start_collector(app);
-    changed(app, Poke::Paired);
+    saved
+}
+
+fn adopt<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    next: Credentials,
+    rotating: bool,
+) -> CmdResult<()> {
+    let saved = {
+        let state = app.state::<AppState>();
+        let _connection = lock(&state.connection);
+        adopt_locked(app, next, rotating)
+    };
+    if saved.is_ok() || rotating {
+        changed(app, Poke::Paired);
+    }
     saved
 }
 
@@ -535,17 +620,47 @@ pub fn apply_paused(app: &AppHandle, paused: bool) -> CmdResult<AppStatus> {
             .map_err(|_| CommandError::new("server"))?;
         state.collector.stop();
     } else {
-        let _ = std::fs::remove_file(&marker);
+        match std::fs::remove_file(&marker) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(CommandError::new("server")),
+        }
         start_collector(app);
     }
     changed(app, Poke::Status);
     Ok(status(app))
 }
 
+/// Releases the updater's stop/start gate under the connection lock and
+/// resumes collection when either it was running before or the user unpaused.
+pub fn finish_update_and_resume<R: tauri::Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    let _connection = lock(&state.connection);
+    let resume = state.collector.finish_update();
+    if (resume || !state.is_paused()) && state.credentials().is_some() {
+        start_collector(app);
+    }
+}
+
 /// Restarting runs a full scan, an upload round and a heartbeat right away.
 pub fn restart_collector(app: &AppHandle) -> CmdResult<AppStatus> {
     let state = app.state::<AppState>();
     let _connection = lock(&state.connection);
+    if !state.is_paused() {
+        let _ = ensure_local_initialized(&state);
+    }
+    if state.collector.live().last_error.as_deref() == Some(KEYCHAIN_ERROR) {
+        match load_saved_server(&state.paths) {
+            Ok(None) => state.collector.set_error(None),
+            Ok(Some(credentials)) => {
+                if state.server_credentials().is_none() {
+                    *lock(&state.server_credentials) = Some(credentials);
+                }
+                state.collector.set_error(None);
+            }
+            Err(_) => {}
+        }
+    }
     state.require_credentials()?;
     if !state.is_paused() {
         state.collector.stop();
@@ -607,6 +722,7 @@ pub fn apply_menu_bar_total(app: &AppHandle, enabled: bool) -> CmdResult<AppStat
     let state = app.state::<AppState>();
     config::save_menu_bar_total_enabled(&state.paths.state_dir, enabled)
         .map_err(|_| CommandError::new("server"))?;
+    state.menu_bar_total.store(enabled, Ordering::Relaxed);
     changed(app, Poke::Status);
     Ok(status(app))
 }
@@ -659,6 +775,7 @@ pub async fn dashboard_get(
     path: String,
     query: Option<BTreeMap<String, String>>,
 ) -> CmdResult<Value> {
+    let health_check = path == "health";
     let url = remote::dashboard_path(&path, &query.unwrap_or_default())?;
     blocking(app, move |app| {
         let state = app.state::<AppState>();
@@ -668,7 +785,20 @@ pub async fn dashboard_get(
                 handle_server_unauthorized(app, credentials)?;
                 unreachable!("a rejected connection always returns its original error")
             }
-            result => result,
+            Ok(value) => {
+                if health_check
+                    && !local::is_local(&credentials)
+                    && let Some(min_app) = value
+                        .get("minAppVersion")
+                        .and_then(Value::as_str)
+                        .filter(|v| !v.is_empty())
+                        .map(str::to_owned)
+                {
+                    state.collector.set_server_min_app_version(Some(min_app));
+                }
+                Ok(value)
+            }
+            Err(error) => Err(error),
         }
     })
     .await
@@ -735,6 +865,23 @@ fn reusable_server_credentials(state: &AppState, server: &str) -> CmdResult<Opti
     }
 }
 
+/// Clears any signed-in profile after switching or revoking an account,
+/// while preserving `server_credentials` updates for the caller.
+fn set_signed_in_account(state: &AppState, signed: crate::account::SignedIn) {
+    *lock(&state.account_session) = Some(signed.session);
+    *lock(&state.account_email) = Some(signed.email);
+    *lock(&state.account_provider) = signed.provider;
+    *lock(&state.account_display_name) = signed.display_name;
+    *lock(&state.account_avatar_url) = signed.avatar_url;
+    *lock(&state.account_space) = Some(signed.space_name);
+}
+
+fn spawn_logout(server: String, session: String) {
+    drop(tauri::async_runtime::spawn_blocking(move || {
+        crate::account::logout(&server, &session);
+    }));
+}
+
 /// Finishes any sign-in: reuses this computer's existing cloud connection, or
 /// pairs exactly once for a new server. The account session never selects a
 /// tenant, and only Rust sees either credential.
@@ -747,56 +894,83 @@ fn complete_account_sign_in(
     name: &str,
     autostart: bool,
 ) -> CmdResult<AppStatus> {
-    let previous_session = state.account_session();
-    let next = if let Some(existing) = reusable_server_credentials(state, server)? {
-        // A previous session belongs to this exact device. If the account has
-        // changed, do not silently retain another account's space.
-        let bound = state.account_email();
-        if bound.as_deref().is_some_and(|old| old != signed.email) {
-            // Do not silently connect a different account to this space. Keep
-            // the working device and session untouched until explicitly reset.
+    let server = collector_core::transport::validate_server_url(server)
+        .map_err(|_| CommandError::new("bad_request"))?;
+    let previous_session = state.account_session().map(|session| {
+        let prev_server = state
+            .server_credentials()
+            .map_or_else(|| server.clone(), |c| c.server_url);
+        (prev_server, session)
+    });
+    let new_session = signed.session.clone();
+    let mut replaced_device = None;
+    let next = if let Some(existing) = reusable_server_credentials(state, &server)? {
+        // A previous session belongs to this exact device. If the account is
+        // different or unverified, do not silently retain another space.
+        let bound_email = match state.account_email() {
+            Some(email) => Some(email),
+            None => previous_session
+                .as_ref()
+                .filter(|(prev_server, _)| {
+                    prev_server.trim_end_matches('/') == server.trim_end_matches('/')
+                })
+                .and_then(|(_, old_session)| {
+                    crate::account::account_info(&server, old_session)
+                        .ok()
+                        .map(|profile| profile.email)
+                }),
+        };
+        if bound_email.as_deref() != Some(signed.email.as_str()) {
+            // Do not silently connect a different or unverified account to this
+            // space. Keep the working device untouched until explicitly reset.
             return Err(CommandError::new("account_mismatch"));
         }
+        let _connection = lock(&state.connection);
+        if state.server_credentials().as_ref() != Some(&existing) {
+            return Err(CommandError::new("server"));
+        }
+        state.save_account_session(&signed.session)?;
+        set_signed_in_account(state, signed);
         existing
     } else {
-        // Revoke only after the replacement has been obtained and saved. A
-        // network/keychain failure must never lose the existing connection.
-        let replaced = state.server_credentials();
         // Persist the random id before asking for a device. A crash or a lost
         // response can then safely retry without creating a second identity.
         let binding = crate::device::client_binding_id(&state.paths.state_dir)
             .map_err(|_| CommandError::new("server"))?;
         let next =
-            crate::account::create_device(server, &signed.session, form_factor, name, &binding)?;
-        adopt(app, next.clone(), false)?;
-        if let Some(previous) = replaced.filter(|old| old.device_id != next.device_id) {
-            let path = format!("dashboard/devices/{}/revoke", previous.device_id);
-            let _ = state.remote.post(&previous, &path, &json!({}));
+            crate::account::create_device(&server, &signed.session, form_factor, name, &binding)?;
+        {
+            let _connection = lock(&state.connection);
+            let replaced = state.server_credentials();
+            state.save_account_session(&signed.session)?;
+            if let Err(error) = adopt_locked(app, next.clone(), false) {
+                if let Some((_, ref prev)) = previous_session {
+                    let _ = state.save_account_session(prev);
+                } else {
+                    let _ = state.delete_account_session();
+                }
+                return Err(error);
+            }
+            set_signed_in_account(state, signed);
+            replaced_device = replaced;
         }
         next
     };
+    if let Some(previous) = replaced_device.filter(|old| old.device_id != next.device_id) {
+        let path = format!("dashboard/devices/{}/revoke", previous.device_id);
+        let _ = state.remote.post(&previous, &path, &json!({}));
+    }
     debug_assert_eq!(
         next.server_url.trim_end_matches('/'),
         server.trim_end_matches('/')
     );
-    {
-        let _connection = lock(&state.connection);
-        crate::account::save_session(&state.paths.keychain_service, &signed.session)?;
-        *lock(&state.account_session) = Some(signed.session.clone());
-        *lock(&state.account_email) = Some(signed.email.clone());
-        *lock(&state.account_provider) = signed.provider.clone();
-        *lock(&state.account_display_name) = signed.display_name.clone();
-        *lock(&state.account_avatar_url) = signed.avatar_url.clone();
-        *lock(&state.account_space) = Some(signed.space_name.clone());
-    }
     // Only after the replacement session is safely persisted do we retire the
-    // captured old session. Never revoke the newly published session, and do
-    // not turn a successful sign-in into a failure when the old one is gone.
-    if previous_session
-        .as_deref()
-        .is_some_and(|old| old != signed.session)
+    // captured old session on its original server. Never revoke the new one,
+    // and do not block sign-in if the old server is unreachable.
+    if let Some((prev_server, old_session)) = previous_session
+        && old_session != new_session
     {
-        crate::account::logout(server, previous_session.as_deref().unwrap());
+        spawn_logout(prev_server, old_session);
     }
     if autostart {
         let _ = write_autostart(app, true);
@@ -831,8 +1005,7 @@ pub async fn login_account(
     .await
 }
 
-fn clear_account(state: &AppState) {
-    crate::account::delete_session(&state.paths.keychain_service);
+fn clear_account_memory(state: &AppState) {
     lock(&state.account_session).take();
     lock(&state.account_email).take();
     lock(&state.account_provider).take();
@@ -863,7 +1036,8 @@ fn handle_account_refresh<R: tauri::Runtime>(
         {
             let result = forget_pairing_locked(app);
             if result.is_ok() {
-                clear_account(&state);
+                let _ = state.delete_account_session();
+                clear_account_memory(&state);
             }
             drop(_connection);
             result?;
@@ -886,22 +1060,20 @@ fn apply_account_refresh(
         return state.account_email();
     }
     match reply {
-        Ok((email, provider, display_name, avatar_url)) => {
-            *lock(&state.account_email) = Some(email.clone());
-            *lock(&state.account_provider) = provider;
-            *lock(&state.account_display_name) = display_name;
-            *lock(&state.account_avatar_url) = avatar_url;
-            Some(email)
+        Ok(profile) => {
+            *lock(&state.account_email) = Some(profile.email.clone());
+            *lock(&state.account_provider) = profile.provider;
+            *lock(&state.account_display_name) = profile.display_name;
+            *lock(&state.account_avatar_url) = profile.avatar_url;
+            if let Some(space) = profile.space_name {
+                *lock(&state.account_space) = Some(space);
+            }
+            Some(profile.email)
         }
         // A revoked or expired session must not linger as "signed in".
         Err(error) if error.kind == "unauthorized" => {
-            crate::account::delete_session(&state.paths.keychain_service);
-            lock(&state.account_session).take();
-            lock(&state.account_email).take();
-            lock(&state.account_provider).take();
-            lock(&state.account_display_name).take();
-            lock(&state.account_avatar_url).take();
-            lock(&state.account_space).take();
+            let _ = state.delete_account_session();
+            clear_account_memory(state);
             None
         }
         Err(_) => state.account_email(),
@@ -944,6 +1116,13 @@ pub async fn start_github_login(app: AppHandle, server: String) -> CmdResult<Val
     .await
 }
 
+fn clear_if_matches(slot: &Mutex<Option<String>>, expected: &str) {
+    let mut guard = lock(slot);
+    if guard.as_deref() == Some(expected) {
+        guard.take();
+    }
+}
+
 /// Polls the started flow. On approval this creates the space's device and
 /// switches the dashboard to the server, exactly like an email sign-in.
 #[tauri::command]
@@ -971,11 +1150,15 @@ pub async fn poll_github_login(
                 Ok(json!({ "status": "slow_down", "retryAfterSeconds": seconds }))
             }
             crate::account::GitHubPoll::Expired => {
-                let _ = lock(&state.github_device).take();
+                clear_if_matches(&state.github_device, &device);
                 Ok(json!({ "status": "expired" }))
             }
-            crate::account::GitHubPoll::Denied => Ok(json!({ "status": "denied" })),
+            crate::account::GitHubPoll::Denied => {
+                clear_if_matches(&state.github_device, &device);
+                Ok(json!({ "status": "denied" }))
+            }
             crate::account::GitHubPoll::Failed(code) => {
+                clear_if_matches(&state.github_device, &device);
                 Ok(json!({ "status": "failed", "failureCode": code }))
             }
             crate::account::GitHubPoll::SignedIn(signed) => {
@@ -988,7 +1171,7 @@ pub async fn poll_github_login(
                     &name,
                     autostart,
                 )?;
-                let _ = lock(&state.github_device).take();
+                clear_if_matches(&state.github_device, &device);
                 Ok(json!({ "status": "ok", "app": next }))
             }
         }
@@ -1137,11 +1320,17 @@ pub async fn poll_google_login(
         match crate::account::google_poll(&server, &flow)? {
             crate::account::GooglePoll::Pending => Ok(json!({ "status": "pending" })),
             crate::account::GooglePoll::Expired => {
-                let _ = lock(&state.google_flow).take();
+                clear_if_matches(&state.google_flow, &flow);
                 Ok(json!({ "status": "expired" }))
             }
-            crate::account::GooglePoll::Denied => Ok(json!({ "status": "denied" })),
-            crate::account::GooglePoll::Failed => Ok(json!({ "status": "failed" })),
+            crate::account::GooglePoll::Denied => {
+                clear_if_matches(&state.google_flow, &flow);
+                Ok(json!({ "status": "denied" }))
+            }
+            crate::account::GooglePoll::Failed => {
+                clear_if_matches(&state.google_flow, &flow);
+                Ok(json!({ "status": "failed" }))
+            }
             crate::account::GooglePoll::SignedIn(signed) => {
                 let next = complete_account_sign_in(
                     app,
@@ -1152,7 +1341,7 @@ pub async fn poll_google_login(
                     &name,
                     autostart,
                 )?;
-                let _ = lock(&state.google_flow).take();
+                clear_if_matches(&state.google_flow, &flow);
                 Ok(json!({ "status": "ok", "app": next }))
             }
         }
@@ -1208,12 +1397,18 @@ fn logout_account_with<R: tauri::Runtime>(
             .map_or_else(|| crate::account::CLOUD_URL.to_owned(), |c| c.server_url);
         let session = state.account_session();
         let disconnected = state.server_credentials().is_some();
-        // If the cloud credentials cannot be removed, leave the account and its
-        // cloud view intact rather than pretending that sign-out succeeded.
-        if disconnected {
-            forget_pairing_locked(app)?;
+        // If either keychain credential cannot be removed, leave the connection
+        // intact rather than pretending sign-out succeeded.
+        if session.is_some() {
+            state.delete_account_session()?;
         }
-        clear_account(&state);
+        if disconnected && let Err(error) = forget_pairing_locked(app) {
+            if let Some(ref previous) = session {
+                let _ = state.save_account_session(previous);
+            }
+            return Err(error);
+        }
+        clear_account_memory(&state);
         (session.map(|session| (server, session)), disconnected)
     };
     if let Some((server, session)) = signed_out {
@@ -1239,11 +1434,7 @@ pub async fn logout_account(app: AppHandle) -> CmdResult<AppStatus> {
         logout_account_with(app, |server, session| {
             // Local sign-out must not wait for a slow or offline network. The
             // captured session is independent of any later account sign-in.
-            let server = server.to_owned();
-            let session = session.to_owned();
-            drop(tauri::async_runtime::spawn_blocking(move || {
-                crate::account::logout(&server, &session);
-            }));
+            spawn_logout(server.to_owned(), session.to_owned());
         })
     })
     .await
@@ -1264,6 +1455,11 @@ pub async fn use_local_mode(
         if lock(&state.local_credentials).is_none() {
             let next = initialize_local(&state.paths, &state.remote, form_factor, &name)?;
             *lock(&state.local_credentials) = Some(next);
+        }
+        if matches!(
+            state.collector.live().last_error.as_deref(),
+            Some(LOCAL_ERROR | KEYCHAIN_ERROR)
+        ) {
             state.collector.set_error(None);
         }
         start_collector(app);
@@ -1289,13 +1485,32 @@ fn remove_local_device_impl<R: tauri::Runtime>(app: &AppHandle<R>) -> CmdResult<
         .filter(local::is_local)
         .ok_or(CommandError::new("not_paired"))?;
     let local = state.remote.local().ok_or(CommandError::new("server"))?;
-    if !local.retire(&credentials.device_id)? {
-        return Err(CommandError::new("not_found"));
+    let marker = state.paths.paused_marker();
+    let was_paused = state.is_paused();
+    std::fs::create_dir_all(&state.paths.state_dir)
+        .and_then(|()| std::fs::write(&marker, b""))
+        .map_err(|_| CommandError::new("server"))?;
+    state.collector.stop();
+    match local.retire(&credentials.device_id) {
+        Ok(true) => {}
+        Ok(false) => {
+            if !was_paused {
+                let _ = std::fs::remove_file(&marker);
+                start_collector(app);
+            }
+            return Err(CommandError::new("not_found"));
+        }
+        Err(error) => {
+            if !was_paused {
+                let _ = std::fs::remove_file(&marker);
+                start_collector(app);
+            }
+            return Err(error.into());
+        }
     }
     local::delete_credentials(&state.paths.state_dir).map_err(|_| CommandError::new("server"))?;
     lock(&state.local_credentials).take();
-    state.collector.stop();
-    std::fs::write(state.paths.paused_marker(), b"").map_err(|_| CommandError::new("server"))?;
+    state.collector.reset();
     changed(app, Poke::Paired);
     Ok(status(app))
 }
@@ -1308,8 +1523,9 @@ pub async fn remove_local_device(app: AppHandle) -> CmdResult<AppStatus> {
 #[tauri::command]
 pub async fn unpair_device(app: AppHandle) -> CmdResult<AppStatus> {
     blocking(app, |app| {
-        forget_pairing(app)?;
-        Ok(status(app))
+        logout_account_with(app, |server, session| {
+            spawn_logout(server.to_owned(), session.to_owned());
+        })
     })
     .await
 }
@@ -1338,7 +1554,6 @@ pub async fn set_menu_bar_total(app: AppHandle, enabled: bool) -> CmdResult<AppS
 pub async fn create_pair_code(app: AppHandle) -> CmdResult<Value> {
     blocking(app, |app| {
         let state = app.state::<AppState>();
-        let _connection = lock(&state.connection);
         let credentials = state.require_server()?;
         let reply = state.remote.post(&credentials, "pair/codes", &json!({}))?;
         pair_code_reply(reply).ok_or(CommandError::new("server"))
@@ -1415,27 +1630,31 @@ pub async fn set_device_form_factor(
 pub async fn rotate_credentials(app: AppHandle) -> CmdResult<AppStatus> {
     blocking(app, |app| {
         let state = app.state::<AppState>();
-        let current = state.require_server()?;
-        let path = format!("dashboard/devices/{}/rotate", current.device_id);
-        let reply = state.remote.post(&current, &path, &json!({}))?;
-        let rotated: PairClaimResponse =
-            serde_json::from_value(reply).map_err(|_| CommandError::new("server"))?;
-        if rotated.device_id != current.device_id
-            || !token_ok(&rotated.ingest_token, "tdi_")
-            || !token_ok(&rotated.read_token, "tdr_")
         {
-            return Err(CommandError::new("server"));
+            let _connection = lock(&state.connection);
+            let current = state.require_server()?;
+            let path = format!("dashboard/devices/{}/rotate", current.device_id);
+            let reply = state.remote.post(&current, &path, &json!({}))?;
+            let rotated: PairClaimResponse =
+                serde_json::from_value(reply).map_err(|_| CommandError::new("server"))?;
+            if rotated.device_id != current.device_id
+                || !token_ok(&rotated.ingest_token, "tdi_")
+                || !token_ok(&rotated.read_token, "tdr_")
+            {
+                return Err(CommandError::new("server"));
+            }
+            adopt_locked(
+                app,
+                Credentials {
+                    server_url: current.server_url,
+                    device_id: rotated.device_id,
+                    ingest_token: rotated.ingest_token,
+                    read_token: rotated.read_token,
+                },
+                true,
+            )?;
         }
-        adopt(
-            app,
-            Credentials {
-                server_url: current.server_url,
-                device_id: rotated.device_id,
-                ingest_token: rotated.ingest_token,
-                read_token: rotated.read_token,
-            },
-            true,
-        )?;
+        changed(app, Poke::Paired);
         Ok(status(app))
     })
     .await
@@ -1452,7 +1671,22 @@ pub async fn revoke_device(app: AppHandle, device_id: String) -> CmdResult<AppSt
         let path = format!("dashboard/devices/{device_id}/revoke");
         state.remote.post(&credentials, &path, &json!({}))?;
         if device_id == credentials.device_id {
-            forget_pairing(app)?;
+            let signed_out = {
+                let _connection = lock(&state.connection);
+                if state.server_credentials().as_ref() != Some(&credentials) {
+                    return Ok(status(app));
+                }
+                let session = state.account_session();
+                let server = credentials.server_url;
+                forget_pairing_locked(app)?;
+                let _ = state.delete_account_session();
+                clear_account_memory(&state);
+                session.map(|session| (server, session))
+            };
+            if let Some((server, session)) = signed_out {
+                spawn_logout(server, session);
+            }
+            changed(app, Poke::Paired);
         } else {
             changed(app, Poke::Status);
         }
@@ -1503,12 +1737,13 @@ mod tests {
             apply_account_refresh(
                 &state,
                 "tls_fixture_current",
-                Ok((
-                    email.clone(),
-                    Some("google".into()),
-                    Some("Current account".into()),
-                    Some(avatar.clone())
-                ))
+                Ok(crate::account::AccountProfile {
+                    email: email.clone(),
+                    provider: Some("google".into()),
+                    display_name: Some("Current account".into()),
+                    avatar_url: Some(avatar.clone()),
+                    space_name: Some("Refreshed space".into()),
+                })
             ),
             Some(email.clone())
         );
@@ -1520,6 +1755,10 @@ mod tests {
         assert_eq!(
             lock(&state.account_avatar_url).as_deref(),
             Some(avatar.as_str())
+        );
+        assert_eq!(
+            lock(&state.account_space).as_deref(),
+            Some("Refreshed space")
         );
         assert_eq!(
             apply_account_refresh(
@@ -1557,12 +1796,13 @@ mod tests {
                         let reply = if unauthorized {
                             Err(CommandError::new("unauthorized"))
                         } else {
-                            Ok((
-                                "old@example.test".into(),
-                                Some("github".into()),
-                                Some("Old account".into()),
-                                None,
-                            ))
+                            Ok(crate::account::AccountProfile {
+                                email: "old@example.test".into(),
+                                provider: Some("github".into()),
+                                display_name: Some("Old account".into()),
+                                avatar_url: None,
+                                space_name: Some("Old space".into()),
+                            })
                         };
                         apply_account_refresh(pending_state, &session, reply)
                     });
@@ -1912,6 +2152,7 @@ mod tests {
                 account_space: Mutex::new(None),
                 github_device: Mutex::new(None),
                 google_flow: Mutex::new(None),
+                menu_bar_total: AtomicBool::new(true),
                 connection: Mutex::new(()),
             })
             .build(tauri::test::mock_context(tauri::test::noop_assets()))
@@ -2335,5 +2576,124 @@ mod tests {
         assert!(!token_ok("tdr_abc", "tdi_"));
         assert!(!token_ok("tdi_a b", "tdi_"));
         assert!(!token_ok(&format!("tdi_{}", "x".repeat(260)), "tdi_"));
+    }
+
+    #[test]
+    fn clear_if_matches_preserves_newer_oauth_flow_id() {
+        let slot = Mutex::new(Some("flow-new".to_owned()));
+        clear_if_matches(&slot, "flow-old");
+        assert_eq!(lock(&slot).as_deref(), Some("flow-new"));
+        clear_if_matches(&slot, "flow-new");
+        assert!(lock(&slot).is_none());
+    }
+
+    #[test]
+    fn finish_update_and_resume_respects_current_pause_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+
+        // Paused before update; unpaused mid-install -> resumes cleanly.
+        std::fs::write(state.paths.paused_marker(), b"").unwrap();
+        state.collector.begin_update();
+        assert!(!state.collector.is_running());
+        std::fs::remove_file(state.paths.paused_marker()).unwrap();
+        finish_update_and_resume(&app);
+        assert!(state.collector.is_running());
+
+        // Paused after finish test -> stays stopped when paused mid-install.
+        state.collector.begin_update();
+        std::fs::write(state.paths.paused_marker(), b"").unwrap();
+        finish_update_and_resume(&app);
+        assert!(!state.collector.is_running());
+        state.collector.stop();
+    }
+
+    #[test]
+    fn server_min_app_version_flags_app_outdated_only_in_server_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+        state
+            .collector
+            .set_server_min_app_version(Some("99.0.0".to_owned()));
+        assert!(!status(&app).app_outdated);
+
+        let server = Credentials {
+            server_url: "https://dash.example.com".into(),
+            ..state
+                .remote
+                .local()
+                .unwrap()
+                .pair(FormFactor::Desktop, "Cloud")
+                .unwrap()
+        };
+        *lock(&state.server_credentials) = Some(server);
+        let outdated = status(&app);
+        assert_eq!(outdated.min_app_version.as_deref(), Some("99.0.0"));
+        assert!(outdated.app_outdated);
+
+        state
+            .collector
+            .set_server_min_app_version(Some("0.1.0".to_owned()));
+        assert!(!status(&app).app_outdated);
+    }
+
+    #[test]
+    fn disconnecting_clears_signed_in_account_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = tauri::test::mock_builder()
+            .manage(AppState::load(Paths {
+                keychain_service: "unused-test-store".into(),
+                state_dir: dir.path().to_path_buf(),
+                home: None,
+            }))
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let app = app.handle().clone();
+        let state = app.state::<AppState>();
+        let server = Credentials {
+            server_url: "https://dash.example.com".into(),
+            ..state
+                .remote
+                .local()
+                .unwrap()
+                .pair(FormFactor::Desktop, "Cloud")
+                .unwrap()
+        };
+        adopt(&app, server, false).unwrap();
+        set_signed_in_account(
+            &state,
+            crate::account::SignedIn {
+                session: "tls_fixture".into(),
+                email: "user@example.test".into(),
+                space_name: "Space".into(),
+                provider: Some("github".into()),
+                display_name: Some("User".into()),
+                avatar_url: None,
+            },
+        );
+        let result = logout_account_with(&app, |_, _| {}).unwrap();
+        assert_eq!(result.mode, Some("local"));
+        assert_eq!(result.account_email, None);
+        assert_eq!(result.account_space, None);
+        assert!(state.account_session().is_none());
+        assert!(state.server_credentials().is_none());
     }
 }

@@ -42,11 +42,12 @@ $binary = Join-Path $target 'release\tokenlens-app.exe'
 node (Join-Path $PSScriptRoot 'check-bundle-privacy.mjs') $binary
 if ($LASTEXITCODE -ne 0) { throw 'Build privacy check failed.' }
 
-$installer = Get-ChildItem (Join-Path $target 'release\bundle\nsis') -Filter '*-setup.exe' |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $installer) { throw 'Installer is missing.' }
-if ($updater -and -not (Test-Path -LiteralPath "$($installer.FullName).sig" -PathType Leaf)) {
-  throw 'Updater signature is missing.'
+$installers = @(Get-ChildItem (Join-Path $target 'release\bundle\nsis') -Filter '*-setup.exe')
+if ($installers.Count -ne 1) { throw "Expected exactly one installer, found $($installers.Count)." }
+$installer = $installers[0]
+$signature = "$($installer.FullName).sig"
+if ($updater -and (-not (Test-Path -LiteralPath $signature -PathType Leaf) -or (Get-Item -LiteralPath $signature).Length -le 0)) {
+  throw 'Updater signature is missing or empty.'
 }
 '{0}  {1:N1} MB  {2}' -f $installer.FullName, ($installer.Length / 1MB), $installer.LastWriteTime
 'Installer ready; no private home path or user name inside the app binary.'

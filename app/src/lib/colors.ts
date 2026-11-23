@@ -55,7 +55,7 @@ export interface Palette {
 }
 
 export function usePalette(): Palette {
-  const { paletteVersion, settings } = useSettings();
+  const { paletteVersion, appliedDirection } = useSettings();
   return useMemo(() => {
     const cache = new Map<string, string>();
     const resolve = (css: string) => {
@@ -65,12 +65,12 @@ export function usePalette(): Palette {
     };
     const styles = getComputedStyle(document.documentElement);
     return {
-      direction: settings.direction,
+      direction: appliedDirection,
       fontFamily: styles.getPropertyValue("--font-body").trim(),
       tooltipRadius: Number.parseFloat(styles.getPropertyValue("--radius-control")) || 8,
-      chartLineWidth: settings.direction === "paper" ? 1.25 : settings.direction === "graphite" ? 2 : 2,
-      chartAreaOpacity: settings.direction === "paper" ? 0 : settings.direction === "graphite" ? 0.1 : 0.22,
-      barMaxWidth: settings.direction === "graphite" ? 32 : 24,
+      chartLineWidth: appliedDirection === "paper" ? 1.25 : 2,
+      chartAreaOpacity: appliedDirection === "paper" ? 0 : appliedDirection === "graphite" ? 0.1 : 0.22,
+      barMaxWidth: appliedDirection === "graphite" ? 32 : 24,
       ink: resolve("var(--ink)"),
       ink2: resolve("var(--ink-2)"),
       ink3: resolve("var(--ink-3)"),
@@ -83,7 +83,6 @@ export function usePalette(): Palette {
       bad: resolve("var(--bad)"),
       resolve,
     };
-    // paletteVersion is the dependency: the theme attributes changed.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paletteVersion]);
+    // paletteVersion changes only after DOM theme/direction attributes update.
+  }, [paletteVersion, appliedDirection]);
 }

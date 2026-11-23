@@ -17,6 +17,7 @@ use crate::secrets::Secret;
 pub const FLOW_TTL_MS: i64 = 10 * 60 * 1000;
 pub const FLOW_INTERVAL_SECONDS: u64 = 5;
 const MAX_FLOWS: usize = 256;
+const MAX_FLOWS_PER_CLIENT: usize = 8;
 const DEFAULT_REDIRECT_URI: &str = "https://tokenlens.online/api/auth/google/callback";
 
 /// Google could not be reached or answered something unusable.
@@ -49,6 +50,7 @@ pub struct Google {
     auth_base: String,
     token_base: String,
     userinfo_base: String,
+    agent: ureq::Agent,
 }
 
 impl Google {
@@ -69,16 +71,27 @@ impl Google {
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| DEFAULT_REDIRECT_URI.to_owned());
+        let env_base = |name: &str, default: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default.to_owned())
+        };
         Some(Self {
             client_id,
             client_secret: Secret::from_header(&client_secret),
             redirect_uri,
-            auth_base: std::env::var("TOKENLENS_GOOGLE_AUTH_BASE")
-                .unwrap_or_else(|_| "https://accounts.google.com".to_owned()),
-            token_base: std::env::var("TOKENLENS_GOOGLE_TOKEN_BASE")
-                .unwrap_or_else(|_| "https://oauth2.googleapis.com".to_owned()),
-            userinfo_base: std::env::var("TOKENLENS_GOOGLE_USERINFO_BASE")
-                .unwrap_or_else(|_| "https://openidconnect.googleapis.com".to_owned()),
+            auth_base: env_base("TOKENLENS_GOOGLE_AUTH_BASE", "https://accounts.google.com"),
+            token_base: env_base(
+                "TOKENLENS_GOOGLE_TOKEN_BASE",
+                "https://oauth2.googleapis.com",
+            ),
+            userinfo_base: env_base(
+                "TOKENLENS_GOOGLE_USERINFO_BASE",
+                "https://openidconnect.googleapis.com",
+            ),
+            agent: Self::build_agent(),
         })
     }
 
@@ -98,10 +111,11 @@ impl Google {
             auth_base: auth_base.trim_end_matches('/').to_owned(),
             token_base: token_base.trim_end_matches('/').to_owned(),
             userinfo_base: userinfo_base.trim_end_matches('/').to_owned(),
+            agent: Self::build_agent(),
         }
     }
 
-    fn agent() -> ureq::Agent {
+    fn build_agent() -> ureq::Agent {
         ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .max_redirects(0)
@@ -141,7 +155,8 @@ impl Google {
             ("code_verifier", verifier),
         ])
         .map_err(|_| GoogleError)?;
-        let response = Self::agent()
+        let response = self
+            .agent
             .post(&format!("{}/token", self.token_base))
             .header("Accept", "application/json")
             .header("Content-Type", "application/x-www-form-urlencoded")
@@ -165,7 +180,8 @@ impl Google {
     }
 
     pub fn identity(&self, token: &str) -> Result<Identity, GoogleError> {
-        let response = Self::agent()
+        let response = self
+            .agent
             .get(&format!("{}/v1/userinfo", self.userinfo_base))
             .header("Accept", "application/json")
             .header("Authorization", format!("Bearer {token}"))
@@ -247,6 +263,7 @@ fn random_b64(bytes: usize) -> String {
 
 pub enum Outcome {
     Pending,
+    Exchanging,
     Ready {
         session: Secret,
         email: String,
@@ -258,6 +275,7 @@ pub enum Outcome {
 }
 
 struct Flow {
+    client_key: String,
     state: String,
     verifier: String,
     expires_at: i64,
@@ -300,9 +318,17 @@ impl GoogleFlows {
     }
 
     pub fn start(&self, now: i64) -> Option<Started> {
+        self.start_for("default", now)
+    }
+
+    pub fn start_for(&self, client_key: &str, now: i64) -> Option<Started> {
         let mut flows = self.flows.lock().ok()?;
         Self::prune(&mut flows, now);
-        if flows.len() >= MAX_FLOWS {
+        let client_flows = flows
+            .values()
+            .filter(|flow| flow.client_key == client_key)
+            .count();
+        if flows.len() >= MAX_FLOWS || client_flows >= MAX_FLOWS_PER_CLIENT {
             return None;
         }
         let flow_id = random_b64(32);
@@ -312,6 +338,7 @@ impl GoogleFlows {
         flows.insert(
             flow_id.clone(),
             Flow {
+                client_key: client_key.to_owned(),
                 state: state.clone(),
                 verifier,
                 expires_at: now + FLOW_TTL_MS,
@@ -325,27 +352,29 @@ impl GoogleFlows {
         })
     }
 
-    /// The PKCE verifier for a callback's `state`, if the flow is still live.
-    pub fn verifier(&self, state: &str, now: i64) -> Option<String> {
+    /// Atomically claims the PKCE verifier for a pending callback `state`,
+    /// transitioning the flow to `Outcome::Exchanging` so concurrent duplicate
+    /// callbacks cannot replay the authorization code.
+    pub fn claim_verifier(&self, state: &str, now: i64) -> Option<String> {
         let mut flows = self.flows.lock().ok()?;
         Self::prune(&mut flows, now);
-        flows
-            .values()
-            .find(|flow| flow.state == state && matches!(flow.outcome, Outcome::Pending))
-            .map(|flow| flow.verifier.clone())
+        let flow = flows
+            .values_mut()
+            .find(|flow| flow.state == state && matches!(flow.outcome, Outcome::Pending))?;
+        flow.outcome = Outcome::Exchanging;
+        Some(flow.verifier.clone())
     }
 
-    /// Records the callback's result. Only a pending flow accepts one, so a
-    /// repeated or late callback cannot replace an already delivered login.
+    /// Records the callback's result. Only a pending or exchanging flow accepts
+    /// one, so a repeated or late callback cannot replace a delivered login.
     pub fn complete(&self, state: &str, outcome: Outcome, now: i64) -> bool {
         let Ok(mut flows) = self.flows.lock() else {
             return false;
         };
         Self::prune(&mut flows, now);
-        let Some(flow) = flows
-            .values_mut()
-            .find(|flow| flow.state == state && matches!(flow.outcome, Outcome::Pending))
-        else {
+        let Some(flow) = flows.values_mut().find(|flow| {
+            flow.state == state && matches!(flow.outcome, Outcome::Pending | Outcome::Exchanging)
+        }) else {
             return false;
         };
         flow.outcome = outcome;
@@ -361,7 +390,7 @@ impl GoogleFlows {
             return FlowPoll::Expired;
         };
         match flow.outcome {
-            Outcome::Pending => {
+            Outcome::Pending | Outcome::Exchanging => {
                 flows.insert(flow_id.to_owned(), flow);
                 FlowPoll::Pending
             }
@@ -419,9 +448,19 @@ mod tests {
             flows.poll(&started.flow_id, 2_000),
             FlowPoll::Pending
         ));
-        // The callback finds the verifier by state; the challenge the app
+        // The callback claims the verifier once by state; the challenge the app
         // opened Google with must be exactly its S256 hash (PKCE).
-        let verifier = flows.verifier(&started.state, 2_000).expect("verifier");
+        let verifier = flows
+            .claim_verifier(&started.state, 2_000)
+            .expect("verifier");
+        assert!(
+            flows.claim_verifier(&started.state, 2_000).is_none(),
+            "a duplicate callback cannot claim the same PKCE verifier twice"
+        );
+        assert!(matches!(
+            flows.poll(&started.flow_id, 2_000),
+            FlowPoll::Pending
+        ));
         assert_eq!(
             started.challenge,
             URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()))
@@ -453,8 +492,30 @@ mod tests {
         ));
         assert!(
             flows
-                .verifier(&expired.state, 10_000 + FLOW_TTL_MS + 1)
+                .claim_verifier(&expired.state, 10_000 + FLOW_TTL_MS + 1)
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn flows_cap_per_client_without_blocking_other_clients() {
+        let flows = GoogleFlows::default();
+        for _ in 0..MAX_FLOWS_PER_CLIENT {
+            assert!(flows.start_for("198.51.100.1", 1_000).is_some());
+        }
+        assert!(
+            flows.start_for("198.51.100.1", 1_000).is_none(),
+            "one client cannot start unbounded concurrent Google flows"
+        );
+        assert!(
+            flows.start_for("203.0.113.2", 1_000).is_some(),
+            "another client keeps its own per-client allowance"
+        );
+        // After expiry, capacity opens cleanly.
+        assert!(
+            flows
+                .start_for("198.51.100.1", 1_000 + FLOW_TTL_MS + 1)
+                .is_some()
         );
     }
 

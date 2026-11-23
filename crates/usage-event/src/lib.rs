@@ -165,10 +165,57 @@ pub enum ValidationError {
     NonFiniteNumber,
     NegativeNumber,
     InvalidCreditsRateVersion,
+    InvalidKey,
+    InvalidField,
+    NegativeTimestamp,
+}
+
+const MAX_TEXT_BYTES: usize = 512;
+
+fn is_hex_64(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_plain_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= MAX_TEXT_BYTES && !value.chars().any(char::is_control)
 }
 
 impl UsageEvent {
     pub fn validate(&self) -> Result<(), ValidationError> {
+        if !is_hex_64(&self.event_key)
+            || self.project_hash.as_deref().is_some_and(|h| !is_hex_64(h))
+        {
+            return Err(ValidationError::InvalidKey);
+        }
+        if self.ts < 0 {
+            return Err(ValidationError::NegativeTimestamp);
+        }
+        if !is_plain_text(&self.client)
+            || !is_plain_text(&self.session_id)
+            || !is_plain_text(&self.model_id)
+        {
+            return Err(ValidationError::InvalidField);
+        }
+        for optional in [
+            self.session_title.as_deref(),
+            self.parent_session_id.as_deref(),
+            self.provider_id.as_deref(),
+            self.rate_version.as_deref(),
+            self.project_label.as_deref(),
+            self.pricing_model_id.as_deref(),
+            self.billing_provider.as_deref(),
+            self.service_tier.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !is_plain_text(optional) {
+                return Err(ValidationError::InvalidField);
+            }
+        }
         for value in [self.cost_usd, self.credits].into_iter().flatten() {
             if !value.is_finite() {
                 return Err(ValidationError::NonFiniteNumber);
@@ -373,5 +420,32 @@ mod tests {
         let mut value = serde_json::to_value(fixture_event()).expect("serialize event");
         value["workspaceLabel"] = serde_json::Value::String("not-allowed".into());
         assert!(serde_json::from_value::<UsageEvent>(value).is_err());
+    }
+
+    #[test]
+    fn validate_enforces_key_timestamp_and_text_bounds() {
+        let mut bad_key = fixture_event();
+        bad_key.event_key = "not-hex".into();
+        assert_eq!(bad_key.validate(), Err(ValidationError::InvalidKey));
+
+        let mut bad_proj = fixture_event();
+        bad_proj.project_hash = Some("UPPER".into());
+        assert_eq!(bad_proj.validate(), Err(ValidationError::InvalidKey));
+
+        let mut neg_ts = fixture_event();
+        neg_ts.ts = -1;
+        assert_eq!(neg_ts.validate(), Err(ValidationError::NegativeTimestamp));
+
+        let mut empty_parent = fixture_event();
+        empty_parent.parent_session_id = Some(String::new());
+        assert_eq!(empty_parent.validate(), Err(ValidationError::InvalidField));
+
+        let mut ctrl = fixture_event();
+        ctrl.session_id = "bad\nid".into();
+        assert_eq!(ctrl.validate(), Err(ValidationError::InvalidField));
+
+        let mut oversized = fixture_event();
+        oversized.model_id = "m".repeat(513);
+        assert_eq!(oversized.validate(), Err(ValidationError::InvalidField));
     }
 }

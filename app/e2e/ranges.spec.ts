@@ -126,12 +126,13 @@ test("local use still has a scope picker, without cloud data", async ({ page }) 
   await page.keyboard.press("Escape");
   await expect(page.getByRole("heading", { name: "MacBook Pro 本机", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Mac mini", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).not.toContainText(/\d/);
   await page.getByRole("button", { name: "筛选", exact: true }).click();
   await page.getByRole("checkbox", { name: /Codex/ }).click();
-  await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("2");
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("1");
   await page.getByRole("button", { name: "清除全部", exact: true }).click();
   await expect(page.getByRole("button", { name: "设备范围：MacBook Pro（本机）", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "筛选", exact: true })).toContainText("1");
+  await expect(page.getByRole("button", { name: "筛选", exact: true })).not.toContainText(/\d/);
 });
 
 for (const width of [1440, 1200, 1100, 1000, 900]) {

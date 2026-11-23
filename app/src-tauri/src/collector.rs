@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
@@ -38,6 +39,7 @@ pub struct Live {
     pub upload_state: Option<String>,
     pub server_upload_state: Option<String>,
     pub server_queue_error: bool,
+    pub server_min_app_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,8 +94,17 @@ struct Lifecycle {
     update_resume: Option<bool>,
 }
 
+struct RunningGuard(Arc<AtomicBool>);
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 pub struct Collector {
     live: Arc<Mutex<Live>>,
+    running_flag: Arc<AtomicBool>,
     lifecycle: Mutex<Lifecycle>,
 }
 
@@ -109,6 +120,7 @@ impl Collector {
     pub fn new() -> Self {
         Self {
             live: Arc::new(Mutex::new(Live::default())),
+            running_flag: Arc::new(AtomicBool::new(false)),
             lifecycle: Mutex::new(Lifecycle::default()),
         }
     }
@@ -121,15 +133,16 @@ impl Collector {
         lock(&self.live).last_error = message.map(str::to_owned);
     }
 
+    pub fn set_server_min_app_version(&self, version: Option<String>) {
+        lock(&self.live).server_min_app_version = version;
+    }
+
     pub fn reset(&self) {
         *lock(&self.live) = Live::default();
     }
 
     pub fn is_running(&self) -> bool {
-        lock(&self.lifecycle)
-            .running
-            .as_ref()
-            .is_some_and(|running| !running.handle.is_finished())
+        self.running_flag.load(Ordering::SeqCst)
     }
 
     #[cfg(test)]
@@ -195,23 +208,13 @@ impl Collector {
         let (sender, receiver) = watch::channel();
         let loop_sender = sender.clone();
         let live = Arc::clone(&self.live);
+        self.running_flag.store(true, Ordering::SeqCst);
+        let running_flag = Arc::clone(&self.running_flag);
         let spawned = std::thread::Builder::new()
             .name("collector".to_owned())
             .spawn(move || {
-                let salt_dir = match &mode {
-                    RunMode::LocalFirst { .. } => state_dir.join("local-queue"),
-                    #[cfg(test)]
-                    RunMode::Single(_) => state_dir.clone(),
-                };
-                let project_salt = match collector_core::state::ensure_project_salt_in(&salt_dir) {
-                    Ok(salt) => Some(salt),
-                    Err(_) => {
-                        lock(&live).last_error = Some(QUEUE_ERROR.to_owned());
-                        return;
-                    }
-                };
+                let _running_guard = RunningGuard(running_flag);
                 let mut options = options;
-                options.project_salt = project_salt;
                 match mode {
                     RunMode::LocalFirst {
                         local,
@@ -233,7 +236,17 @@ impl Collector {
                         ) else {
                             return;
                         };
-                        let mut out = StatusSink::new(live, notify);
+                        match syncer.ensure_project_salt() {
+                            Ok(salt) => options.project_salt = Some(salt),
+                            Err(_) => {
+                                lock(&live).last_error = Some(QUEUE_ERROR.to_owned());
+                                notify(Event::Changed);
+                                syncer.stop();
+                                return;
+                            }
+                        }
+                        let viewing_server = syncer.server.is_some();
+                        let mut out = StatusSink::new(live, notify, viewing_server);
                         watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
                         syncer.stop();
                     }
@@ -250,7 +263,16 @@ impl Collector {
                         ) else {
                             return;
                         };
-                        let mut out = StatusSink::new(live, notify);
+                        match syncer.ensure_project_salt() {
+                            Ok(salt) => options.project_salt = Some(salt),
+                            Err(_) => {
+                                lock(&live).last_error = Some(QUEUE_ERROR.to_owned());
+                                notify(Event::Changed);
+                                syncer.stop();
+                                return;
+                            }
+                        }
+                        let mut out = StatusSink::new(live, notify, false);
                         watch::run(&options, loop_sender, receiver, &mut out, Some(&mut syncer));
                         syncer.stop();
                     }
@@ -258,7 +280,10 @@ impl Collector {
             });
         match spawned {
             Ok(handle) => lifecycle.running = Some(Running { sender, handle }),
-            Err(_) => lock(&self.live).last_error = Some(QUEUE_ERROR.to_owned()),
+            Err(_) => {
+                self.running_flag.store(false, Ordering::SeqCst);
+                lock(&self.live).last_error = Some(QUEUE_ERROR.to_owned());
+            }
         }
     }
 
@@ -430,7 +455,15 @@ impl Fanout {
         })
     }
 
+    fn ensure_project_salt(&self) -> Result<String, StateError> {
+        self.local.syncer.ensure_project_salt()
+    }
+
     fn stop(self) {
+        self.local.syncer.request_stop();
+        if let Some(server) = &self.server {
+            server.syncer.request_stop();
+        }
         self.local.syncer.stop();
         if let Some(server) = self.server {
             server.syncer.stop();
@@ -609,6 +642,9 @@ fn set_server_queue_status(live: &mut Live, okay: bool) -> bool {
 }
 
 fn apply_server_line(live: &mut Live, line: &mut SyncLine) {
+    if let Some(min_app) = line.min_app_version.take().filter(|v| !v.is_empty()) {
+        live.server_min_app_version = Some(min_app);
+    }
     let state = server_sync_state(line);
     if state.as_deref() == Some("queue_error") {
         set_server_queue_status(live, false);
@@ -735,14 +771,16 @@ struct StatusSink {
     buffer: Vec<u8>,
     live: Arc<Mutex<Live>>,
     notify: Notify,
+    viewing_server: bool,
 }
 
 impl StatusSink {
-    fn new(live: Arc<Mutex<Live>>, notify: Notify) -> Self {
+    fn new(live: Arc<Mutex<Live>>, notify: Notify, viewing_server: bool) -> Self {
         Self {
             buffer: Vec::new(),
             live,
             notify,
+            viewing_server,
         }
     }
 
@@ -750,14 +788,14 @@ impl StatusSink {
         let Ok(value) = serde_json::from_slice::<Value>(line) else {
             return;
         };
-        let event = apply(&mut lock(&self.live), &value, now_ms());
+        let event = apply(&mut lock(&self.live), &value, now_ms(), self.viewing_server);
         if let Some(event) = event {
             (self.notify)(event);
         }
     }
 }
 
-fn apply(live: &mut Live, value: &Value, now: i64) -> Option<Event> {
+fn apply(live: &mut Live, value: &Value, now: i64, viewing_server: bool) -> Option<Event> {
     let ok = value.get("ok").and_then(Value::as_bool).unwrap_or(false);
     if value.get("scan").is_some() {
         if ok {
@@ -784,7 +822,8 @@ fn apply(live: &mut Live, value: &Value, now: i64) -> Option<Event> {
         .iter()
         .filter_map(|field| value.get(*field).and_then(Value::as_u64))
         .sum::<u64>();
-    if kind == "upload" && ok && accepted > 0 {
+    let from_server = value.get("state").is_none();
+    if kind == "upload" && ok && accepted > 0 && (!viewing_server || from_server) {
         Some(Event::Uploaded)
     } else {
         Some(Event::Changed)
@@ -1299,7 +1338,7 @@ mod tests {
             upload_state: Some("ok".to_owned()),
             ..Live::default()
         };
-        apply(&mut live, &serde_json::to_value(line).unwrap(), 1);
+        apply(&mut live, &serde_json::to_value(line).unwrap(), 1, false);
         assert_eq!(live.upload_state.as_deref(), Some("ok"));
     }
 
@@ -1307,7 +1346,7 @@ mod tests {
     fn scan_lines_update_the_last_scan_and_clear_scan_errors() {
         let mut live = Live::default();
         assert_eq!(
-            apply(&mut live, &json!({"scan": "full", "ok": false}), 5),
+            apply(&mut live, &json!({"scan": "full", "ok": false}), 5, false),
             Some(Event::Changed)
         );
         assert_eq!(live.last_error.as_deref(), Some(SCAN_ERROR));
@@ -1316,6 +1355,7 @@ mod tests {
             &mut live,
             &json!({"scan": "triggered", "ok": true, "events": 3}),
             9,
+            false,
         );
         assert_eq!(live.last_scan_at, Some(9));
         assert_eq!(live.last_error, None);
@@ -1327,7 +1367,7 @@ mod tests {
             last_error: Some(QUEUE_ERROR.to_owned()),
             ..Live::default()
         };
-        apply(&mut live, &json!({"scan": "full", "ok": true}), 1);
+        apply(&mut live, &json!({"scan": "full", "ok": true}), 1, false);
         assert_eq!(live.last_error.as_deref(), Some(QUEUE_ERROR));
     }
 
@@ -1335,26 +1375,57 @@ mod tests {
     fn sync_lines_track_upload_state_and_new_numbers() {
         let mut live = Live::default();
         let queued = json!({"sync": "queued", "ok": true, "events": 4, "backlog": 4});
-        assert_eq!(apply(&mut live, &queued, 1), Some(Event::Changed));
+        assert_eq!(apply(&mut live, &queued, 1, false), Some(Event::Changed));
         let uploaded = json!({"sync": "upload", "ok": true, "state": "ok", "accepted": 4});
-        assert_eq!(apply(&mut live, &uploaded, 2), Some(Event::Uploaded));
+        assert_eq!(apply(&mut live, &uploaded, 2, false), Some(Event::Uploaded));
         assert_eq!(live.upload_state.as_deref(), Some("ok"));
         let duplicates = json!({"sync": "upload", "ok": true, "state": "ok", "duplicates": 4});
-        assert_eq!(apply(&mut live, &duplicates, 3), Some(Event::Changed));
+        assert_eq!(
+            apply(&mut live, &duplicates, 3, false),
+            Some(Event::Changed)
+        );
         let failed =
             json!({"sync": "upload", "ok": false, "state": "backoff:network", "retryInMs": 30000});
-        apply(&mut live, &failed, 4);
+        apply(&mut live, &failed, 4, false);
         assert_eq!(live.upload_state.as_deref(), Some("backoff:network"));
         let heartbeat = json!({"sync": "heartbeat", "ok": false, "state": "backoff:network", "error": "network"});
-        apply(&mut live, &heartbeat, 4);
+        apply(&mut live, &heartbeat, 4, false);
         assert_eq!(live.upload_state.as_deref(), Some("backoff:network"));
         assert_eq!(
             apply(
                 &mut live,
                 &json!({"watch": "roots", "roots": 3, "ok": true}),
-                5
+                5,
+                false,
             ),
             None
+        );
+
+        // When viewing the server, local uploads only notify Changed while
+        // server uploads (stripped of `state` by apply_server_line) emit Uploaded.
+        let mut server_live = Live::default();
+        assert_eq!(
+            apply(&mut server_live, &uploaded, 6, true),
+            Some(Event::Changed)
+        );
+        let mut server_line = SyncLine {
+            sync: "upload",
+            ok: true,
+            state: Some("ok".to_owned()),
+            accepted: Some(4),
+            min_app_version: Some("0.9.0".to_owned()),
+            ..SyncLine::default()
+        };
+        apply_server_line(&mut server_live, &mut server_line);
+        assert_eq!(server_live.server_min_app_version.as_deref(), Some("0.9.0"));
+        assert_eq!(
+            apply(
+                &mut server_live,
+                &serde_json::to_value(server_line).unwrap(),
+                7,
+                true,
+            ),
+            Some(Event::Uploaded)
         );
     }
 
@@ -1368,6 +1439,7 @@ mod tests {
             Arc::new(move |_| {
                 seen.fetch_add(1, Ordering::SeqCst);
             }),
+            false,
         );
         sink.write_all(b"{\"scan\":\"full\",\"ok\":tr").unwrap();
         assert_eq!(count.load(Ordering::SeqCst), 0);
@@ -1395,7 +1467,10 @@ mod tests {
         let (sender, receiver) = watch::channel();
         let (stopping, stopped) = std::sync::mpsc::channel();
         let (release, released) = std::sync::mpsc::channel();
+        collector.running_flag.store(true, Ordering::SeqCst);
+        let running_flag = Arc::clone(&collector.running_flag);
         let handle = std::thread::spawn(move || {
+            let _running_guard = RunningGuard(running_flag);
             let _queue_lock = queue_lock;
             assert!(matches!(receiver.recv().unwrap(), Msg::Stop));
             stopping.send(()).unwrap();
@@ -1442,6 +1517,10 @@ mod tests {
         });
         stopping.recv_timeout(Duration::from_secs(5)).unwrap();
         assert!(collector_core::state::lock_queue(&queue).is_err());
+        assert!(
+            collector.is_running(),
+            "is_running must read atomically without blocking on stop()"
+        );
 
         let second_collector = Arc::clone(&collector);
         let (attempt, attempted) = std::sync::mpsc::channel();
@@ -1593,5 +1672,60 @@ mod tests {
         );
         assert!(syncer.is_none());
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn fanout_preserves_project_salt_and_legacy_local_queue_migration() {
+        let root = tempfile::tempdir().unwrap();
+        let local = TestDestination::new(&root.path().join("local-store"), true);
+        let queue = root.path().join("queue");
+        let mut legacy = State::open(&queue).unwrap();
+        legacy
+            .prepare(
+                &local.credentials.device_id,
+                collector_core::PARSER_GENERATION,
+            )
+            .unwrap();
+        legacy
+            .record_changes(collector_core::PARSER_GENERATION, &fixture_events(), 1)
+            .unwrap();
+        drop(legacy);
+
+        let local_destination = Destination {
+            credentials: local.credentials.clone(),
+            local: Some(Arc::clone(&local.server)),
+        };
+        let collector = Collector::new();
+        collector.start_with_server(
+            WatchOptions {
+                home: root.path().join("empty-home"),
+                explicit_home: true,
+                use_env_roots: false,
+                worker_program: root.path().join("nonexistent-test-worker"),
+                timing: Timing::default(),
+                worker_timeout: Duration::from_millis(100),
+                exit_after: None,
+                ignored: vec![],
+                upstream_cache_dir: None,
+                project_salt: None,
+            },
+            queue.clone(),
+            local_destination,
+            None,
+            true,
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+        );
+        wait_until(|| local.input() == 540);
+        collector.stop();
+
+        let state = State::open_readonly(&queue.join("local-queue"))
+            .unwrap()
+            .expect("migrated local queue");
+        let salt = state
+            .meta(collector_core::state::meta::PROJECT_SALT)
+            .unwrap()
+            .expect("project_salt persisted across start");
+        assert_eq!(salt.len(), 64);
     }
 }

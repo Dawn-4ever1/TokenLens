@@ -72,6 +72,7 @@ pub struct GitHub {
     client_id: String,
     oauth_base: String,
     api_base: String,
+    agent: ureq::Agent,
 }
 
 impl GitHub {
@@ -83,12 +84,18 @@ impl GitHub {
         if client_id.is_empty() {
             return None;
         }
+        let env_base = |name: &str, default: &str| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().trim_end_matches('/').to_owned())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| default.to_owned())
+        };
         Some(Self {
             client_id,
-            oauth_base: std::env::var("TOKENLENS_GITHUB_OAUTH_BASE")
-                .unwrap_or_else(|_| "https://github.com".to_owned()),
-            api_base: std::env::var("TOKENLENS_GITHUB_API_BASE")
-                .unwrap_or_else(|_| "https://api.github.com".to_owned()),
+            oauth_base: env_base("TOKENLENS_GITHUB_OAUTH_BASE", "https://github.com"),
+            api_base: env_base("TOKENLENS_GITHUB_API_BASE", "https://api.github.com"),
+            agent: Self::build_agent(),
         })
     }
 
@@ -98,10 +105,11 @@ impl GitHub {
             client_id: client_id.to_owned(),
             oauth_base: oauth_base.trim_end_matches('/').to_owned(),
             api_base: api_base.trim_end_matches('/').to_owned(),
+            agent: Self::build_agent(),
         }
     }
 
-    fn agent() -> ureq::Agent {
+    fn build_agent() -> ureq::Agent {
         ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .max_redirects(0)
@@ -117,7 +125,8 @@ impl GitHub {
         payload: &serde_json::Value,
     ) -> Result<serde_json::Value, GitHubError> {
         let body = serde_json::to_vec(payload).map_err(|_| GitHubError)?;
-        let response = Self::agent()
+        let response = self
+            .agent
             .post(url)
             .header("Accept", "application/json")
             .header("Content-Type", "application/json")
@@ -193,7 +202,8 @@ impl GitHub {
     }
 
     fn identity(&self, token: &str) -> Poll {
-        let user = match Self::agent()
+        let user = match self
+            .agent
             .get(&format!("{}/user", self.api_base))
             .header("Accept", "application/vnd.github+json")
             .header("Authorization", format!("Bearer {token}"))
@@ -227,7 +237,8 @@ impl GitHub {
             })
             .map(str::to_owned);
         // Only a verified address may create or join a space.
-        let emails = Self::agent()
+        let emails = self
+            .agent
             .get(&format!("{}/user/emails", self.api_base))
             .header("Accept", "application/vnd.github+json")
             .header("Authorization", format!("Bearer {token}"))

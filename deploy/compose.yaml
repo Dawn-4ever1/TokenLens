@@ -28,6 +28,8 @@ services:
       # Only Caddy on this machine can reach it; Caddy adds TLS.
       - "127.0.0.1:8787:8787"
     read_only: true
+    mem_limit: 512m
+    pids_limit: 256
     tmpfs:
       - /tmp
     cap_drop:

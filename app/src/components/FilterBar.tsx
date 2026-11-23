@@ -1,10 +1,10 @@
 import { CalendarRange, Check, ChevronDown, ListFilter, MonitorSmartphone, RefreshCw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ClientName, ModelName } from "@/components/common";
 import { compact, relativeTime } from "@/lib/format";
 import { useDashboard, useData } from "@/lib/data";
 import { clientLabel, modelLabel, NO_PROJECT_KEY } from "@/lib/labels";
-import { RANGE_PRESETS, activeFilterCount, rangeLabel, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
+import { RANGE_PRESETS, activeFilterCount, isValidDate, rangeLabel, resolveRange, todayIn, type Filters, type RangePreset } from "@/lib/range";
 import { useStatus } from "@/lib/status";
 import type { FilterOption, FilterOptions, Summary } from "@/lib/types";
 import { Badge, Button, Popover, PopoverContent, PopoverTrigger, Segmented, Tip, cn, inputClass } from "./ui";
@@ -71,7 +71,7 @@ function CustomDates({ filters, onChange }: { filters: Filters; onChange: (patch
           value={filters.customFrom ?? ""}
           min="2000-01-01"
           max="2100-12-31"
-          onChange={(event) => event.target.value && onChange({ customFrom: event.target.value })}
+          onChange={(event) => isValidDate(event.target.value) && onChange({ customFrom: event.target.value })}
         />
       </label>
       <label className="block text-xs text-ink-2">
@@ -82,7 +82,7 @@ function CustomDates({ filters, onChange }: { filters: Filters; onChange: (patch
           value={filters.customTo ?? ""}
           min="2000-01-01"
           max="2100-12-31"
-          onChange={(event) => event.target.value && onChange({ customTo: event.target.value })}
+          onChange={(event) => isValidDate(event.target.value) && onChange({ customTo: event.target.value })}
         />
       </label>
     </div>
@@ -95,8 +95,21 @@ export function DeviceScopePicker() {
   const [open, setOpen] = useState(false);
   const local = status?.mode === "local";
   const devices = options?.devices ?? [];
-  const selectedDevice = local ? devices.find((device) => device.isCurrent) ?? devices[0] : filters.devices.length === 1 ? devices.find((device) => device.key === filters.devices[0]) : undefined;
-  const selectedLabel = selectedDevice ? `${selectedDevice.label}${selectedDevice.isCurrent ? "（本机）" : ""}` : "全账号";
+  const selectedDevice = local
+    ? devices.find((device) => device.isCurrent) ?? devices[0]
+    : filters.devices.length === 1
+      ? devices.find((device) => device.key === filters.devices[0])
+      : undefined;
+  const selectedLabel = local
+    ? selectedDevice ? `${selectedDevice.label}${selectedDevice.isCurrent ? "（本机）" : ""}` : "本机"
+    : selectedDevice
+      ? `${selectedDevice.label}${selectedDevice.isCurrent ? "（本机）" : ""}`
+      : filters.devices.length === 1
+        ? "已选设备"
+        : filters.devices.length > 1
+          ? `已选 ${filters.devices.length} 台设备`
+          : "全账号";
+  const allChecked = !local && filters.devices.length === 0 && filters.deviceScope === "all";
   const choose = (deviceKey: string | null) => {
     setFilters((previous) => ({
       ...previous,
@@ -117,9 +130,9 @@ export function DeviceScopePicker() {
       <PopoverContent className="w-64 p-1.5" align="start">
         <div role="menu" aria-label="设备范围" className="max-h-[60vh] space-y-0.5 overflow-y-auto" aria-busy={!options}>
           {!local && (
-            <button type="button" role="menuitemradio" aria-checked={!selectedDevice} onClick={() => choose(null)} className="flex h-8 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left text-[13px] text-ink hover:bg-surface-2">
+            <button type="button" role="menuitemradio" aria-checked={allChecked} onClick={() => choose(null)} className="flex h-8 w-full items-center gap-2 rounded-[var(--radius-control)] px-2.5 text-left text-[13px] text-ink hover:bg-surface-2">
               <span className="min-w-0 flex-1">全账号</span>
-              {!selectedDevice && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
+              {allChecked && <Check className="h-4 w-4 shrink-0 text-primary" aria-hidden />}
             </button>
           )}
           {devices.map((device) => {
@@ -143,7 +156,7 @@ export function FilterMenu() {
   const { filters, setFilters, options, timeZone } = useData();
   const { status } = useStatus();
   const local = status?.mode === "local";
-  const count = activeFilterCount(filters);
+  const count = activeFilterCount(filters, local);
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -233,6 +246,10 @@ function FilterSection({
   onToggle: (value: string) => void;
   onClear: () => void;
 }) {
+  const visible = [
+    ...options.slice(0, 40),
+    ...options.slice(40).filter((option) => selected.includes(option.key)),
+  ];
   return (
     <fieldset className="min-w-0 p-2">
       <legend className="flex w-full items-center justify-between px-1 pb-1 text-xs text-ink-3">
@@ -245,7 +262,7 @@ function FilterSection({
       </legend>
       {options.length === 0 && <p className="px-1 py-1 text-xs text-ink-3">暂无</p>}
       <ul className="space-y-px">
-        {options.slice(0, 40).map((option) => {
+        {visible.map((option) => {
           const checked = selected.includes(option.key);
           return (
             <li key={option.key}>
@@ -279,6 +296,9 @@ function FilterSection({
           );
         })}
       </ul>
+      {options.length > visible.length && (
+        <p className="px-1.5 pt-1 text-[11px] text-ink-3">仅显示前 40 项（共 {options.length} 项）</p>
+      )}
     </fieldset>
   );
 }
@@ -286,9 +306,15 @@ function FilterSection({
 export function RefreshStatus() {
   const { refresh, lastLoadedAt } = useData();
   const [, setNow] = useState(0);
+  const spinTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    const id = setInterval(() => setNow((n) => n + 1), 30_000);
-    return () => clearInterval(id);
+    const id = setInterval(() => {
+      if (document.visibilityState === "visible") setNow((n) => n + 1);
+    }, 30_000);
+    return () => {
+      clearInterval(id);
+      if (spinTimer.current) clearTimeout(spinTimer.current);
+    };
   }, []);
   const [spinning, setSpinning] = useState(false);
   return (
@@ -302,7 +328,11 @@ export function RefreshStatus() {
           onClick={() => {
             refresh();
             setSpinning(true);
-            setTimeout(() => setSpinning(false), 700);
+            if (spinTimer.current) clearTimeout(spinTimer.current);
+            spinTimer.current = setTimeout(() => {
+              spinTimer.current = null;
+              setSpinning(false);
+            }, 700);
           }}
         >
           <RefreshCw className={cn("h-4 w-4", spinning && "animate-spin")} aria-hidden />

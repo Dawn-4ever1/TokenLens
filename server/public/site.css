@@ -163,7 +163,7 @@ h2 { margin-bottom: 16px; font-size: clamp(31px, 3.2vw, 43px); font-weight: 650;
 .faq-plus::after { transform: rotate(90deg); }
 .faq-list details[open] .faq-plus::after { display: none; }
 .faq-list details p { margin: -3px 32px 24px 0; color: var(--muted); font-size: 13px; line-height: 1.95; }
-.faq-list details code { padding: 1px 6px; border-radius: 5px; background: var(--surface-alt); border: 1px solid var(--line); color: var(--ink); font-family: var(--mono); font-size: 12px; word-break: break-all; }
+.faq-list details code { padding: 1px 6px; border-radius: 5px; background: var(--surface-alt); border: 1px solid var(--line); color: var(--ink); font-family: var(--mono); font-size: 12px; word-break: normal; overflow-wrap: anywhere; }
 
 .download-section { background: #1a1714; color: #f6f1e7; border-top: 0; }
 .download-inner { display: grid; grid-template-columns: 1.1fr .9fr; align-items: center; gap: 65px; }
@@ -191,6 +191,9 @@ h2 { margin-bottom: 16px; font-size: clamp(31px, 3.2vw, 43px); font-weight: 650;
 .footer-column strong { margin-bottom: 5px; color: var(--ink); font-size: 12px; font-weight: 650; }
 .footer-column a { font-size: 12px; }
 .footer-bottom { display: flex; justify-content: space-between; gap: 20px; padding-top: 23px; border-top: 1px solid var(--line); font-size: 10px; }
+.footer-inner { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 14px 24px; padding-top: 23px; border-top: 1px solid var(--line); }
+.footer-links { display: flex; flex-wrap: wrap; gap: 18px; }
+.footer-links a:hover { color: var(--ink); }
 
 /* The policy deliberately uses a quiet, readable single-column document. */
 .policy-main { padding-block: 64px 84px; }
@@ -359,6 +362,7 @@ h2 { margin-bottom: 16px; font-size: clamp(31px, 3.2vw, 43px); font-weight: 650;
   .footer-brand { grid-column: 1 / -1; margin-bottom: 5px; }
   .footer-brand p br { display: none; }
   .footer-bottom { flex-direction: column; gap: 7px; }
+  .footer-inner { flex-direction: column; align-items: flex-start; gap: 10px; }
   .policy-main { padding-block: 42px 60px; }
   .stats-summary { grid-template-columns: repeat(2, 1fr); }
   .stats-table { min-width: 620px; }

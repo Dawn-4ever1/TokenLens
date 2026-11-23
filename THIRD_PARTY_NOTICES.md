@@ -36,12 +36,21 @@ SOFTWARE.
 ## Product and vendor marks
 
 The agent and model-vendor marks under `app/src/assets/brands/`,
-`.github/readme/brands/`, and in `app/src/components/brandMarks.tsx` (Claude,
-OpenAI, GitHub Copilot, Gemini, Qoder, DeepSeek and others) are trademarks of their respective owners. They are
-shown only to identify which tool or model a number belongs to, and do not
-imply any endorsement. Sources are listed in `app/src/assets/brands/README.md`.
+`.github/readme/brands/`, in `app/src/components/brandMarks.tsx`, and the
+sign-in provider marks in `app/src/pages/Pairing.tsx` (Claude, OpenAI,
+GitHub / GitHub Copilot, Google, Gemini, Qoder, DeepSeek and others) are
+trademarks of their respective owners. They are shown only to identify which
+tool, model, or sign-in provider is referenced, and do not imply any
+endorsement. Sources are listed in `app/src/assets/brands/README.md`.
 The MIT license of this project does not cover these marks. Owners who want a
 mark removed can open an issue.
+
+## GitHub Primer Octicons
+
+The Copilot vector mark in `app/src/components/brandMarks.tsx` and
+`.github/readme/brands/copilot-*.svg` derives from GitHub Primer Octicons
+(`copilot-24`, https://github.com/primer/octicons), Copyright (c) GitHub, Inc.,
+licensed under the MIT License.
 
 ## Design reference
 

@@ -52,7 +52,7 @@ fn main() {
     // a couple for IPC while the window is open.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .max_blocking_threads(8)
+        .max_blocking_threads(16)
         .thread_keep_alive(Duration::from_secs(10))
         .enable_all()
         .build()
@@ -60,10 +60,12 @@ fn main() {
     tauri::async_runtime::set(runtime.handle().clone());
 
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            window::open(app);
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|arg| arg == BACKGROUND_ARG) {
+                window::open(app);
+            }
         }))
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec![BACKGROUND_ARG]),
@@ -74,10 +76,6 @@ fn main() {
                 .build(),
         )
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(AppState::load(config::Paths::resolve()))
-        .manage(updater::UpdateState::load(
-            &config::Paths::resolve().state_dir,
-        ))
         .on_menu_event(|app, event| tray::on_menu_event(app, &event))
         .on_window_event(|window, event| {
             if matches!(event, WindowEvent::CloseRequested { .. }) && window.label() == window::MAIN
@@ -128,6 +126,9 @@ fn main() {
                 app.set_menu(menu)?;
             }
             let handle = app.handle().clone();
+            let paths = config::Paths::resolve();
+            app.manage(updater::UpdateState::load(&paths.state_dir));
+            app.manage(AppState::load(paths));
             tray::install(&handle)?;
             commands::initialize_autostart(&handle);
             commands::start_collector(&handle);
@@ -148,7 +149,11 @@ fn main() {
         } => api.prevent_exit(),
         #[cfg(target_os = "macos")]
         RunEvent::Reopen { .. } => window::open(app),
-        RunEvent::Exit => app.state::<AppState>().collector.stop(),
+        RunEvent::Exit => {
+            if let Some(state) = app.try_state::<AppState>() {
+                state.collector.stop();
+            }
+        }
         _ => {}
     });
 }

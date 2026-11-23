@@ -66,6 +66,7 @@ pub struct AppState {
     release_mirror: Option<Arc<crate::release_mirror::ReleaseMirror>>,
     auth_limiter: Arc<Mutex<crate::limiter::AuthLimiter>>,
     site_stats_buffer: Arc<site_stats::SiteStatsBuffer>,
+    download_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl AppState {
@@ -89,6 +90,7 @@ impl AppState {
             release_mirror: None,
             auth_limiter: Arc::new(Mutex::new(crate::limiter::AuthLimiter::default())),
             site_stats_buffer: Arc::new(site_stats::SiteStatsBuffer::default()),
+            download_permits: Arc::new(tokio::sync::Semaphore::new(32)),
         }
     }
 
@@ -163,6 +165,21 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    pub fn allow_auth_scoped_with(
+        &self,
+        scope: &'static str,
+        key: &str,
+        per_key_limit: u32,
+        global_limit: u32,
+    ) -> bool {
+        self.auth_limiter
+            .lock()
+            .map(|mut limiter| {
+                limiter.allow_scoped_with(scope, key, self.now_ms(), per_key_limit, global_limit)
+            })
+            .unwrap_or(false)
+    }
+
     /// The price catalog new events are priced with (D042); `None` until one
     /// has loaded.
     pub fn pricer(&self) -> Option<Arc<Pricer>> {
@@ -205,6 +222,7 @@ impl AppState {
             if changed < BATCH {
                 return Ok(total);
             }
+            tokio::task::yield_now().await;
         }
     }
 
@@ -334,6 +352,14 @@ impl AppState {
             .unwrap_or_else(|| "-".to_owned())
     }
 
+    pub fn time_zone_label(&self) -> &'static str {
+        if self.time_zone == chrono_tz::Asia::Shanghai {
+            "北京时间"
+        } else {
+            self.time_zone.name()
+        }
+    }
+
     fn check_ingest_budget(&self, device_id: &str) -> Result<(), ApiError> {
         self.ingest_limiter
             .lock()
@@ -359,6 +385,15 @@ impl AppState {
         })
         .await
         .map_err(|_| ApiError::Internal)?
+    }
+
+    pub(crate) async fn read_db<T, F>(&self, work: F) -> Result<T, ApiError>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Connection, i64) -> T + Send + 'static,
+    {
+        self.with_reader_snapshot(move |conn, _, now| Ok(work(conn, now)))
+            .await
     }
 }
 
@@ -386,7 +421,12 @@ impl AppState {
         let index = self.reader_cursor.fetch_add(1, Ordering::Relaxed) % readers.len();
         let now = self.clock.now_ms();
         tokio::task::spawn_blocking(move || {
-            let conn = readers[index].lock().map_err(|_| ApiError::Internal)?;
+            let guard = (0..readers.len())
+                .find_map(|offset| readers[(index + offset) % readers.len()].try_lock().ok());
+            let conn = match guard {
+                Some(guard) => guard,
+                None => readers[index].lock().map_err(|_| ApiError::Internal)?,
+            };
             let failed = |error: db::DbError| {
                 tracing::error!(kind = error_kind(&error), "database read failed");
                 ApiError::Internal
@@ -634,29 +674,22 @@ fn no_store<T: Serialize>(value: &T) -> Response {
 
 /// Extracts an ephemeral client address key for in-memory rate limiting only.
 /// Behind Caddy (`reverse_proxy 127.0.0.1:8787`), Caddy appends the peer IP to
-/// `X-Forwarded-For`, so the rightmost valid IP identifies the real caller and
-/// prevents client-forged `X-Forwarded-For` prefixes from bypassing limits.
+/// `X-Forwarded-For`, so walking all `X-Forwarded-For` headers right-to-left
+/// identifies the real peer IP and prevents client-forged headers from bypassing
+/// limits. `X-Real-IP` is ignored because reverse proxies set `X-Forwarded-For`.
 /// Direct loopback requests without proxy headers fall back to `"direct"`.
 /// Never logged or stored in the database.
 pub(crate) fn client_rate_key(headers: &HeaderMap) -> String {
-    if let Some(forwarded) = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-    {
+    for header_val in headers.get_all("x-forwarded-for").iter().rev() {
+        let Ok(forwarded) = header_val.to_str() else {
+            continue;
+        };
         for part in forwarded.rsplit(',') {
             let candidate = part.trim();
             if let Ok(ip) = candidate.parse::<std::net::IpAddr>() {
                 return ip.to_string();
             }
         }
-    }
-    if let Some(real_ip) = headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        && let Ok(ip) = real_ip.parse::<std::net::IpAddr>()
-    {
-        return ip.to_string();
     }
     "direct".to_owned()
 }
@@ -794,6 +827,11 @@ fn collector_is_valid(collector: &envelope::CollectorInfo) -> bool {
 }
 
 /// Server-side bounds on top of `UsageEvent::validate()`.
+const MIN_EVENT_TS_MS: i64 = 946_684_800_000; // 2000-01-01T00:00:00Z
+const MAX_EVENT_TS_MS: i64 = 4_102_444_800_000; // 2100-01-01T00:00:00Z
+const MAX_MESSAGE_COUNT: i64 = 1_000_000;
+const MAX_DURATION_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
 fn event_is_storable(event: &UsageEvent) -> bool {
     let key_ok = event.event_key.len() == 64
         && event
@@ -810,6 +848,11 @@ fn event_is_storable(event: &UsageEvent) -> bool {
     ]
     .iter()
     .all(|&value| value <= MAX_SAFE_INTEGER);
+    let ids_ok = !event.session_id.is_empty()
+        && event
+            .parent_session_id
+            .as_deref()
+            .is_none_or(|id| !id.is_empty());
     let texts_ok = [
         Some(event.session_id.as_str()),
         event.parent_session_id.as_deref(),
@@ -829,9 +872,14 @@ fn event_is_storable(event: &UsageEvent) -> bool {
     .all(|text| is_plain_text(text, MAX_TEXT_BYTES));
     key_ok
         && tokens_ok
+        && ids_ok
         && texts_ok
         && is_code_like(&event.client, 64)
-        && (0..=MAX_SAFE_INTEGER as i64).contains(&event.ts)
+        && (MIN_EVENT_TS_MS..=MAX_EVENT_TS_MS).contains(&event.ts)
+        && (0..=MAX_MESSAGE_COUNT).contains(&event.message_count)
+        && event
+            .duration_ms
+            .is_none_or(|ms| (0..=MAX_DURATION_MS).contains(&ms))
 }
 
 fn classify(raw: serde_json::Value) -> Result<UsageEvent, RejectReason> {
@@ -960,10 +1008,23 @@ async fn ingest_events(
     let encoding = content_encoding(&headers)?;
     let bytes = read_limited(body, envelope::MAX_BODY_BYTES).await?;
     let expected_device = caller.device_id.clone();
-    let parsed =
-        tokio::task::spawn_blocking(move || parse_batch(&bytes, encoding, &expected_device))
-            .await
-            .map_err(|_| ApiError::Internal)??;
+    let pricer = state.pricer();
+    let (parsed, priced) = tokio::task::spawn_blocking(move || {
+        let parsed = parse_batch(&bytes, encoding, &expected_device)?;
+        let priced = parsed
+            .events
+            .iter()
+            .map(|event| {
+                crate::pricing::price(
+                    pricer.as_deref(),
+                    &crate::pricing::PricingInput::from(event),
+                )
+            })
+            .collect::<Vec<_>>();
+        Ok::<_, ApiError>((parsed, priced))
+    })
+    .await
+    .map_err(|_| ApiError::Internal)??;
     let ParsedBatch {
         envelope,
         events,
@@ -972,10 +1033,9 @@ async fn ingest_events(
     let writer_device = caller.device_id.clone();
     let writer_tenant = caller.tenant_id.clone();
     let rejected_count = rejected.len();
-    let pricer = state.pricer();
     let (counts, store_id) = state
         .with_db(move |conn, now| {
-            let counts = db::write_batch(
+            let counts = db::write_batch_priced(
                 conn,
                 &writer_tenant,
                 &writer_device,
@@ -986,7 +1046,7 @@ async fn ingest_events(
                     rejected: rejected_count,
                 },
                 &events,
-                pricer.as_deref(),
+                &priced,
                 now,
             )?;
             Ok((counts, db::store_id(conn)?))
@@ -1059,8 +1119,12 @@ async fn ingest_heartbeat(
     state.check_ingest_budget(&caller.device_id)?;
     let encoding = content_encoding(&headers)?;
     let bytes = read_limited(body, HEARTBEAT_BODY_BYTES).await?;
-    let json = decode(&bytes, encoding, HEARTBEAT_BODY_BYTES)?;
-    let heartbeat = serde_json::from_slice::<Heartbeat>(&json).map_err(|_| ApiError::BadRequest)?;
+    let heartbeat = tokio::task::spawn_blocking(move || {
+        let json = decode(&bytes, encoding, HEARTBEAT_BODY_BYTES)?;
+        serde_json::from_slice::<Heartbeat>(&json).map_err(|_| ApiError::BadRequest)
+    })
+    .await
+    .map_err(|_| ApiError::Internal)??;
     let valid = heartbeat.schema_version == envelope::SCHEMA_VERSION
         && collector_is_valid(&heartbeat.collector)
         && heartbeat.clients.len() <= MAX_HEARTBEAT_CLIENTS
@@ -1466,7 +1530,12 @@ fn parse_byte_range(header_val: Option<&HeaderValue>, total_len: u64) -> ByteRan
     let Some(raw) = header_val.and_then(|v| v.to_str().ok()) else {
         return ByteRange::Full;
     };
-    let Some(spec) = raw.trim().strip_prefix("bytes=") else {
+    let raw = raw.trim();
+    let Some(spec) = raw
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("bytes="))
+        .map(|_| &raw[6..])
+    else {
         return ByteRange::Full;
     };
     if spec.contains(',') {
@@ -1512,37 +1581,51 @@ fn parse_byte_range(header_val: Option<&HeaderValue>, total_len: u64) -> ByteRan
     ByteRange::Partial { start, end }
 }
 
-fn stream_file_body(mut file: std::fs::File, start: u64, length: u64) -> Body {
-    use std::io::{Seek as _, SeekFrom};
+fn stream_file_body(
+    file: std::fs::File,
+    start: u64,
+    length: u64,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Body {
+    use std::io::SeekFrom;
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
 
     if length == 0 {
+        drop(permit);
         return Body::empty();
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
-    tokio::task::spawn_blocking(move || {
+    tokio::spawn(async move {
+        let _permit = permit;
+        let mut file = tokio::fs::File::from_std(file);
         if start > 0
-            && let Err(err) = file.seek(SeekFrom::Start(start))
+            && let Err(err) = file.seek(SeekFrom::Start(start)).await
         {
-            let _ = tx.blocking_send(Err(err));
+            let _ = tx.send(Err(err)).await;
             return;
         }
         let mut left = length;
-        let mut buf = [0_u8; 64 * 1024];
+        let mut buf = vec![0_u8; 64 * 1024];
         while left > 0 {
             let want = usize::try_from(left.min(buf.len() as u64)).unwrap_or(buf.len());
-            match file.read(&mut buf[..want]) {
+            match file.read(&mut buf[..want]).await {
                 Ok(0) => break,
                 Ok(n) => {
                     left = left.saturating_sub(n as u64);
-                    if tx
-                        .blocking_send(Ok(Bytes::copy_from_slice(&buf[..n])))
-                        .is_err()
+                    let chunk = Ok(Bytes::copy_from_slice(&buf[..n]));
+                    match tokio::time::timeout(std::time::Duration::from_secs(30), tx.send(chunk))
+                        .await
                     {
-                        break;
+                        Ok(Ok(())) => {}
+                        Ok(Err(_)) => break,
+                        Err(_) => {
+                            tracing::debug!("download stalled");
+                            break;
+                        }
                     }
                 }
                 Err(err) => {
-                    let _ = tx.blocking_send(Err(err));
+                    let _ = tx.send(Err(err)).await;
                     break;
                 }
             }
@@ -1568,17 +1651,9 @@ async fn download_asset(
     if snapshot.file_path(&filename).is_none() {
         return Err(ApiError::NotFound);
     }
-    let verify_snap = Arc::clone(&snapshot);
-    let verify_name = filename.clone();
-    let (file, total_len) =
-        tokio::task::spawn_blocking(move || verify_snap.open_verified_file(&verify_name))
-            .await
-            .map_err(|_| ApiError::Internal)?
-            .map_err(|_| ApiError::ServiceUnavailable)?;
 
     let disposition = format!("attachment; filename=\"{filename}\"");
     if filename == crate::release_mirror::MANIFEST_FILE {
-        drop(file);
         return Ok(download_response(
             method,
             snapshot.manifest().to_vec(),
@@ -1588,6 +1663,12 @@ async fn download_asset(
         ));
     }
 
+    let client_key = client_rate_key(&headers);
+    if !state.allow_auth_scoped_with("download-asset", &client_key, 120, 600) {
+        return Err(ApiError::SlowDown(60));
+    }
+
+    let total_len = snapshot.stat_asset(&filename).ok_or(ApiError::NotFound)?;
     let range = if method == axum::http::Method::GET {
         parse_byte_range(headers.get(header::RANGE), total_len)
     } else {
@@ -1613,8 +1694,28 @@ async fn download_asset(
         ByteRange::Unsatisfiable => unreachable!(),
     };
 
+    let body = if method == axum::http::Method::HEAD {
+        Body::empty()
+    } else {
+        let permit = Arc::clone(&state.download_permits)
+            .try_acquire_owned()
+            .map_err(|_| ApiError::SlowDown(5))?;
+        let verify_snap = Arc::clone(&snapshot);
+        let verify_name = filename.clone();
+        let (file, verified_len) =
+            tokio::task::spawn_blocking(move || verify_snap.open_verified_file(&verify_name))
+                .await
+                .map_err(|_| ApiError::Internal)?
+                .map_err(|_| ApiError::ServiceUnavailable)?;
+        if verified_len != total_len {
+            return Err(ApiError::ServiceUnavailable);
+        }
+        stream_file_body(file, start, send_len, permit)
+    };
+
     if method == axum::http::Method::GET
         && start == 0
+        && (matches!(range, ByteRange::Full) || send_len > 1)
         && site_stats::should_count_request(&headers)
         && query
             .as_deref()
@@ -1631,12 +1732,6 @@ async fn download_asset(
             state.record_site_metric(metric);
         }
     }
-
-    let body = if method == axum::http::Method::HEAD {
-        Body::empty()
-    } else {
-        stream_file_body(file, start, send_len)
-    };
     let mut response = (status, body).into_response();
     let out_headers = response.headers_mut();
     out_headers.insert(

@@ -43,7 +43,7 @@ impl Harness {
         Self::start_in_with_stats(time_zone, None).await
     }
 
-    async fn start_in_with_stats(time_zone: chrono_tz::Tz, stats_token: Option<&str>) -> Self {
+    pub async fn start_in_with_stats(time_zone: chrono_tz::Tz, stats_token: Option<&str>) -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("server.sqlite");
         let opened = db::open(&db_path).expect("open database");

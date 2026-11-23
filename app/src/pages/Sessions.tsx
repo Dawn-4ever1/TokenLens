@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Folder, Search, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { IdentityIcon, LoadError, ModelName, Num } from "@/components/common";
 import { Badge, Button, Card, EmptyState, Popover, PopoverContent, PopoverTrigger, Segmented, Skeleton, Tip, cn, inputClass } from "@/components/ui";
 import { dashboardGet, errorMessage } from "@/lib/api";
@@ -8,6 +8,7 @@ import { dateTime, exact, relativeTime, shortId, usd } from "@/lib/format";
 import { clientColor, clientIcon, clientLabel, NO_PROJECT_KEY } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { activeFilterCount, rangeLabel, resolveRange } from "@/lib/range";
+import { useStatus } from "@/lib/status";
 import type { SessionPage, SessionSort, SessionSummary } from "@/lib/types";
 
 const SORTS: { key: SessionSort; label: string }[] = [
@@ -29,22 +30,26 @@ function useDebounced<T>(value: T, ms: number): T {
 }
 
 export function Sessions() {
-  const { filters, setFilters, timeZone, query } = useData();
+  const { filters, setFilters, sourceKey, tick, timeZone, query } = useData();
+  const { status } = useStatus();
   const { openSession } = useNav();
+  const local = status?.mode === "local";
   const [text, setText] = useState("");
   const [sort, setSort] = useState<SessionSort>("recent");
   const search = useDebounced(text.trim(), 300);
   const base = { ...query(), q: search || undefined, sort, limit: String(PAGE_SIZE) };
-  const baseKey = JSON.stringify(base);
+  const baseKey = JSON.stringify({ sourceKey, tick, base });
   const first = useDashboard<SessionPage>("sessions", base);
-  const [more, setMore] = useState<{ key: string; sessions: SessionSummary[]; cursor?: string; error: unknown; loading: boolean }>({
+  const loadSeq = useRef(0);
+  const [more, setMore] = useState<{ key: string; sessions: SessionSummary[]; cursor?: string; loadedMore: boolean; error: unknown; loading: boolean }>({
     key: baseKey,
     sessions: [],
+    loadedMore: false,
     error: null,
     loading: false,
   });
-  const extra = more.key === baseKey ? more : { key: baseKey, sessions: [], cursor: undefined, error: null, loading: false };
-  const nextCursor = extra.sessions.length ? extra.cursor : first.data?.nextCursor;
+  const extra = more.key === baseKey ? more : { key: baseKey, sessions: [], cursor: undefined, loadedMore: false, error: null, loading: false };
+  const nextCursor = extra.loadedMore ? extra.cursor : first.data?.nextCursor;
 
   const rows = useMemo(() => {
     const seen = new Set<string>();
@@ -58,20 +63,34 @@ export function Sessions() {
   }, [first.data, extra.sessions]);
 
   const loadMore = () => {
-    if (!nextCursor) return;
+    if (!nextCursor || first.loading || extra.loading) return;
+    const seq = ++loadSeq.current;
     const key = baseKey;
-    setMore({ ...extra, loading: true, error: null });
+    setMore({ ...extra, key, loading: true, error: null });
     dashboardGet<SessionPage>("sessions", { ...base, cursor: nextCursor })
       .then((page) =>
         setMore((previous) =>
-          previous.key === key ? { key, sessions: [...previous.sessions, ...page.sessions], cursor: page.nextCursor, error: null, loading: false } : previous,
+          previous.key === key && loadSeq.current === seq
+            ? {
+              key,
+              sessions: [...previous.sessions, ...page.sessions],
+              cursor: page.nextCursor,
+              loadedMore: true,
+              error: null,
+              loading: false,
+            }
+            : previous,
         ),
       )
-      .catch((error: unknown) => setMore((previous) => (previous.key === key ? { ...previous, error, loading: false } : previous)));
+      .catch((error: unknown) =>
+        setMore((previous) =>
+          previous.key === key && loadSeq.current === seq ? { ...previous, error, loading: false } : previous,
+        ),
+      );
   };
 
   const span = resolveRange(filters, timeZone);
-  const filtered = activeFilterCount(filters) > 0;
+  const filtered = activeFilterCount(filters, local) > 0;
 
   return (
     <div className="space-y-4">
@@ -123,7 +142,7 @@ export function Sessions() {
             }
             action={
               filtered && !search ? (
-                <Button size="sm" onClick={() => setFilters((previous) => ({ ...previous, devices: [], clients: [], models: [], projects: [] }))}>
+                <Button size="sm" onClick={() => setFilters((previous) => ({ ...previous, devices: [], deviceScope: local ? "current" : "all", clients: [], models: [], projects: [] }))}>
                   清除筛选
                 </Button>
               ) : undefined
@@ -138,7 +157,7 @@ export function Sessions() {
       {nextCursor && rows.length > 0 && (
         <div className="flex flex-col items-center gap-2">
           {extra.error ? <p className="text-xs text-bad">{errorMessage(extra.error)}</p> : null}
-          <Button onClick={loadMore} disabled={extra.loading}>
+          <Button onClick={loadMore} disabled={extra.loading || first.loading}>
             {extra.loading ? "加载中…" : `加载更多（已显示 ${rows.length} / ${exact(first.data?.total ?? 0)}）`}
           </Button>
         </div>

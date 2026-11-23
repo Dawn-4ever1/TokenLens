@@ -60,6 +60,7 @@ pub struct Scheduler {
     timing: Timing,
     pending: BTreeSet<String>,
     pending_history: BTreeSet<String>,
+    prefer_history: bool,
     first_change: Option<Instant>,
     last_change: Option<Instant>,
     full_due: Instant,
@@ -81,6 +82,7 @@ impl Scheduler {
             timing,
             pending: BTreeSet::new(),
             pending_history: BTreeSet::new(),
+            prefer_history: false,
             first_change: None,
             last_change: None,
             full_due: now,
@@ -180,6 +182,7 @@ impl Scheduler {
             // A full scan covers every pending change and any poll.
             self.pending.clear();
             self.pending_history.clear();
+            self.prefer_history = false;
             self.first_change = None;
             self.last_change = None;
             self.full_requested = false;
@@ -188,10 +191,20 @@ impl Scheduler {
             }
             ScanKind::Full
         } else if self.triggered_due().is_some_and(|due| due <= now) {
-            if !self.pending_history.is_empty() && self.pending.is_subset(&self.pending_history) {
-                self.pending.clear();
-                self.first_change = None;
-                self.last_change = None;
+            if !self.pending_history.is_empty()
+                && (self.prefer_history || self.pending.is_subset(&self.pending_history))
+            {
+                if self.pending.is_subset(&self.pending_history) {
+                    self.pending.clear();
+                }
+                self.prefer_history = false;
+                if self.pending.is_empty() {
+                    self.first_change = None;
+                    self.last_change = None;
+                } else {
+                    self.first_change = Some(now);
+                    self.last_change = Some(now);
+                }
                 ScanKind::Triggered {
                     clients: std::mem::take(&mut self.pending_history),
                     polled: false,
@@ -199,6 +212,7 @@ impl Scheduler {
                 }
             } else {
                 let clients = std::mem::take(&mut self.pending);
+                self.prefer_history = !self.pending_history.is_empty();
                 if self.pending_history.is_empty() {
                     self.first_change = None;
                     self.last_change = None;
@@ -474,6 +488,31 @@ mod tests {
         assert_eq!(
             scheduler.poll(t0 + secs(103.0)),
             Some(triggered(&["claude", "codex"]))
+        );
+    }
+
+    #[test]
+    fn continuous_usage_writes_cannot_starve_pending_metadata_refresh() {
+        let t0 = Instant::now();
+        let mut scheduler = started(t0);
+        scheduler.on_change(t0 + secs(40.0), "claude", false);
+        scheduler.on_change(t0 + secs(40.1), "codex", true);
+        assert_eq!(
+            scheduler.poll(t0 + secs(42.0)),
+            Some(triggered(&["claude"]))
+        );
+        scheduler.on_finished(t0 + secs(43.0), true);
+        // Continuous usage writes arrive before the cooldown expires.
+        scheduler.on_change(t0 + secs(50.0), "claude", false);
+        assert_eq!(
+            scheduler.poll(t0 + secs(72.0)),
+            Some(triggered_history(&["codex"]))
+        );
+        scheduler.on_finished(t0 + secs(73.0), true);
+        // Remaining usage change runs on the next cooldown turn.
+        assert_eq!(
+            scheduler.poll(t0 + secs(102.0)),
+            Some(triggered(&["claude"]))
         );
     }
 }

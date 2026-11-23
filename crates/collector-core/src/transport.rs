@@ -5,6 +5,7 @@ use std::time::Duration;
 
 /// Responses larger than this are treated as failures.
 pub const MAX_RESPONSE_BYTES: u64 = 1024 * 1024;
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpResponse {
@@ -45,12 +46,16 @@ impl Default for UreqTransport {
 
 impl UreqTransport {
     pub fn new() -> Self {
+        Self::with_timeouts(Duration::from_secs(10), Duration::from_secs(60))
+    }
+
+    pub fn with_timeouts(connect: Duration, global: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .http_status_as_error(false)
             // A redirect could carry the bearer token to another host.
             .max_redirects(0)
-            .timeout_connect(Some(Duration::from_secs(10)))
-            .timeout_global(Some(Duration::from_secs(60)))
+            .timeout_connect(Some(connect))
+            .timeout_global(Some(global))
             .tls_config(
                 ureq::tls::TlsConfig::builder()
                     .provider(if cfg!(any(target_os = "windows", target_os = "macos")) {
@@ -118,7 +123,7 @@ impl Transport for UreqTransport {
             .get("retry-after")
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok())
-            .map(Duration::from_secs);
+            .map(|secs| Duration::from_secs(secs.min(MAX_RETRY_AFTER.as_secs())));
         let body = response
             .body_mut()
             .with_config()
@@ -163,13 +168,33 @@ pub fn validate_server_url(input: &str) -> Result<String, UrlError> {
         return Err(UrlError::Shape);
     }
     let authority = rest.split('/').next().unwrap_or_default();
-    let host = if let Some(bracketed) = authority.strip_prefix('[') {
-        bracketed.split(']').next().map(|host| format!("[{host}]"))
+    let (host, port_part) = if let Some(after_open) = authority.strip_prefix('[') {
+        let Some((inner, after_close)) = after_open.split_once(']') else {
+            return Err(UrlError::Shape);
+        };
+        if inner.is_empty() {
+            return Err(UrlError::Shape);
+        }
+        let port = match after_close {
+            "" => None,
+            _ => Some(after_close.strip_prefix(':').ok_or(UrlError::Shape)?),
+        };
+        (format!("[{inner}]"), port)
     } else {
-        authority.split(':').next().map(str::to_owned)
+        if authority.contains('[') || authority.contains(']') {
+            return Err(UrlError::Shape);
+        }
+        match authority.split_once(':') {
+            Some((host, port)) => (host.to_owned(), Some(port)),
+            None => (authority.to_owned(), None),
+        }
+    };
+    if host.is_empty()
+        || port_part
+            .is_some_and(|port| port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return Err(UrlError::Shape);
     }
-    .filter(|host| !host.is_empty())
-    .ok_or(UrlError::Shape)?;
     match scheme {
         "https" => {}
         "http" if matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]") => {}
@@ -195,12 +220,17 @@ pub fn error_code(body: &[u8]) -> Option<String> {
 pub fn version_below(ours: &str, minimum: &str) -> bool {
     let parse = |text: &str| -> Option<Vec<u64>> {
         let core = text.trim().split(['-', '+']).next()?;
-        core.split('.').map(|part| part.parse().ok()).collect()
+        (!core.is_empty())
+            .then(|| core.split('.').map(|part| part.parse().ok()).collect())
+            .flatten()
     };
-    match (parse(ours), parse(minimum)) {
-        (Some(ours), Some(minimum)) => ours < minimum,
-        _ => false,
-    }
+    let (Some(mut ours), Some(mut minimum)) = (parse(ours), parse(minimum)) else {
+        return false;
+    };
+    let len = ours.len().max(minimum.len());
+    ours.resize(len, 0);
+    minimum.resize(len, 0);
+    ours < minimum
 }
 
 #[cfg(test)]
@@ -296,6 +326,11 @@ mod tests {
             ("https://dash.example.com/#x", UrlError::Shape),
             ("https://", UrlError::Shape),
             ("https://dash example.com", UrlError::Shape),
+            ("http://[::1]evil.com", UrlError::Shape),
+            ("http://[::1", UrlError::Shape),
+            ("http://[::1]:", UrlError::Shape),
+            ("http://127.0.0.1:abc", UrlError::Shape),
+            ("http://[]", UrlError::Shape),
         ] {
             assert_eq!(validate_server_url(bad), Err(error), "{bad}");
         }
@@ -312,6 +347,8 @@ mod tests {
         assert!(version_below("0.1.0", "0.2.0"));
         assert!(version_below("0.9.9", "0.10.0"));
         assert!(!version_below("0.1.0", "0.1.0"));
+        assert!(!version_below("0.5.34", "0.5.34.0"));
+        assert!(version_below("0.5.34", "0.5.34.1"));
         assert!(!version_below("1.0.0-beta", "0.9.0"));
         assert!(!version_below("x", "0.1.0"));
     }

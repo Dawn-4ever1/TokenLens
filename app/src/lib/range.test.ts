@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_FILTERS, RANGE_PRESETS, activeFilterCount, addDays, daysBetween, filterQuery, normalizeFilters, previousSpan, resolveRange, todayIn } from "./range";
+import { DEFAULT_FILTERS, RANGE_PRESETS, activeFilterCount, addDays, daysBetween, filterQuery, isValidDate, normalizeFilters, previousSpan, resolveRange, todayIn } from "./range";
 
 const now = new Date("2026-11-10T20:30:00Z");
 
@@ -70,5 +70,20 @@ describe("filterQuery", () => {
     expect(normalizeFilters({ preset: "month", deviceScope: "current" })?.deviceScope).toBe("current");
     expect(normalizeFilters({ preset: "month", deviceScope: "other" })?.deviceScope).toBe("all");
     expect(normalizeFilters({ preset: "month", deviceScope: "foreign" })?.deviceScope).toBe("all");
+  });
+
+  it("ignores default current scope in local mode and strips invalid custom dates", () => {
+    expect(activeFilterCount({ ...DEFAULT_FILTERS, deviceScope: "current" }, true)).toBe(0);
+    expect(activeFilterCount({ ...DEFAULT_FILTERS, deviceScope: "current", clients: ["claude"] }, true)).toBe(1);
+    expect(isValidDate("2026-11-10")).toBe(true);
+    expect(isValidDate("2026-02-31")).toBe(false);
+    expect(isValidDate("1999-12-31")).toBe(false);
+    expect(isValidDate("not-a-date")).toBe(false);
+    expect(normalizeFilters({ preset: "custom", customFrom: "2026-02-31", customTo: "1999-01-01" })).toEqual({
+      ...DEFAULT_FILTERS,
+      preset: "custom",
+      customFrom: undefined,
+      customTo: undefined,
+    });
   });
 });

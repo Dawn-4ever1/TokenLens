@@ -7,12 +7,12 @@ import type { SessionDetail, SessionTurn } from "@/lib/types";
 import { Chart, baseOption, type ChartOption } from "./Chart";
 import { Composition } from "./Composition";
 import { ClientName, LoadError, ModelName, Num, Stat } from "./common";
-import { Badge, Sheet, Skeleton, Tip } from "./ui";
+import { Badge, Sheet, Skeleton, Tip, cn } from "./ui";
 
 const TURN_LIMIT = 300;
 
 export function SessionDrawer({ sessionKey, onClose }: { sessionKey: string | null; onClose: () => void }) {
-  const { data, error, loading, reload } = useDashboard<SessionDetail>(sessionKey ? `sessions/${sessionKey}` : null);
+  const { data, error, reload } = useDashboard<SessionDetail>(sessionKey ? `sessions/${sessionKey}` : null);
   const detail = data && data.session.sessionKey === sessionKey ? data : null;
   const s = detail?.session;
   return (
@@ -24,7 +24,7 @@ export function SessionDrawer({ sessionKey, onClose }: { sessionKey: string | nu
     >
       {!detail && error ? (
         <LoadError error={error} onRetry={reload} />
-      ) : !detail || (loading && !detail) ? (
+      ) : !detail ? (
         <div className="space-y-4">
           <Skeleton className="h-16" />
           <Skeleton className="h-24" />
@@ -41,7 +41,7 @@ function SessionBody({ detail }: { detail: SessionDetail }) {
   const { timeZone } = useData();
   const s = detail.session;
   const [showAll, setShowAll] = useState(false);
-  const span = (toMs(s.lastUsedAt) ?? 0) - (toMs(s.startedAt) ?? 0);
+  const span = Math.max(0, (toMs(s.lastUsedAt) ?? 0) - (toMs(s.startedAt) ?? 0));
   const turns = showAll ? detail.turns : detail.turns.slice(0, TURN_LIMIT);
   return (
     <div className="space-y-6">
@@ -164,9 +164,10 @@ function TurnChart({ turns }: { turns: SessionTurn[] }) {
 }
 
 function TurnTable({ turns, timeZone }: { turns: SessionTurn[]; timeZone: string }) {
+  const showReasoning = turns.some((turn) => turn.reasoningTokens > 0);
   return (
     <div className="overflow-x-auto rounded-lg border border-line">
-      <table className="w-full min-w-[620px] text-left text-xs">
+      <table className={cn("w-full text-left text-xs", showReasoning ? "min-w-[680px]" : "min-w-[620px]")}>
         <thead className="bg-surface-2 text-ink-3">
           <tr>
             <th className="px-3 py-2 font-medium">#</th>
@@ -174,6 +175,7 @@ function TurnTable({ turns, timeZone }: { turns: SessionTurn[]; timeZone: string
             <th className="px-3 py-2 font-medium">模型</th>
             <th className="px-3 py-2 text-right font-medium">输入</th>
             <th className="px-3 py-2 text-right font-medium">输出</th>
+            {showReasoning && <th className="px-3 py-2 text-right font-medium">推理</th>}
             <th className="px-3 py-2 text-right font-medium">缓存读</th>
             <th className="px-3 py-2 text-right font-medium">缓存写</th>
             <th className="px-3 py-2 text-right font-medium">耗时</th>
@@ -202,6 +204,11 @@ function TurnTable({ turns, timeZone }: { turns: SessionTurn[]; timeZone: string
               <td className="px-3 py-1.5 text-right">
                 <Num value={turn.outputTokens} />
               </td>
+              {showReasoning && (
+                <td className="px-3 py-1.5 text-right">
+                  <Num value={turn.reasoningTokens} />
+                </td>
+              )}
               <td className="px-3 py-1.5 text-right">
                 <Num value={turn.cacheReadTokens} />
               </td>

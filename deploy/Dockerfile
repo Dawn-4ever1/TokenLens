@@ -17,6 +17,8 @@ COPY server/Cargo.toml server/Cargo.toml
 # Small servers: `docker compose build --build-arg BUILD_JOBS=1` caps parallel
 # compile jobs so the build does not starve other services of memory.
 ARG BUILD_JOBS
+# Narrowing workspace members drops unused desktop/collector crates from Cargo.toml,
+# which conflicts with `--locked`; Cargo still uses pinned versions from Cargo.lock.
 RUN sed -i 's|^members = .*|members = ["crates/usage-event", "server"]|' Cargo.toml \
  && mkdir -p server/src \
  && echo "pub fn _stub() {}" > server/src/lib.rs \

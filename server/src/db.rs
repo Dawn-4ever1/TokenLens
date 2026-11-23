@@ -89,6 +89,10 @@ pub const MIGRATIONS: &[Migration] = &[
         version: 13,
         sql: include_str!("../migrations/0013_site_stats.sql"),
     },
+    Migration {
+        version: 14,
+        sql: include_str!("../migrations/0014_perf_and_indexes.sql"),
+    },
 ];
 
 /// How many events carry a `counted` flag that disagrees with the D029 rule
@@ -149,11 +153,12 @@ pub fn open_with(path: &Path, migrations: &[Migration]) -> Result<Opened, DbErro
     }
     let mut conn = Connection::open(path)?;
     restrict_permissions(path);
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     conn.query_row("PRAGMA journal_mode = WAL", [], |row| {
         row.get::<_, String>(0)
     })?;
     conn.execute_batch(
-        "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;",
+        "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA journal_size_limit = 67108864;",
     )?;
     let backup = migrate(&mut conn, path, existed, migrations)?;
     Ok(Opened { conn, backup })
@@ -260,9 +265,48 @@ fn backup_before_migration(
             "{file_name}.pre-migration-{version}-{stamp}.sqlite"
         ));
     }
-    conn.backup(DatabaseName::Main, &target, None)?;
-    restrict_permissions(&target);
-    Ok(target)
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "pre-migration".to_owned());
+    let partial = target.with_file_name(format!("{name}.partial"));
+    remove_if_present(&partial)?;
+    remove_if_present(&sidecar(&partial, "-wal"))?;
+    remove_if_present(&sidecar(&partial, "-shm"))?;
+    let result = conn
+        .backup(DatabaseName::Main, &partial, None)
+        .map_err(DbError::from)
+        .and_then(|()| {
+            restrict_permissions(&partial);
+            let check_conn = Connection::open_with_flags(
+                &partial,
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            check_conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
+                row.get::<_, String>(0)
+            })?;
+            let status: String =
+                check_conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            if status != "ok" {
+                return Err(DbError::Corrupt(format!(
+                    "pre-migration integrity check failed: {status}"
+                )));
+            }
+            Ok(())
+        });
+    match result {
+        Ok(()) => {
+            std::fs::rename(&partial, &target)?;
+            restrict_permissions(&target);
+            Ok(target)
+        }
+        Err(error) => {
+            let _ = remove_if_present(&partial);
+            let _ = remove_if_present(&sidecar(&partial, "-wal"));
+            let _ = remove_if_present(&sidecar(&partial, "-shm"));
+            Err(error)
+        }
+    }
 }
 
 // ----------------------------------------------------------------- backup --
@@ -310,6 +354,9 @@ pub fn backup_to(source: &Path, dest: &Path) -> Result<BackupSummary, DbError> {
         }
         Err(error) => {
             let _ = remove_if_present(&partial);
+            let _ = remove_if_present(&sidecar(&partial, "-wal"));
+            let _ = remove_if_present(&sidecar(&partial, "-shm"));
+            let _ = remove_if_present(&sidecar(&partial, "-journal"));
             Err(error)
         }
     }
@@ -375,6 +422,7 @@ pub fn restore_from(backup: &Path, target: &Path) -> Result<Restored, DbError> {
             std::fs::rename(&wal, sidecar(&aside, "-wal"))?;
         }
         remove_if_present(&sidecar(target, "-shm"))?;
+        remove_if_present(&sidecar(target, "-journal"))?;
         Some(aside)
     } else {
         None
@@ -402,6 +450,7 @@ fn prepare_restored(path: &Path) -> Result<BackupSummary, DbError> {
     conn.query_row("PRAGMA journal_mode = DELETE", [], |row| {
         row.get::<_, String>(0)
     })?;
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     // The backup file is the pre-migration copy, so none is taken here.
     migrate(&mut conn, path, false, MIGRATIONS)?;
     conn.execute(NEW_STORE_ID, [])?;
@@ -1054,6 +1103,24 @@ pub fn write_batch(
     pricer: Option<&Pricer>,
     now: i64,
 ) -> Result<IngestCounts, DbError> {
+    let priced = events
+        .iter()
+        .map(|event| pricing::price(pricer, &PricingInput::from(event)))
+        .collect::<Vec<_>>();
+    write_batch_priced(conn, tenant_id, device_id, meta, events, &priced, now)
+}
+
+/// Upserts every event in one transaction using precomputed pricing so callers
+/// do not compute prices while holding the database lock or rewrite each row.
+pub fn write_batch_priced(
+    conn: &mut Connection,
+    tenant_id: &str,
+    device_id: &str,
+    meta: &BatchMeta<'_>,
+    events: &[UsageEvent],
+    priced: &[crate::pricing::Priced],
+    now: i64,
+) -> Result<IngestCounts, DbError> {
     let mut counts = IngestCounts::default();
     let tx = conn.transaction()?;
     {
@@ -1063,15 +1130,12 @@ pub fn write_batch(
         ))?;
         let mut insert = tx.prepare_cached(&format!(
             "INSERT INTO usage_events (tenant_id, device_id, event_key, {EVENT_VALUE_COLUMNS},
-               collector_version, tokscale_rev, ingested_at, updated_at)
+               collector_version, tokscale_rev, ingested_at, updated_at,
+               est_cost_usd, price_status, price_version)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31,
-               ?32, ?33, ?33)"
+               ?32, ?33, ?33, ?34, ?35, ?36)"
         ))?;
-        let mut set_price = tx.prepare_cached(
-            "UPDATE usage_events SET est_cost_usd = ?4, price_status = ?5, price_version = ?6
-             WHERE tenant_id = ?1 AND device_id = ?2 AND event_key = ?3",
-        )?;
         let mut update = tx.prepare_cached(
             "UPDATE usage_events SET client = ?3, session_id = ?4, parent_session_id = ?5,
                model_id = ?6, provider_id = ?7, ts = ?8, input = ?9, output = ?10,
@@ -1081,10 +1145,11 @@ pub fn write_batch(
                message_count = ?22, is_turn_start = ?23, duration_ms = ?24,
                scan_generation = ?25, collector_version = ?26, tokscale_rev = ?27,
                updated_at = ?28, pricing_model_id = ?30, billing_provider = ?31,
-               service_tier = ?32, session_title = ?33
+               service_tier = ?32, session_title = ?33,
+               est_cost_usd = ?34, price_status = ?35, price_version = ?36
              WHERE device_id = ?1 AND event_key = ?2 AND tenant_id = ?29",
         )?;
-        for event in events {
+        for (idx, event) in events.iter().enumerate() {
             let existing = select
                 .query_row(params![tenant_id, device_id, event.event_key], |row| {
                     stored_event(row, &event.event_key)
@@ -1097,6 +1162,12 @@ pub fn write_batch(
                 counts.duplicates += 1;
                 continue;
             }
+            let event_price = priced.get(idx);
+            let est_cost_usd = event_price.and_then(|p| p.est_cost_usd);
+            let price_status = event_price
+                .and_then(|p| p.status)
+                .map(pricing::PriceStatus::as_str);
+            let price_version = event_price.and_then(|p| p.version.as_deref());
             if existing.is_some() {
                 let update_values = params![
                     device_id,
@@ -1132,6 +1203,9 @@ pub fn write_batch(
                     event.billing_provider,
                     event.service_tier,
                     event.session_title,
+                    est_cost_usd,
+                    price_status,
+                    price_version,
                 ];
                 update.execute(update_values)?;
                 counts.updated += 1;
@@ -1170,19 +1244,13 @@ pub fn write_batch(
                     meta.collector.version,
                     meta.collector.tokscale_rev,
                     now,
+                    est_cost_usd,
+                    price_status,
+                    price_version,
                 ];
                 insert.execute(insert_values)?;
                 counts.accepted += 1;
             }
-            let priced = pricing::price(pricer, &PricingInput::from(event));
-            set_price.execute(params![
-                tenant_id,
-                device_id,
-                event.event_key,
-                priced.est_cost_usd,
-                priced.status.map(pricing::PriceStatus::as_str),
-                priced.version,
-            ])?;
         }
     }
     // A batch id reused by a different device must not overwrite its record.
@@ -1241,7 +1309,19 @@ pub fn reprice_batch(
                billing_provider, service_tier, message_count, input, output, cache_read,
                cache_write, cache_write_1h, reasoning, cost_usd, credits
              FROM usage_events
-             WHERE tenant_id = ?1 AND price_version IS NOT ?2
+             WHERE tenant_id = ?1 AND price_version IS NULL
+             UNION ALL
+             SELECT device_id, event_key, client, model_id, provider_id, pricing_model_id,
+               billing_provider, service_tier, message_count, input, output, cache_read,
+               cache_write, cache_write_1h, reasoning, cost_usd, credits
+             FROM usage_events
+             WHERE tenant_id = ?1 AND price_version < ?2
+             UNION ALL
+             SELECT device_id, event_key, client, model_id, provider_id, pricing_model_id,
+               billing_provider, service_tier, message_count, input, output, cache_read,
+               cache_write, cache_write_1h, reasoning, cost_usd, credits
+             FROM usage_events
+             WHERE tenant_id = ?1 AND price_version > ?2
              LIMIT ?3",
         )?;
         let mut update = tx.prepare_cached(

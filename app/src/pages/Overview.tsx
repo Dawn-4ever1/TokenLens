@@ -6,17 +6,19 @@ import { ClientName, IdentityIcon, LoadError, ModelName, Num, ShareBar } from "@
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, StatusDot, Tip, cn } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
-import { bucketLabel, compact, exact, percent, relativeTime, share, usd } from "@/lib/format";
+import { bucketLabel, compact, escapeHtml, exact, percent, relativeTime, share, usd } from "@/lib/format";
 import { clientColor, clientIcon, clientLabel, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { useSettings } from "@/lib/settings";
 import { daysBetween, resolveRange, todayIn, type DateSpan } from "@/lib/range";
+import { useStatus } from "@/lib/status";
 import type { Bucket, DeviceStatus, Devices, Point, SessionPage, Summary, Timeseries } from "@/lib/types";
 
 export function autoBucket(span: DateSpan, firstEventDate: string | undefined, today: string): Bucket {
+  if (!span.from && !firstEventDate) return "day";
   const from = span.from ?? firstEventDate ?? today;
   const to = span.to ?? today;
-  const days = daysBetween(from, to) + 1;
+  const days = Math.max(1, daysBetween(from, to) + 1);
   if (days <= 2) return "hour";
   if (days <= 120) return "day";
   if (days <= 800) return "week";
@@ -118,7 +120,7 @@ type OverviewVariantProps = {
 
 function TerminalMetric({ label, value }: { label: string; value: ReactNode }) {
   return (
-    <section className="terminal-kpi min-w-0 px-3 py-3 first:border-l last:border-r sm:px-4">
+    <section className="min-w-0 border-b border-r border-line px-3 py-3 sm:px-4">
       <h2 className="truncate text-xs font-medium uppercase tracking-[0.08em] text-ink-3">{label}</h2>
       <div className="display num-fit num mt-2 truncate text-xl font-semibold text-ink">{value}</div>
     </section>
@@ -143,7 +145,12 @@ function TerminalTools({ summary }: { summary: Summary }) {
           {rows.map((row) => (
             <tr key={row.key} className="transition-colors">
               <td className="px-3 py-2.5">
-                <button type="button" className="text-left" onClick={() => row.key !== OTHER_KEY && go("sessions", { clients: [row.key] })}>
+                <button
+                  type="button"
+                  disabled={row.key === OTHER_KEY}
+                  className="text-left disabled:opacity-70"
+                  onClick={() => go("sessions", { clients: [row.key] })}
+                >
                   <ClientName id={row.key} label={row.label} className="text-ink" />
                 </button>
               </td>
@@ -161,7 +168,7 @@ function TerminalTools({ summary }: { summary: Summary }) {
 function TerminalOverview({ summary, empty, trend, trendError, trendReload, bucket, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
   return (
     <div className="terminal-layout space-y-[var(--stack-space)]">
-      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-0 min-[900px]:grid-cols-5">
+      <div data-testid="overview-kpis" className="grid grid-cols-2 gap-0 border-l border-t border-line min-[900px]:grid-cols-5">
         <TerminalMetric label="TOKENS" value={<Num value={summary.totalTokens} />} />
         <TerminalMetric label="成本" value={usd(summary.costUsd)} />
         <TerminalMetric label="缓存命中率" value={percent(summary.cacheHitRate)} />
@@ -171,6 +178,7 @@ function TerminalOverview({ summary, empty, trend, trendError, trendReload, buck
       {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
         <>
           <TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} />
+          <Card title="Token 构成"><Composition value={summary} /></Card>
           <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-[1.15fr_0.85fr]">
             <Card title="工具" subtitle="按工具查看用量"><TerminalTools summary={summary} /></Card>
             <ModelCard summary={summary} />
@@ -341,7 +349,7 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
           formatter: (params: { dataIndex: number; value: number }[]) => {
             const first = params[0];
             if (!first || !data) return "";
-            const name = bucketLabel(data.buckets[first.dataIndex] ?? "", kind);
+            const name = escapeHtml(bucketLabel(data.buckets[first.dataIndex] ?? "", kind));
             return `${name}<br/><b>${formatExact(first.value)}</b>`;
           },
         },
@@ -555,6 +563,8 @@ export function deviceTone(device: DeviceStatus): { tone: "good" | "neutral" | "
 
 function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unknown; reload: () => void }) {
   const { go } = useNav();
+  const { status } = useStatus();
+  const local = status?.mode === "local";
   return (
     <Card
       title="设备"
@@ -599,7 +609,7 @@ function DeviceStrip({ data, error, reload }: { data: Devices | null; error: unk
                   <span className={cn("text-[11px]", device.backfillComplete ? "text-ink-3" : "text-[color-mix(in_oklch,var(--warn)_60%,var(--ink))]")}>
                     {device.backfillComplete
                       ? "历史已补齐"
-                      : `历史上传中${device.outboxBacklog ? `（${compact(device.outboxBacklog)}）` : ""}`}
+                      : `${local && device.isCurrent ? "历史整理中" : "历史上传中"}${device.outboxBacklog ? `（${compact(device.outboxBacklog)}）` : ""}`}
                   </span>
                 </div>
               </button>

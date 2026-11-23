@@ -108,6 +108,8 @@ pub struct SyncLine {
     /// The server was restored from a backup; every event is queued again (D031).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resync: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_app_version: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -308,7 +310,7 @@ impl Uploader {
             .min(self.timing.backoff_max);
         let jitter = 750 + getrandom::u32().unwrap_or(0) % 501;
         let delay = base.mul_f64(f64::from(jitter) / 1000.0);
-        self.retry_at = Some(now + delay);
+        self.retry_at = Some(now.checked_add(delay).unwrap_or(now));
         self.set_state(UploadState::Backoff(code.to_owned()));
         let mut line = self.line("upload", false);
         line.retry_in_ms = Some(millis(delay));
@@ -318,13 +320,34 @@ impl Uploader {
     fn check_version(&mut self, minimum: &str) {
         if transport::version_below(COLLECTOR_VERSION, minimum) {
             self.set_state(UploadState::UpgradeRequired);
+        } else if self.upload_state == UploadState::UpgradeRequired {
+            self.set_state(UploadState::Ok);
         }
     }
 
-    /// Sends batches until the outbox is empty or a request fails.
+    /// Sends batches until the outbox is empty, a request fails, or stopped.
     pub fn upload_round(&mut self, now: Instant) -> Vec<SyncLine> {
+        self.upload_round_with_clock(|| now)
+    }
+
+    fn upload_round_with_clock(&mut self, clock: impl FnMut() -> Instant) -> Vec<SyncLine> {
+        self.upload_round_with_stop(clock, || false)
+    }
+
+    fn upload_round_with_stop(
+        &mut self,
+        mut clock: impl FnMut() -> Instant,
+        mut should_stop: impl FnMut() -> bool,
+    ) -> Vec<SyncLine> {
         let mut lines = Vec::new();
-        while self.upload_state.uploads_allowed() && self.retry_at.is_none_or(|at| now >= at) {
+        loop {
+            if should_stop() {
+                break;
+            }
+            let now = clock();
+            if !self.upload_state.uploads_allowed() || self.retry_at.is_some_and(|at| now < at) {
+                break;
+            }
             let batch = match self.state.next_batch(self.batch_limit) {
                 Ok(Some(batch)) => batch,
                 Ok(None) => break,
@@ -335,7 +358,7 @@ impl Uploader {
                     break;
                 }
             };
-            match self.send(&batch, now) {
+            match self.send(&batch, &mut clock) {
                 Step::Sent(line) => lines.push(line),
                 Step::Shrunk => {}
                 Step::Stop(line) => {
@@ -354,7 +377,7 @@ impl Uploader {
         })
     }
 
-    fn send(&mut self, batch: &Batch, now: Instant) -> Step {
+    fn send(&mut self, batch: &Batch, clock: &mut impl FnMut() -> Instant) -> Step {
         let sent = batch.rows.len();
         let events = batch
             .rows
@@ -389,17 +412,27 @@ impl Uploader {
         let token = self.credentials.ingest_token.clone();
         let response = match self.transport.post(&url, Some(&token), true, &packed) {
             Ok(response) => response,
-            Err(_) => return self.backoff("network", now),
+            Err(_) => {
+                let after = clock();
+                return self.backoff("network", after);
+            }
         };
+        let after = clock();
         match response.status {
             200 => {
                 let Ok(reply) = serde_json::from_slice::<IngestResponse>(&response.body) else {
-                    return self.backoff("bad_response", now);
+                    return self.backoff("bad_response", after);
                 };
                 let rejected = reply.rejected.len() as u64;
-                let counted = reply.accepted + reply.updated + reply.duplicates + rejected;
-                if counted != sent as u64 || reply.rejected.iter().any(|item| item.index >= sent) {
-                    return self.backoff("bad_response", now);
+                let counted = reply
+                    .accepted
+                    .checked_add(reply.updated)
+                    .and_then(|sum| sum.checked_add(reply.duplicates))
+                    .and_then(|sum| sum.checked_add(rejected));
+                if counted != Some(sent as u64)
+                    || reply.rejected.iter().any(|item| item.index >= sent)
+                {
+                    return self.backoff("bad_response", after);
                 }
                 if self.state.ack(&batch.rows).is_err() {
                     let mut line = self.line("upload", false);
@@ -412,11 +445,18 @@ impl Uploader {
                     .set_meta(meta::LAST_UPLOAD_AT, &now_ms().to_string());
                 self.failures = 0;
                 self.retry_at = None;
+                self.batch_limit = self
+                    .batch_limit
+                    .saturating_mul(2)
+                    .min(envelope::MAX_EVENTS_PER_BATCH);
                 self.set_state(UploadState::Ok);
                 self.check_version(&reply.min_collector_version);
                 let resync = self.observe_store(reply.store_id.as_deref());
+                let min_app_version =
+                    (!reply.min_app_version.is_empty()).then_some(reply.min_app_version);
                 let mut line = self.line("upload", true);
                 line.resync = resync;
+                line.min_app_version = min_app_version;
                 line.events = Some(sent as u64);
                 line.accepted = Some(reply.accepted);
                 line.updated = Some(reply.updated);
@@ -437,8 +477,11 @@ impl Uploader {
                 Step::Stop(self.line("upload", false))
             }
             429 => {
-                let delay = response.retry_after.unwrap_or(DEFAULT_RETRY_AFTER);
-                self.retry_at = Some(now + delay);
+                let delay = response
+                    .retry_after
+                    .unwrap_or(DEFAULT_RETRY_AFTER)
+                    .min(transport::MAX_RETRY_AFTER);
+                self.retry_at = Some(after.checked_add(delay).unwrap_or(after));
                 self.set_state(UploadState::Backoff("rate_limited".to_owned()));
                 let mut line = self.line("upload", false);
                 line.retry_in_ms = Some(millis(delay));
@@ -450,7 +493,7 @@ impl Uploader {
                 self.set_state(UploadState::Blocked(code));
                 Step::Stop(self.line("upload", false))
             }
-            status => self.backoff(&format!("http_{status}"), now),
+            status => self.backoff(&format!("http_{status}"), after),
         }
     }
 
@@ -522,15 +565,19 @@ impl Uploader {
         let mut line = match self.transport.post(&url, Some(&token), false, &body) {
             Ok(response) if response.status == 200 => {
                 let mut resync = None;
+                let mut min_app_version = None;
                 if let Ok(reply) = serde_json::from_slice::<HeartbeatResponse>(&response.body) {
                     self.check_version(&reply.min_collector_version);
                     resync = self.observe_store(reply.store_id.as_deref());
+                    min_app_version =
+                        (!reply.min_app_version.is_empty()).then_some(reply.min_app_version);
                 }
                 let _ = self
                     .state
                     .set_meta(meta::LAST_HEARTBEAT_AT, &now_ms().to_string());
                 let mut line = self.line("heartbeat", true);
                 line.resync = resync;
+                line.min_app_version = min_app_version;
                 line
             }
             Ok(response) if response.status == 401 => {
@@ -552,11 +599,31 @@ impl Uploader {
         line
     }
 
+    fn drain_wake(
+        receiver: &Receiver<Wake>,
+        pending: &mut bool,
+        next_heartbeat: &mut Option<Instant>,
+        stop_requested: &mut bool,
+    ) {
+        loop {
+            match receiver.try_recv() {
+                Ok(Wake::Stop) | Err(mpsc::TryRecvError::Disconnected) => {
+                    *stop_requested = true;
+                    break;
+                }
+                Ok(Wake::Data) => *pending = true,
+                Ok(Wake::Heartbeat) => *next_heartbeat = Some(Instant::now()),
+                Err(mpsc::TryRecvError::Empty) => break,
+            }
+        }
+    }
+
     fn run(mut self, receiver: Receiver<Wake>, sink: LineSink) {
         let timing = self.timing;
         let mut pending = true;
         let mut last_round: Option<Instant> = None;
         let mut next_heartbeat = Some(Instant::now() + timing.heartbeat_interval);
+        let mut stop_requested = false;
         loop {
             let now = Instant::now();
             let upload_at = (pending && self.upload_state.uploads_allowed()).then(|| {
@@ -577,21 +644,51 @@ impl Uploader {
                 Err(RecvTimeoutError::Timeout) => {
                     let now = Instant::now();
                     if upload_at.is_some_and(|at| at <= now) {
-                        let lines = self.upload_round(now);
-                        pending = self.backlog() > 0;
-                        // Only a round that sent something delays the next one.
+                        let lines = self.upload_round_with_stop(Instant::now, || {
+                            Self::drain_wake(
+                                &receiver,
+                                &mut pending,
+                                &mut next_heartbeat,
+                                &mut stop_requested,
+                            );
+                            stop_requested
+                        });
+                        if !stop_requested {
+                            pending = self.backlog() > 0;
+                        }
+                        let finished = Instant::now();
+                        let any_ok = lines.iter().any(|line| line.ok);
                         if !lines.is_empty() {
-                            last_round = Some(now);
-                            next_heartbeat = Some(now);
+                            last_round = Some(finished);
+                            if any_ok && !stop_requested {
+                                next_heartbeat = Some(finished);
+                            } else if let Some(retry) = self.retry_at {
+                                next_heartbeat = Some(
+                                    next_heartbeat.map_or(retry, |scheduled| scheduled.max(retry)),
+                                );
+                            }
                         }
                         for line in lines {
                             sink(line);
                         }
                     }
+                    Self::drain_wake(
+                        &receiver,
+                        &mut pending,
+                        &mut next_heartbeat,
+                        &mut stop_requested,
+                    );
+                    if stop_requested {
+                        break;
+                    }
+                    let now = Instant::now();
                     if self.upload_state.heartbeats_allowed()
-                        && next_heartbeat.is_some_and(|at| at <= Instant::now())
+                        && next_heartbeat.is_some_and(|at| at <= now)
                     {
                         sink(self.heartbeat());
+                        if self.upload_state.uploads_allowed() && !pending {
+                            pending = self.backlog() > 0;
+                        }
                         next_heartbeat = Some(Instant::now() + timing.heartbeat_interval);
                     }
                 }
@@ -684,6 +781,10 @@ impl Syncer {
         self.resync.swap(false, Ordering::SeqCst)
     }
 
+    pub fn ensure_project_salt(&self) -> Result<String, StateError> {
+        self.state.ensure_project_salt()
+    }
+
     pub fn seed(&self, snapshot: &mut Snapshot) -> Result<usize, StateError> {
         self.state
             .for_each_known(|key, client, ts, hash| snapshot.seed(key, client, ts, hash))
@@ -712,19 +813,19 @@ impl Syncer {
         duration: Duration,
     ) -> Recorded {
         let now = now_ms();
+        let forget_keys: Vec<String> = changed
+            .iter()
+            .filter(|event| event.payload.is_none())
+            .map(|event| event.key.clone())
+            .collect();
         let (line, forget, queued) =
             match self.state.record_changes(&self.generation, &changed, now) {
                 Ok(queued) => {
-                    if full {
+                    if full && forget_keys.is_empty() && !self.resync.load(Ordering::SeqCst) {
                         let _ = self
                             .state
                             .set_meta(meta::FULL_SCAN_GENERATION, &self.generation);
                     }
-                    let forget = changed
-                        .iter()
-                        .filter(|event| event.payload.is_none())
-                        .map(|event| event.key.clone())
-                        .collect();
                     let line = SyncLine {
                         sync: "queued",
                         ok: true,
@@ -732,7 +833,7 @@ impl Syncer {
                         backlog: self.state.backlog().ok(),
                         ..SyncLine::default()
                     };
-                    (line, forget, queued)
+                    (line, forget_keys, queued)
                 }
                 Err(_) => {
                     let line = SyncLine {
@@ -786,13 +887,49 @@ impl Syncer {
         }
     }
 
+    /// Signals the upload thread to stop without waiting for it to finish.
+    pub fn request_stop(&self) {
+        let _ = self.wake.send(Wake::Stop);
+    }
+
     /// Stops the upload thread; an in-flight request may take up to its timeout.
     pub fn stop(mut self) {
-        let _ = self.wake.send(Wake::Stop);
+        self.request_stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
+}
+
+/// Fast read-only queue summary for UI status polling without scanning `known`.
+#[derive(Debug, Clone)]
+pub struct LocalSummary {
+    pub outbox_backlog: u64,
+    pub backfill_complete: bool,
+    pub upload_state: Option<String>,
+    pub last_upload_at: Option<i64>,
+    pub last_heartbeat_at: Option<i64>,
+}
+
+fn read_local_summary(state: &State) -> Result<LocalSummary, StateError> {
+    let outbox_backlog = state.backlog()?;
+    let backfill_complete = state.meta(meta::FULL_SCAN_GENERATION)?.as_deref()
+        == Some(crate::PARSER_GENERATION)
+        && outbox_backlog == 0;
+    Ok(LocalSummary {
+        outbox_backlog,
+        backfill_complete,
+        upload_state: state.meta(meta::UPLOAD_STATE)?,
+        last_upload_at: state.meta_i64(meta::LAST_UPLOAD_AT)?,
+        last_heartbeat_at: state.meta_i64(meta::LAST_HEARTBEAT_AT)?,
+    })
+}
+
+pub fn local_summary(state_dir: &Path) -> Result<Option<LocalSummary>, StateError> {
+    let Some(state) = State::open_readonly(state_dir)? else {
+        return Ok(None);
+    };
+    Ok(Some(read_local_summary(&state)?))
 }
 
 /// Numbers and codes for `collector status`.
@@ -809,18 +946,18 @@ pub struct LocalStatus {
 }
 
 pub fn local_status(state_dir: &Path) -> Result<Option<LocalStatus>, StateError> {
-    if !State::exists_in(state_dir) {
+    let Some(state) = State::open_readonly(state_dir)? else {
         return Ok(None);
-    }
-    let state = State::open(state_dir)?;
+    };
+    let summary = read_local_summary(&state)?;
     Ok(Some(LocalStatus {
-        outbox_backlog: state.backlog()?,
-        backfill_complete: state.backfill_complete(crate::PARSER_GENERATION)?,
-        upload_state: state.meta(meta::UPLOAD_STATE)?,
-        last_upload_at: state.meta_i64(meta::LAST_UPLOAD_AT)?,
-        last_heartbeat_at: state.meta_i64(meta::LAST_HEARTBEAT_AT)?,
+        outbox_backlog: summary.outbox_backlog,
+        backfill_complete: summary.backfill_complete,
+        upload_state: summary.upload_state,
+        last_upload_at: summary.last_upload_at,
+        last_heartbeat_at: summary.last_heartbeat_at,
         rejected_total: state.meta_i64(meta::REJECTED_TOTAL)?.unwrap_or(0),
-        known_events: state.client_stats()?.iter().map(|stats| stats.events).sum(),
+        known_events: state.known_count()?,
     }))
 }
 
@@ -1193,5 +1330,227 @@ mod tests {
         let sent = setup.fake.sent();
         assert!(!sent[0].gzip);
         assert_eq!(sent[0].url, "http://127.0.0.1:9/api/ingest/heartbeat");
+    }
+
+    #[test]
+    fn retry_after_clamps_overflow_checks_sum_and_upgrade_recovers() {
+        // Huge Retry-After clamps without overflow panic.
+        let mut setup = setup(1);
+        setup.fake.push_raw(Ok(HttpResponse {
+            status: 429,
+            retry_after: Some(Duration::from_secs(u64::MAX)),
+            body: Vec::new(),
+        }));
+        let now = Instant::now();
+        let lines = setup.uploader.upload_round(now);
+        assert_eq!(
+            lines[0].retry_in_ms,
+            Some(transport::MAX_RETRY_AFTER.as_millis() as u64)
+        );
+        assert_eq!(
+            setup.uploader.retry_at(),
+            Some(now + transport::MAX_RETRY_AFTER)
+        );
+
+        // Overflowing counts in 200 JSON must not wrap and ack outbox rows.
+        setup.fake.push(
+            200,
+            json!({
+                "accepted": u64::MAX,
+                "updated": 2,
+                "duplicates": 0,
+                "rejected": [],
+                "minCollectorVersion": "0.1.0",
+                "minAppVersion": "0.1.0"
+            }),
+        );
+        let lines = setup
+            .uploader
+            .upload_round(now + transport::MAX_RETRY_AFTER + Duration::from_secs(1));
+        assert_eq!(lines[0].state.as_deref(), Some("backoff:bad_response"));
+        assert_eq!(setup.uploader.backlog(), 1);
+
+        // UpgradeRequired clears once heartbeat returns acceptable minimum.
+        let mut upgrade_setup = self::setup(1);
+        upgrade_setup.fake.push(200, ok_reply(1, &[], "99.0.0"));
+        upgrade_setup.uploader.upload_round(Instant::now());
+        assert_eq!(
+            *upgrade_setup.uploader.upload_state(),
+            UploadState::UpgradeRequired
+        );
+        upgrade_setup.fake.push(
+            200,
+            json!({"minCollectorVersion": "0.1.0", "minAppVersion": "0.1.0"}),
+        );
+        assert!(upgrade_setup.uploader.heartbeat().ok);
+        assert_eq!(*upgrade_setup.uploader.upload_state(), UploadState::Ok);
+    }
+
+    #[test]
+    fn batch_limit_recovers_after_413_and_resync_blocks_premature_backfill_complete() {
+        let mut setup = setup(16);
+        setup.uploader.batch_limit = 4;
+        setup.fake.push(413, json!({"error": "payload_too_large"}));
+        // Batch sizes grow 2 -> 4 -> 8 -> 2 across 200 OK replies until empty.
+        for accepted in [2, 4, 8, 2] {
+            setup.fake.push(200, ok_reply(accepted, &[], "0.1.0"));
+        }
+        setup.uploader.upload_round(Instant::now());
+        assert_eq!(setup.uploader.backlog(), 0);
+        assert!(setup.uploader.batch_limit >= 16);
+
+        let dir = tempfile::tempdir().expect("dir");
+        let mut syncer = Syncer::start(
+            dir.path(),
+            (*credentials()).clone(),
+            Box::new(FakeTransport::default()),
+            SyncTiming::default(),
+            Box::new(|_| {}),
+        )
+        .expect("start");
+        let counts = BTreeMap::from([("codex".to_owned(), 1)]);
+        let mut payloadless = event(1);
+        payloadless.payload = None;
+        let recorded = syncer.record_scan(true, &counts, vec![payloadless], Duration::ZERO);
+        assert_eq!(recorded.forget, vec!["k0001".to_owned()]);
+        assert!(!local_status(dir.path()).unwrap().unwrap().backfill_complete);
+        syncer.resync.store(true, Ordering::SeqCst);
+        syncer.record_scan(true, &counts, vec![event(2)], Duration::ZERO);
+        assert!(!local_status(dir.path()).unwrap().unwrap().backfill_complete);
+        syncer.stop();
+    }
+
+    #[test]
+    fn failed_upload_round_does_not_fire_immediate_heartbeat() {
+        let dir = tempfile::tempdir().expect("dir");
+        let fake = FakeTransport::default();
+        fake.push(503, json!({"error": "down"}));
+        let (lines, received) = mpsc::channel();
+        let mut syncer = Syncer::start(
+            dir.path(),
+            (*credentials()).clone(),
+            Box::new(fake.clone()),
+            SyncTiming {
+                min_round_gap: Duration::from_millis(5),
+                heartbeat_interval: Duration::from_secs(60),
+                backoff_base: Duration::from_secs(60),
+                backoff_max: Duration::from_secs(60),
+            },
+            Box::new(move |line| {
+                let _ = lines.send(line);
+            }),
+        )
+        .expect("start");
+        let counts = BTreeMap::from([("codex".to_owned(), 1)]);
+        syncer.record_scan(false, &counts, vec![event(1)], Duration::ZERO);
+        let first = received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("upload failure line");
+        assert_eq!(first.sync, "upload");
+        assert!(!first.ok);
+        std::thread::sleep(Duration::from_millis(120));
+        assert!(
+            received.try_recv().is_err(),
+            "no immediate heartbeat after failed upload"
+        );
+        assert_eq!(fake.sent().len(), 1);
+        syncer.stop();
+    }
+
+    #[test]
+    fn stop_interrupts_multi_batch_upload_and_skips_trailing_heartbeat() {
+        use std::sync::Barrier;
+
+        struct BlockingBatchTransport {
+            started: Arc<Barrier>,
+            release: Arc<Barrier>,
+            paths: Arc<Mutex<Vec<String>>>,
+        }
+        impl Transport for BlockingBatchTransport {
+            fn post(
+                &self,
+                url: &str,
+                _bearer: Option<&str>,
+                gzip: bool,
+                body: &[u8],
+            ) -> Result<HttpResponse, crate::transport::TransportError> {
+                let mut paths = self.paths.lock().unwrap();
+                let first = paths.is_empty();
+                paths.push(url.to_owned());
+                drop(paths);
+                if first {
+                    self.started.wait();
+                    self.release.wait();
+                }
+                let count = if gzip {
+                    gunzip(body)["events"]
+                        .as_array()
+                        .map_or(0, |items| items.len() as u64)
+                } else {
+                    0
+                };
+                Ok(HttpResponse {
+                    status: 200,
+                    retry_after: None,
+                    body: serde_json::to_vec(&ok_reply(count, &[], "0.1.0")).unwrap(),
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("dir");
+        assert!(local_summary(dir.path()).unwrap().is_none());
+
+        let mut state = State::open(dir.path()).expect("open");
+        state
+            .prepare("dev_synthetic", crate::PARSER_GENERATION)
+            .expect("prepare");
+        let events: Vec<_> = (0..(envelope::MAX_EVENTS_PER_BATCH as u32 + 2))
+            .map(event)
+            .collect();
+        state
+            .record_changes(crate::PARSER_GENERATION, &events, 1)
+            .expect("record");
+        drop(state);
+
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let paths = Arc::new(Mutex::new(Vec::new()));
+        let syncer = Syncer::start(
+            dir.path(),
+            (*credentials()).clone(),
+            Box::new(BlockingBatchTransport {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                paths: Arc::clone(&paths),
+            }),
+            SyncTiming {
+                min_round_gap: Duration::from_millis(5),
+                heartbeat_interval: Duration::from_secs(60),
+                backoff_base: Duration::from_secs(60),
+                backoff_max: Duration::from_secs(60),
+            },
+            Box::new(|_| {}),
+        )
+        .expect("start");
+
+        // Wait until first batch request is in flight, then queue Stop.
+        started.wait();
+        syncer.request_stop();
+        release.wait();
+        syncer.stop();
+
+        // Stopped after acking Batch 1 without sending Batch 2 or a trailing heartbeat.
+        assert_eq!(paths.lock().unwrap().len(), 1);
+        assert!(
+            paths
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|url| url.ends_with("/api/ingest/events"))
+        );
+        let summary = local_summary(dir.path()).unwrap().unwrap();
+        assert_eq!(summary.outbox_backlog, 2);
+        assert!(summary.last_upload_at.is_some());
+        assert!(summary.last_heartbeat_at.is_none());
     }
 }

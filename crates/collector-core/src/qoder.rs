@@ -216,6 +216,17 @@ pub fn projects_root(home: &Path) -> PathBuf {
     home.join(".qoder").join("projects")
 }
 
+pub fn projects_root_intl(home: &Path, use_env_roots: bool) -> PathBuf {
+    if use_env_roots
+        && let Some(root) = std::env::var_os("QODER_CONFIG_DIR")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    {
+        return root.join("projects");
+    }
+    projects_root(home)
+}
+
 /// Qoder CN Desktop / CLI transcripts. The old bridge may have written copies
 /// here; callers must drop events that duplicate the international lane.
 pub fn projects_root_cn(home: &Path, use_env_roots: bool) -> PathBuf {
@@ -243,6 +254,14 @@ pub fn scan_home(home: &Path, range: crate::DateRange) -> Result<QoderOutput, Qo
     scan_home_for(home, Edition::International, false, range)
 }
 
+pub fn scan_home_with_env(
+    home: &Path,
+    use_env_roots: bool,
+    range: crate::DateRange,
+) -> Result<QoderOutput, QoderError> {
+    scan_home_for(home, Edition::International, use_env_roots, range)
+}
+
 pub fn scan_home_cn(
     home: &Path,
     use_env_roots: bool,
@@ -258,7 +277,7 @@ pub fn scan_home_for(
     range: crate::DateRange,
 ) -> Result<QoderOutput, QoderError> {
     let root = match edition {
-        Edition::International => projects_root(home),
+        Edition::International => projects_root_intl(home, use_env_roots),
         Edition::China => projects_root_cn(home, use_env_roots),
     };
     assert_edition_path(&root, edition)?;
@@ -280,7 +299,7 @@ pub fn assert_international_path(path: &Path) -> Result<(), QoderError> {
 pub fn assert_edition_path(path: &Path, edition: Edition) -> Result<(), QoderError> {
     if path
         .components()
-        .any(|component| matches!(component, Component::Normal(part) if part == ".qoder-cn"))
+        .any(|component| matches!(component, Component::Normal(part) if part.eq_ignore_ascii_case(".qoder-cn")))
         && !edition.allows_cn_path()
     {
         Err(QoderError::ForbiddenMirrorPath)
@@ -312,11 +331,24 @@ pub fn scan_root_for(
     let mut session_titles = BTreeMap::<String, String>::new();
 
     for path in paths {
+        let records = match read_records(&path, edition) {
+            Ok(records) => records,
+            Err(QoderError::ForbiddenMirrorPath) => return Err(QoderError::ForbiddenMirrorPath),
+            Err(QoderError::Read(_)) => {
+                stats.invalid_records += 1;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let mut context = FileContext::default();
-        for record in read_records(&path, edition)? {
+        for record in records {
             update_context(&record.value, &mut context);
-            if let (Some(id), Some(title)) = (&context.session_id, &context.session_title) {
-                session_titles.insert(id.clone(), title.clone());
+            let root_id = context
+                .session_id
+                .as_deref()
+                .unwrap_or(&record.fallback_session_id);
+            if let Some(title) = &context.session_title {
+                session_titles.insert(root_id.to_owned(), title.clone());
             }
             match transform_record(&record, &mut context, edition) {
                 Ok(Some(fragment)) => {
@@ -393,7 +425,7 @@ pub fn scan_root_for(
         let title = session_titles.get(root_id).cloned();
         match fragment.into_event(&rates, edition) {
             Ok(Some(mut event)) => {
-                event.session_title = title;
+                event.session_title = title.or(event.session_title);
                 if let Some(group) = group {
                     measured_turns.insert(group);
                 }
@@ -450,11 +482,24 @@ fn collect_jsonl(
     edition: Edition,
 ) -> Result<(), QoderError> {
     assert_edition_path(directory, edition)?;
-    for entry in std::fs::read_dir(directory)? {
-        let entry = entry?;
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         let path = entry.path();
         assert_edition_path(&path, edition)?;
-        let file_type = entry.file_type()?;
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         if file_type.is_symlink() {
             continue;
         }
@@ -473,9 +518,11 @@ fn collect_jsonl(
 
 fn read_records(path: &Path, edition: Edition) -> Result<Vec<RawRecord>, QoderError> {
     assert_edition_path(path, edition)?;
-    let fallback_timestamp = std::fs::metadata(path)?
-        .modified()
+    let metadata = std::fs::metadata(path)?;
+    let file_timestamp = metadata
+        .created()
         .ok()
+        .or_else(|| metadata.modified().ok())
         .and_then(|time| time.duration_since(SystemTime::UNIX_EPOCH).ok())
         .and_then(|duration| i64::try_from(duration.as_millis()).ok())
         .unwrap_or(0);
@@ -488,21 +535,32 @@ fn read_records(path: &Path, edition: Edition) -> Result<Vec<RawRecord>, QoderEr
     let is_subagent_file = path
         .ancestors()
         .any(|part| part.file_name().is_some_and(|name| name == "subagents"));
-    let mut records = Vec::new();
-    for line in BufReader::new(std::fs::File::open(path)?).lines() {
+    let mut values = Vec::new();
+    let mut earliest_record_ts: Option<i64> = None;
+    for line in BufReader::new(std::fs::File::open(path)?).split(b'\n') {
         let line = line?;
-        if line.trim().is_empty() {
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        records.push(RawRecord {
-            value: serde_json::from_str(&line).unwrap_or(Value::Null),
+        let value = serde_json::from_slice::<Value>(&line)
+            .or_else(|_| serde_json::from_str::<Value>(&String::from_utf8_lossy(&line)))
+            .unwrap_or(Value::Null);
+        if let Some(ts) = timestamp(value.get("timestamp")) {
+            earliest_record_ts = Some(earliest_record_ts.map_or(ts, |prev| prev.min(ts)));
+        }
+        values.push(value);
+    }
+    let fallback_timestamp = earliest_record_ts.unwrap_or(file_timestamp);
+    Ok(values
+        .into_iter()
+        .map(|value| RawRecord {
+            value,
             fallback_timestamp,
             fallback_session_id: fallback_session_id.clone(),
             file_agent_id: file_agent_id.clone(),
             is_subagent_file,
-        });
-    }
-    Ok(records)
+        })
+        .collect())
 }
 
 fn fallback_session_id(path: &Path) -> String {
@@ -854,6 +912,9 @@ fn transform_record(
 
 fn merge_fragment(existing: &mut PendingTurn, fragment: PendingTurn) {
     existing.raw.merge(fragment.raw);
+    if existing.event.model_id == DEFAULT_MODEL && fragment.event.model_id != DEFAULT_MODEL {
+        existing.event.model_id = fragment.event.model_id;
+    }
     let latest = existing.latest_timestamp.max(fragment.latest_timestamp);
     existing.event.ts = existing.event.ts.min(fragment.event.ts);
     existing.latest_timestamp = latest;
@@ -1311,5 +1372,31 @@ mod tests {
         };
         let empty = scan_root(temp.path(), before).expect("scan");
         assert!(empty.assistant_without_usage.is_empty());
+    }
+
+    #[test]
+    fn title_without_explicit_session_id_invalid_utf8_and_auto_model_upgrade_work() {
+        let temp = tempfile::tempdir().expect("root");
+        let path = temp.path().join("fallback-sess.jsonl");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"{\"type\":\"ai-title\",\"aiTitle\":\"Fallback ID Title\"}\n");
+        bytes.extend_from_slice(b"{\"broken\": \"\xff\xfe\"}\n");
+        bytes.extend_from_slice(
+            b"{\"type\":\"assistant\",\"timestamp\":\"2026-11-01T10:00:00Z\",\"message\":{\"id\":\"m1\",\"usage\":{\"credits\":1}}}\n",
+        );
+        bytes.extend_from_slice(
+            b"{\"type\":\"assistant\",\"timestamp\":\"2026-11-01T10:00:01Z\",\"message\":{\"id\":\"m1\",\"model\":\"cmodel\",\"usage\":{\"input_tokens\":50,\"output_tokens\":10}}}\n",
+        );
+        std::fs::write(&path, bytes).unwrap();
+        let events = scan_root(temp.path(), crate::DateRange::all_history())
+            .expect("scan survives non-utf8")
+            .events;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].session_id, "fallback-sess");
+        assert_eq!(
+            events[0].session_title.as_deref(),
+            Some("Fallback ID Title")
+        );
+        assert_eq!(events[0].model_id, "cmodel");
     }
 }

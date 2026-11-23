@@ -281,3 +281,19 @@ fn restore_upgrades_an_older_backup_and_refuses_a_damaged_one() {
         "left as it was"
     );
 }
+
+#[tokio::test]
+async fn restore_removes_stale_journal_sidecar() {
+    let (h, _device) = seeded().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let backup = dir.path().join("backup.sqlite");
+    db::backup_to(&h.db_path, &backup).expect("backup");
+
+    let target = crashed_database(dir.path());
+    let journal = with_suffix(&target, "-journal");
+    std::fs::write(&journal, b"stale-rollback-journal").expect("write journal");
+    assert!(journal.exists());
+
+    db::restore_from(&backup, &target).expect("restore");
+    assert!(!journal.exists(), "stale -journal sidecar must be removed");
+}

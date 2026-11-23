@@ -786,3 +786,111 @@ async fn unknown_routes_are_not_found() {
         .expect("send");
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
 }
+
+#[tokio::test]
+async fn client_rate_key_ignores_spoofed_real_ip_and_uses_rightmost_forwarded_header() {
+    let h = Harness::start().await;
+    for index in 0..tokenlens_server::limiter::CLAIM_FAILURE_LIMIT {
+        let resp = h
+            .http
+            .post(format!("{}/api/pair/claim", h.base))
+            .header("x-real-ip", format!("198.51.100.{index}"))
+            .header("x-forwarded-for", format!("10.0.0.{index}"))
+            .header("x-forwarded-for", "203.0.113.44")
+            .json(&json!({
+                "code": "WXYZ-WXYZ-WXYZ",
+                "platform": "macos",
+                "formFactor": "laptop",
+                "displayName": "Test"
+            }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+    let blocked = h
+        .http
+        .post(format!("{}/api/pair/claim", h.base))
+        .header("x-real-ip", "198.51.100.250")
+        .header("x-forwarded-for", "10.0.0.250")
+        .header("x-forwarded-for", "203.0.113.44")
+        .json(&json!({
+            "code": "WXYZ-WXYZ-WXYZ",
+            "platform": "macos",
+            "formFactor": "laptop",
+            "displayName": "Test"
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn ingest_rejects_empty_sessions_extreme_timestamps_and_extreme_counts() {
+    let h = Harness::start().await;
+    let device = h.pair().await;
+    let template = fixture_events().into_iter().next().expect("fixture");
+
+    let mut bad_empty_session = template.clone();
+    bad_empty_session["eventKey"] = json!(format!("{:064x}", 1_u64));
+    bad_empty_session["sessionId"] = json!("");
+
+    let mut bad_empty_parent = template.clone();
+    bad_empty_parent["eventKey"] = json!(format!("{:064x}", 2_u64));
+    bad_empty_parent["parentSessionId"] = json!("");
+
+    let mut bad_old_ts = template.clone();
+    bad_old_ts["eventKey"] = json!(format!("{:064x}", 3_u64));
+    bad_old_ts["ts"] = json!(0);
+
+    let mut bad_future_ts = template.clone();
+    bad_future_ts["eventKey"] = json!(format!("{:064x}", 4_u64));
+    bad_future_ts["ts"] = json!(4_200_000_000_000_i64);
+
+    let mut bad_messages = template.clone();
+    bad_messages["eventKey"] = json!(format!("{:064x}", 5_u64));
+    bad_messages["messageCount"] = json!(1_000_001);
+
+    let mut bad_duration = template;
+    bad_duration["eventKey"] = json!(format!("{:064x}", 6_u64));
+    bad_duration["durationMs"] = json!(31_i64 * 24 * 60 * 60 * 1000);
+
+    let (status, body) = h
+        .ingest(
+            &device.ingest,
+            &envelope(
+                &device.id,
+                "bad-bounds",
+                "g1",
+                vec![
+                    bad_empty_session,
+                    bad_empty_parent,
+                    bad_old_ts,
+                    bad_future_ts,
+                    bad_messages,
+                    bad_duration,
+                ],
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["accepted"], 0);
+    assert_eq!(body["rejected"].as_array().unwrap().len(), 6);
+    assert_eq!(h.count("SELECT COUNT(*) FROM usage_events"), 0);
+}
+
+#[tokio::test]
+async fn oversized_auth_body_returns_payload_too_large() {
+    let h = Harness::start().await;
+    let oversized = vec![b'a'; 20 * 1024];
+    let resp = h
+        .http
+        .post(format!("{}/api/auth/login", h.base))
+        .header("content-type", "application/json")
+        .body(oversized)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+}

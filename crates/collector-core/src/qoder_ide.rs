@@ -7,7 +7,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
-use usage_event::{Precision, UsageEvent, qoder_event_key};
+use usage_event::{Precision, UsageEvent, qoder_cn_event_key, qoder_event_key};
 
 const CLIENT_ID: &str = "qoder-intl";
 const DEFAULT_MODEL: &str = "qoder-agent";
@@ -76,9 +76,13 @@ fn application_root(home: &Path, use_env_roots: bool, edition: Edition) -> PathB
             .join("Application Support")
             .join(edition.app_dir())
     } else if cfg!(target_os = "windows") {
-        std::env::var_os("APPDATA")
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+        use_env_roots
+            .then(|| {
+                std::env::var_os("APPDATA")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+            })
+            .flatten()
             .unwrap_or_else(|| home.join("AppData").join("Roaming"))
             .join(edition.app_dir())
     } else {
@@ -263,8 +267,12 @@ fn event_from_values(
         .map(|id| format!("ide-msg:{id}"))
         .or_else(|| request.map(|id| format!("ide-req:{id}")))
         .unwrap_or_else(|| format!("ide-row:{row}"));
+    let event_key = match edition {
+        Edition::International => qoder_event_key(&session, Some(&turn_key), ts, &model, 0),
+        Edition::China => qoder_cn_event_key(&session, Some(&turn_key), ts, &model, 0),
+    };
     Ok(Some(UsageEvent {
-        event_key: qoder_event_key(&session, Some(&turn_key), ts, &model, 0),
+        event_key,
         client: edition.client_id().to_owned(),
         session_id: session,
         session_title: None,
@@ -309,12 +317,13 @@ fn scan_database_for(
     edition: Edition,
 ) -> Result<Vec<UsageEvent>, crate::qoder::QoderError> {
     assert_allowed_path(path, edition)?;
-    if !path.is_file() {
+    if !crate::roots::is_real_file(path) {
         return Ok(Vec::new());
     }
     let flags =
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = rusqlite::Connection::open_with_flags(path, flags)?;
+    connection.busy_timeout(std::time::Duration::from_millis(500))?;
     connection.pragma_update(None, "query_only", "ON")?;
     // Even a corrupt URI-looking filename is opened as a plain path here.
     // Do not read the application's main.sqlite or transcript mirror.
@@ -326,16 +335,32 @@ fn scan_database_for(
     if !table_exists {
         return Ok(Vec::new());
     }
+    let record_table_exists = connection.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chat_record')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
     let session_titles = crate::titles::qoder_session_titles(&connection);
-    let mut statement = connection.prepare(
+    let query = if record_table_exists {
         "SELECT cm.rowid, cm.id, cm.session_id, cm.request_id, \
-         cm.token_info, cm.model_info, cm.gmt_create, cr.extra \
+         cm.token_info, cm.model_info, cm.gmt_create, \
+         (SELECT cr.extra FROM chat_record AS cr \
+          WHERE cm.request_id IS NOT NULL AND trim(cm.request_id) <> '' \
+            AND cr.request_id = cm.request_id \
+          ORDER BY cr.rowid DESC LIMIT 1) AS extra \
          FROM chat_message AS cm \
-         LEFT JOIN chat_record AS cr ON cr.request_id = cm.request_id \
          WHERE cm.role = 'assistant' \
          AND cm.token_info IS NOT NULL AND trim(cm.token_info) NOT IN ('', '{}') \
-         ORDER BY cm.gmt_create, cm.rowid",
-    )?;
+         ORDER BY cm.gmt_create, cm.rowid"
+    } else {
+        "SELECT cm.rowid, cm.id, cm.session_id, cm.request_id, \
+         cm.token_info, cm.model_info, cm.gmt_create, NULL AS extra \
+         FROM chat_message AS cm \
+         WHERE cm.role = 'assistant' \
+         AND cm.token_info IS NOT NULL AND trim(cm.token_info) NOT IN ('', '{}') \
+         ORDER BY cm.gmt_create, cm.rowid"
+    };
+    let mut statement = connection.prepare(query)?;
     let mut rows = statement.query([])?;
     let mut events = Vec::new();
     while let Some(row) = rows.next()? {
@@ -637,5 +662,56 @@ mod tests {
                 .to_string_lossy()
                 .contains("main.sqlite")
         );
+    }
+
+    #[test]
+    fn cn_key_namespace_duplicate_chat_record_and_missing_chat_record_table_are_safe() {
+        let fixture = synthetic_database();
+        let path = fixture.path().join("local.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute(
+            "INSERT INTO chat_record VALUES ('synthetic-request', '{\"modelConfig\":{\"key\":\"other-model\"}}', 'x')",
+            [],
+        )
+        .unwrap();
+        db.execute("INSERT INTO chat_record VALUES ('', '{}', 'x')", [])
+            .unwrap();
+        db.execute("INSERT INTO chat_record VALUES ('', '{}', 'x')", [])
+            .unwrap();
+        db.execute(
+            "INSERT INTO chat_message VALUES ('empty-req', 'synthetic-session', '', 'assistant', '{\"prompt_tokens\":10,\"cached_tokens\":0,\"completion_tokens\":2}', '{\"model_key\":\"m1\"}', ?1, 'x')",
+            [TIMESTAMP + 2000],
+        )
+        .unwrap();
+        drop(db);
+
+        let intl = scan_database_for(
+            &path,
+            crate::DateRange::all_history(),
+            Edition::International,
+        )
+        .expect("intl scan");
+        let cn = scan_database_for(&path, crate::DateRange::all_history(), Edition::China)
+            .expect("cn scan");
+        assert_eq!(intl.len(), 3);
+        assert_eq!(cn.len(), 3);
+        for (i, c) in intl.iter().zip(cn.iter()) {
+            assert_ne!(i.event_key, c.event_key);
+        }
+
+        let no_record = fixture.path().join("no_record.db");
+        let db = rusqlite::Connection::open(&no_record).unwrap();
+        db.execute_batch(
+            "CREATE TABLE chat_message (id TEXT, session_id TEXT, request_id TEXT, role TEXT, token_info TEXT, model_info TEXT, gmt_create INTEGER);
+             INSERT INTO chat_message VALUES ('m1', 's1', NULL, 'assistant', '{\"prompt_tokens\":5,\"cached_tokens\":0,\"completion_tokens\":1}', '{\"model_key\":\"m\"}', 1784681696263);",
+        )
+        .unwrap();
+        let solo = scan_database_for(
+            &no_record,
+            crate::DateRange::all_history(),
+            Edition::International,
+        )
+        .expect("scan without chat_record");
+        assert_eq!(solo.len(), 1);
     }
 }

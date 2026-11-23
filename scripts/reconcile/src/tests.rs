@@ -175,6 +175,7 @@ fn our_daily_usage_maps_clients_and_applies_the_hub_reasoning_rule() {
 #[test]
 fn client_ids_follow_token_monitor_aliases() {
     assert_eq!(hub_client_for("qoder-intl"), "qodercn");
+    assert_eq!(hub_client_for("qoder-cn"), "qodercn");
     assert_eq!(hub_client_for("micode-desktop"), "mimo");
     assert_eq!(hub_client_for("vibe"), "mistral");
     assert_eq!(hub_client_for("Codex"), "codex");

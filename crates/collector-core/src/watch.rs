@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, PoisonError, RwLock, RwLockWriteGuard};
 use std::time::{Duration, Instant};
@@ -21,7 +22,7 @@ use crate::schedule::{ScanKind, Scheduler, Timing};
 use crate::snapshot::{MergeStats, ScannedEvent, Scope, Snapshot};
 use crate::state::{Prepared, StateError};
 use crate::sync::{Recorded, SyncLine, Syncer};
-use crate::worker::{self, KeepPayload, WorkerFailure, WorkerOutput};
+use crate::worker::{self, FailureKind, KeepPayload, WorkerFailure, WorkerOutput};
 
 /// Limit background scans consistently on Mac and Windows. The worker remains
 /// a short-lived child process, while the watch loop itself stays lightweight.
@@ -54,6 +55,10 @@ pub const AGENT_ROOT_ENV_VARS: &[&str] = &[
     "QODER_CN_HOME",
     "QODER_CN_DB_PATH",
     "QODERCN_CONFIG_DIR",
+    "COPILOT_HOME",
+    "OPENCLAW_HOME",
+    "CRUSH_GLOBAL_DATA",
+    "LOCALAPPDATA",
     "T3CODE_HOME",
     "APPDATA",
     "XDG_DATA_HOME",
@@ -181,11 +186,12 @@ fn scope_for(kind: &ScanKind) -> Scope {
             let today = local_today();
             Scope {
                 clients: Some(clients.clone()),
-                // Keep yesterday in triggered scans for midnight/timezone
-                // boundaries; upstream's source cache makes the extra day free.
+                // Keep yesterday without an upper date cap so events written
+                // across local midnight or with slight positive clock skew are
+                // never filtered out.
                 range: DateRange {
                     since: today.pred_opt(),
-                    until: Some(today),
+                    until: None,
                 },
             }
         }
@@ -218,8 +224,13 @@ pub fn worker_command(options: &WatchOptions, scope: &Scope) -> Command {
     if let Some(until) = scope.range.until {
         command.arg("--until").arg(until.to_string());
     }
-    if let Some(salt) = &options.project_salt {
-        command.arg("--project-salt").arg(salt);
+    match &options.project_salt {
+        Some(salt) => {
+            command.env(crate::worker_cli::PROJECT_SALT_ENV, salt);
+        }
+        None => {
+            command.env_remove(crate::worker_cli::PROJECT_SALT_ENV);
+        }
     }
     // Upstream's recovery overlay reads a ledger from its shared config dir;
     // workers must only ever see raw agent logs.
@@ -282,6 +293,8 @@ fn build_watcher(
         .map(|root| root.path.clone())
         .collect();
     recursive_dirs.sort_by_key(|path| path.components().count());
+    let mut attempted = 0usize;
+    let mut watched_any = false;
     let mut watched_recursive: Vec<PathBuf> = Vec::new();
     for dir in recursive_dirs {
         if watched_recursive
@@ -290,10 +303,11 @@ fn build_watcher(
         {
             continue;
         }
-        watcher
-            .watch(&dir, RecursiveMode::Recursive)
-            .map_err(|_| ())?;
-        watched_recursive.push(dir);
+        attempted += 1;
+        if watcher.watch(&dir, RecursiveMode::Recursive).is_ok() {
+            watched_any = true;
+            watched_recursive.push(dir);
+        }
     }
     let mut watched_non_recursive: BTreeSet<PathBuf> = BTreeSet::new();
     for root in roots.iter().filter(|root| root.path.is_file()) {
@@ -305,9 +319,13 @@ fn build_watcher(
         {
             continue;
         }
-        watcher
-            .watch(&dir, RecursiveMode::NonRecursive)
-            .map_err(|_| ())?;
+        attempted += 1;
+        if watcher.watch(&dir, RecursiveMode::NonRecursive).is_ok() {
+            watched_any = true;
+        }
+    }
+    if attempted > 0 && !watched_any {
+        return Err(());
     }
     Ok(watcher)
 }
@@ -404,6 +422,7 @@ pub fn run(
     let mut watcher: Option<RecommendedWatcher> = None;
     let mut roots: Vec<WatchRoot> = Vec::new();
     let mut stopping = false;
+    let stop_cancel = Arc::new(AtomicBool::new(false));
     loop {
         if let Some(syncer) = sync.as_deref_mut()
             && syncer.take_resync()
@@ -423,8 +442,9 @@ pub fn run(
             let timeout = options.worker_timeout;
             let done = sender.clone();
             let keep = keep.clone();
+            let cancel = Arc::clone(&stop_cancel);
             std::thread::spawn(move || {
-                let result = worker::run(command, timeout, keep);
+                let result = worker::run_cancellable(command, timeout, keep, Some(cancel));
                 let _ = done.send(Msg::Done {
                     kind,
                     scope,
@@ -455,13 +475,20 @@ pub fn run(
                 watcher = None;
                 scheduler.on_watch_failed(Instant::now());
             }
-            Ok(Msg::Stop) => stopping = true,
+            Ok(Msg::Stop) => {
+                stopping = true;
+                stop_cancel.store(true, Ordering::SeqCst);
+            }
             Ok(Msg::Sync(line)) => print_line(out, &line),
             Ok(Msg::Done {
                 kind,
                 scope,
                 result,
             }) => {
+                if matches!(&result, Err(failure) if failure.kind == FailureKind::Cancelled) {
+                    scheduler.on_finished(Instant::now(), false);
+                    continue;
+                }
                 let label = kind.label();
                 match &kind {
                     ScanKind::Full => summary.full_scans += 1,
@@ -509,7 +536,7 @@ pub fn run(
                             print_line(out, &recorded.line);
                         }
                         scheduler.on_finished(Instant::now(), true);
-                        if kind == ScanKind::Full {
+                        if kind == ScanKind::Full && !stopping {
                             let detected = output
                                 .counts
                                 .iter()
@@ -572,7 +599,10 @@ pub fn run(
                     stopping = true;
                 }
             }
-            Err(RecvTimeoutError::Disconnected) => stopping = true,
+            Err(RecvTimeoutError::Disconnected) => {
+                stopping = true;
+                stop_cancel.store(true, Ordering::SeqCst);
+            }
         }
     }
     drop(watcher);
@@ -620,9 +650,12 @@ mod tests {
             all_history: false,
         });
         let today = local_today();
-        assert_eq!(scope.range.until, Some(today));
+        assert_eq!(scope.range.until, None);
         assert_eq!(scope.range.since, today.pred_opt());
-        let args = worker_command(&options(None), &scope)
+        let mut opts = options(None);
+        opts.project_salt = Some("secret-salt".into());
+        let cmd = worker_command(&opts, &scope);
+        let args = cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
@@ -630,12 +663,16 @@ mod tests {
             args.windows(2)
                 .any(|pair| pair == ["--clients", "codex,zcode"])
         );
+        assert!(!args.contains(&"--project-salt".to_owned()));
+        assert!(!args.contains(&"secret-salt".to_owned()));
+        assert!(!args.contains(&"--until".to_owned()));
+        assert_eq!(
+            env_value(&cmd, crate::worker_cli::PROJECT_SALT_ENV),
+            Some(Some("secret-salt".into()))
+        );
         assert!(args.contains(&"--no-env-roots".to_owned()));
         assert!(!args.contains(&"--upstream-cache".to_owned()));
-        assert_eq!(
-            env_value(&worker_command(&options(None), &scope), "RAYON_NUM_THREADS"),
-            Some(Some("2".into()))
-        );
+        assert_eq!(env_value(&cmd, "RAYON_NUM_THREADS"), Some(Some("2".into())));
         let metadata = scope_for(&ScanKind::Triggered {
             clients,
             polled: false,
@@ -676,5 +713,33 @@ mod tests {
                 .get_args()
                 .any(|arg| arg == std::ffi::OsStr::new("--upstream-cache"))
         );
+    }
+
+    #[test]
+    fn build_watcher_tolerates_a_missing_root_when_another_root_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::create_dir_all(&existing).unwrap();
+        let roots = vec![
+            WatchRoot {
+                client: "codex".into(),
+                path: existing,
+                metadata_only: false,
+            },
+            WatchRoot {
+                client: "claude".into(),
+                path: dir.path().join("missing"),
+                metadata_only: false,
+            },
+        ];
+        let (tx, _rx) = channel();
+        assert!(build_watcher(&roots, &[], tx.clone()).is_ok());
+
+        let only_missing = vec![WatchRoot {
+            client: "claude".into(),
+            path: dir.path().join("missing"),
+            metadata_only: false,
+        }];
+        assert!(build_watcher(&only_missing, &[], tx).is_err());
     }
 }

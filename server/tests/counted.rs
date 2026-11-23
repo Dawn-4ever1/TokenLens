@@ -75,3 +75,63 @@ async fn the_stored_flag_follows_uploads_revocation_and_deletion() {
         stored
     );
 }
+
+#[tokio::test]
+async fn revoking_device_with_unique_and_shared_events_keeps_zero_drift() {
+    let h = Harness::start().await;
+    let a = h.pair().await;
+    let b = h.pair().await;
+    let mut events = fixture_events();
+    let shared_count = events.len();
+    let mut unique_a = events[0].clone();
+    unique_a["eventKey"] = serde_json::json!(format!("{:064x}", 0x101_u64));
+    unique_a["sessionId"] = serde_json::json!("unique-a");
+    let mut unique_b = events[0].clone();
+    unique_b["eventKey"] = serde_json::json!(format!("{:064x}", 0x202_u64));
+    unique_b["sessionId"] = serde_json::json!("unique-b");
+
+    let mut batch_a = events.clone();
+    batch_a.push(unique_a);
+    let mut batch_b = std::mem::take(&mut events);
+    batch_b.push(unique_b);
+
+    let (status, _) = h
+        .ingest(&a.ingest, &envelope(&a.id, "batch-a", "g1", batch_a))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .ingest(&b.ingest, &envelope(&b.id, "batch-b", "g1", batch_b))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = h
+        .post(
+            &format!("/api/dashboard/devices/{}/revoke", a.id),
+            Some(&a.read),
+            b"{}".to_vec(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let side = h.side_db();
+    assert_eq!(db::counted_drift(&side).expect("drift"), 0);
+    let b_counted: i64 = side
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE counted = 1 AND device_id = ?1",
+            [&b.id],
+            |row| row.get(0),
+        )
+        .expect("b counted");
+    assert_eq!(b_counted, (shared_count + 1) as i64);
+    let a_counted: i64 = side
+        .query_row(
+            "SELECT COUNT(*) FROM usage_events WHERE counted = 1 AND device_id = ?1",
+            [&a.id],
+            |row| row.get(0),
+        )
+        .expect("a counted");
+    assert_eq!(
+        a_counted, 1,
+        "revoked device keeps its unshared unique event"
+    );
+}

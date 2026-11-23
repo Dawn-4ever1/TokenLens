@@ -195,12 +195,16 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     None => state,
                 };
-                let state = match std::env::var("TOKENLENS_PAIRING_KEY") {
-                    Ok(key) => state.with_pairing_cipher(
+                let state = match std::env::var("TOKENLENS_PAIRING_KEY")
+                    .ok()
+                    .map(|value| value.trim().to_owned())
+                    .filter(|value| !value.is_empty())
+                {
+                    Some(key) => state.with_pairing_cipher(
                         tokenlens_server::pairing_crypto::PairingCipher::from_base64(&key)
                             .expect("TOKENLENS_PAIRING_KEY must be 32 random bytes in base64"),
                     ),
-                    Err(_) => state,
+                    None => state,
                 };
                 tokio::spawn(pricing::maintain(
                     state.clone(),

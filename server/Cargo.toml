@@ -28,7 +28,7 @@ serde_json.workspace = true
 serde_urlencoded = "0.7"
 sha2.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "signal", "sync", "time"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 tokscale-core.workspace = true
 tracing = "0.1"
@@ -36,7 +36,5 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["f
 usage-event = { path = "../crates/usage-event" }
 
 [dev-dependencies]
-base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
-sha2.workspace = true
 tempfile = "3"

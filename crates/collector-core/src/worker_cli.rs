@@ -13,6 +13,7 @@ use crate::worker::{WorkerLine, lower_own_priority};
 use crate::{Config, DateRange, ScanOptions};
 
 pub const SUBCOMMAND: &str = "scan-worker";
+pub const PROJECT_SALT_ENV: &str = "TOKENLENS_PROJECT_SALT";
 
 /// `true` when this process was started as a scan worker.
 pub fn requested(args: &[OsString]) -> bool {
@@ -78,15 +79,10 @@ fn assert_own_cache_dir() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// Runs one scan and prints the worker protocol to stdout. `args` are the
-/// arguments after the subcommand.
-pub fn serve(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn std::error::Error>> {
-    lower_own_priority();
-    let start = Instant::now();
-    let args = parse(args)?;
-    if args.upstream_cache {
-        assert_own_cache_dir()?;
-    }
+fn build_options(
+    args: Args,
+    env_salt: Option<String>,
+) -> Result<ScanOptions, Box<dyn std::error::Error>> {
     let range = DateRange {
         since: args.since,
         until: args.until,
@@ -98,7 +94,7 @@ pub fn serve(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn std
             clients: None,
             range,
             upstream_cache: false,
-            project_salt: args.project_salt,
+            project_salt: None,
         },
         None => ScanOptions::for_current_user(range)?,
     };
@@ -106,12 +102,30 @@ pub fn serve(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn std
         options.use_env_roots = false;
     }
     options.upstream_cache = args.upstream_cache;
+    options.project_salt = args
+        .project_salt
+        .or(env_salt)
+        .filter(|salt| !salt.is_empty());
     options.clients = args.clients.map(|clients| {
         clients
             .iter()
             .map(|id| crate::normalize_client_id(id))
             .collect::<BTreeSet<_>>()
     });
+    Ok(options)
+}
+
+/// Runs one scan and prints the worker protocol to stdout. `args` are the
+/// arguments after the subcommand.
+pub fn serve(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn std::error::Error>> {
+    lower_own_priority();
+    let start = Instant::now();
+    let args = parse(args)?;
+    if args.upstream_cache {
+        assert_own_cache_dir()?;
+    }
+    let env_salt = std::env::var(PROJECT_SALT_ENV).ok();
+    let options = build_options(args, env_salt)?;
     let config = Config::load(&crate::config_path_in(&options.home))?;
     let report = crate::scan_with(&config, &options)?;
     let mut counts = report
@@ -178,5 +192,29 @@ mod tests {
         assert!(parse(os(&["--since", "2026-02-30"])).is_err());
         assert!(requested(&os(&["app", "scan-worker"])));
         assert!(!requested(&os(&["app", "--background"])));
+    }
+
+    #[test]
+    fn project_salt_applies_without_home_from_arg_or_env() {
+        if dirs::home_dir().is_none() {
+            return;
+        }
+        let with_arg = build_options(
+            parse(os(&["--project-salt", "salt-from-arg"])).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(with_arg.project_salt.as_deref(), Some("salt-from-arg"));
+
+        let with_env =
+            build_options(parse(Vec::new()).unwrap(), Some("salt-from-env".into())).unwrap();
+        assert_eq!(with_env.project_salt.as_deref(), Some("salt-from-env"));
+
+        let arg_beats_env = build_options(
+            parse(os(&["--project-salt", "salt-from-arg"])).unwrap(),
+            Some("salt-from-env".into()),
+        )
+        .unwrap();
+        assert_eq!(arg_beats_env.project_salt.as_deref(), Some("salt-from-arg"));
     }
 }

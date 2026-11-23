@@ -55,6 +55,7 @@ pub fn migrate_queue(
 
 /// Price catalogs for local mode, in the per-user cache folder. Also the
 /// process's `TOKSCALE_CONFIG_DIR` (set in `main` before any thread starts).
+#[cfg_attr(test, allow(dead_code))]
 pub fn prices_dir() -> Option<PathBuf> {
     dirs::cache_dir().map(|cache| cache.join("tokenlens").join("prices"))
 }
@@ -128,7 +129,14 @@ impl LocalServer {
     /// Opens (and migrates) the local database and starts the daily price
     /// catalog refresh. Call from a blocking thread.
     pub fn open(state_dir: &Path) -> Result<Arc<Self>, LocalError> {
-        Self::open_with(state_dir, prices_dir())
+        #[cfg(test)]
+        {
+            Self::open_with(state_dir, None)
+        }
+        #[cfg(not(test))]
+        {
+            Self::open_with(state_dir, prices_dir())
+        }
     }
 
     /// `prices: None` never prices events and never goes online (tests).
@@ -257,9 +265,15 @@ impl LocalServer {
 
 impl Drop for LocalServer {
     fn drop(&mut self) {
-        // Stops the price refresh without waiting; safe on any thread.
+        // Bounded shutdown outside an active runtime so background catalog
+        // maintenance drains cleanly before process exit; falls back if dropped
+        // from inside a Tokio worker context.
         if let Some(runtime) = self.runtime.take() {
-            runtime.shutdown_background();
+            if tokio::runtime::Handle::try_current().is_ok() {
+                runtime.shutdown_background();
+            } else {
+                runtime.shutdown_timeout(Duration::from_secs(2));
+            }
         }
     }
 }

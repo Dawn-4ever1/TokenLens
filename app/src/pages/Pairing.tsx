@@ -129,6 +129,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const [ggOpenError, setGgOpenError] = useState<string | null>(null);
   const [copyState, setCopyState] = useState<"idle" | "busy" | "copied" | "failed">("idle");
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const githubGeneration = useRef(0);
   const googleGeneration = useRef(0);
   const googleStartOwner = useRef<number | null>(null);
   const invalidateGoogle = () => {
@@ -143,6 +144,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   // server connects directly with an operator-issued pairing code.
   useEffect(() => {
     if (where === "own") {
+      githubGeneration.current += 1;
       invalidateGoogle();
       setMethod("pair");
       setGh(null);
@@ -155,6 +157,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     }
   }, [where]);
   useEffect(() => () => {
+    githubGeneration.current += 1;
     googleGeneration.current += 1;
     googleStartOwner.current = null;
     if (copyTimer.current) clearTimeout(copyTimer.current);
@@ -176,6 +179,18 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   const server = where === "cloud" ? cloud : ownServer.trim();
   const defaultName = `${platformLabel(platform)} ${formFactorLabel(formFactor)}`;
   const displayName = (name ?? defaultName).trim();
+  const latestPoll = useRef({
+    server,
+    formFactor,
+    displayName,
+    autostart: status?.autostart === true,
+  });
+  latestPoll.current = {
+    server,
+    formFactor,
+    displayName,
+    autostart: status?.autostart === true,
+  };
   const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   const codeOk = code.replace(/[^0-9]/g, "").length === 6;
   const pairCodeOk = pairCode.replace(/[^A-Z0-9]/gi, "").length >= 8;
@@ -187,7 +202,12 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
 
   useEffect(() => {
     if (sentAt === null) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    if (Date.now() - sentAt >= 60_000) return;
+    const id = setInterval(() => {
+      const current = Date.now();
+      setNow(current);
+      if (current - sentAt >= 60_000) clearInterval(id);
+    }, 1000);
     return () => clearInterval(id);
   }, [sentAt]);
   const waitLeft = sentAt === null ? 0 : Math.max(0, 60_000 - (now - sentAt));
@@ -198,7 +218,9 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     setError(null);
     try {
       await app.requestLoginCode(server, email.trim());
-      setSentAt(Date.now());
+      const ts = Date.now();
+      setNow(ts);
+      setSentAt(ts);
     } catch (next) {
       setError(loginError(next));
     } finally {
@@ -248,12 +270,15 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
 
   const startGitHub = async () => {
     if (!serverOk || busy || where !== "cloud") return;
+    const generation = ++githubGeneration.current;
     setBusy(true);
+    onBusy(true);
     setError(null);
     setGhState("idle");
     setGhFailure(null);
     try {
       const next = await app.startGitHubLogin(server);
+      if (generation !== githubGeneration.current) return;
       setGh({
         ...next,
         // Older servers did not return the RFC 8628 timing fields. Keep their
@@ -265,26 +290,28 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       setCopyState("idle");
       await app.openGitHubDevicePage(next.verificationUri).catch(() => undefined);
     } catch (next) {
-      setError(loginError(next));
+      if (generation === githubGeneration.current) setError(loginError(next));
     } finally {
       setBusy(false);
+      onBusy(false);
     }
   };
 
   useEffect(() => {
     if (!gh) return;
+    const generation = githubGeneration.current;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let delayMs = gh.intervalSeconds * 1000;
     const deadline = Date.now() + gh.expiresInSeconds * 1000;
     const schedule = () => {
-      if (!alive) return;
+      if (!alive || generation !== githubGeneration.current) return;
       const wait = Math.min(delayMs, Math.max(0, deadline - Date.now()));
       timer = setTimeout(() => void tick(), wait);
     };
     const tick = async () => {
       if (Date.now() >= deadline) {
-        if (alive) {
+        if (alive && generation === githubGeneration.current) {
           setGhState("expired");
           setGh(null);
           setCopyState("idle");
@@ -292,13 +319,14 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
         return;
       }
       try {
+        const poll = latestPoll.current;
         const next = await app.pollGitHubLogin({
-          server,
-          formFactor,
-          name: displayName,
-          autostart: status?.autostart === true,
+          server: poll.server,
+          formFactor: poll.formFactor,
+          name: poll.displayName,
+          autostart: poll.autostart,
         });
-        if (!alive) return;
+        if (!alive || generation !== githubGeneration.current) return;
         if (next.status === "ok") {
           if (next.app) {
             set(next.app);
@@ -329,7 +357,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
         }
         schedule();
       } catch (next) {
-        if (alive) {
+        if (alive && generation === githubGeneration.current) {
           setError(loginError(next));
           setGhState("failed");
           setGh(null);
@@ -409,18 +437,32 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
     if (!gg) return;
     const generation = googleGeneration.current;
     let alive = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const schedule = () => {
+      if (!alive || generation !== googleGeneration.current) return;
+      timer = setTimeout(() => void tick(), 5000);
+    };
     const tick = async () => {
       try {
+        const poll = latestPoll.current;
         const next = await app.pollGoogleLogin({
-          server,
-          formFactor,
-          name: displayName,
-          autostart: status?.autostart === true,
+          server: poll.server,
+          formFactor: poll.formFactor,
+          name: poll.displayName,
+          autostart: poll.autostart,
         });
         if (!alive || generation !== googleGeneration.current) return;
-        if (next.status === "ok" && next.app) {
-          set(next.app);
-          onClose();
+        if (next.status === "ok") {
+          if (next.app) {
+            set(next.app);
+            onClose();
+          } else {
+            invalidateGoogle();
+            setBusy(false);
+            setError("Google 已显示授权成功，但应用没有收到登录结果，请重新开始。");
+            setGgState("failed");
+            setGg(null);
+          }
           return;
         }
         if (next.status === "expired" || next.status === "denied" || next.status === "failed") {
@@ -428,16 +470,23 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           setBusy(false);
           setGgState(next.status);
           setGg(null);
+          return;
         }
+        schedule();
       } catch (next) {
-        if (alive && generation === googleGeneration.current) setError(loginError(next));
+        if (alive && generation === googleGeneration.current) {
+          invalidateGoogle();
+          setBusy(false);
+          setError(loginError(next));
+          setGgState("failed");
+          setGg(null);
+        }
       }
     };
     void tick();
-    const id = setInterval(() => void tick(), 5000);
     return () => {
       alive = false;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
     // The flow restarts only when a new consent page arrives.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -448,16 +497,12 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
   if (chooser && !gh && !gg && where === "cloud") {
     return (
       <div className="space-y-3">
-        {where === "cloud" && (
-          <>
-            <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("github"); }}>
-              <GitHubIcon className="h-5 w-5" /> 使用 GitHub 继续
-            </Button>
-            <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("google"); }}>
-              <GoogleIcon className="h-5 w-5" /> 使用 Google 继续
-            </Button>
-          </>
-        )}
+        <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("github"); }}>
+          <GitHubIcon className="h-5 w-5" /> 使用 GitHub 继续
+        </Button>
+        <Button type="button" className="h-11 w-full justify-center gap-2.5 text-sm" onClick={() => { setChooser(false); setMethod("google"); }}>
+          <GoogleIcon className="h-5 w-5" /> 使用 Google 继续
+        </Button>
         <div className="flex items-center gap-3 py-2 text-xs text-ink-3" aria-hidden>
           <span className="h-px flex-1 bg-line" />或<span className="h-px flex-1 bg-line" />
         </div>
@@ -465,7 +510,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           <Mail className="h-5 w-5" /> 使用邮箱继续
         </Button>
         <p className="pt-3 text-center text-xs leading-5 text-ink-3">默认连接 TokenLens 云服务，首次登录自动创建空间</p>
-        {(ghState !== "idle" || ggState !== "idle") && (
+        {(ghState !== "idle" || ggState !== "idle") && !error && (
           <p role="alert" className="text-center text-[13px] leading-5 text-bad">
             {ghState === "expired" || ggState === "expired" ? "授权超时了，请重新开始。"
               : ghState === "denied" || ggState === "denied" ? "你取消了授权。"
@@ -487,16 +532,17 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
           <p className="text-[13px] leading-6 text-ink-2">在 GitHub 上确认授权，不需要密码，也不会收到邮件。第一次登录会自动创建你的空间。</p>
           {ghState === "expired" && <p role="alert" className="text-[13px] leading-5 text-bad">授权超时了，请重新开始。</p>}
           {ghState === "denied" && <p role="alert" className="text-[13px] leading-5 text-bad">你取消了授权。</p>}
-          {ghState === "failed" && <p role="alert" className="text-[13px] leading-5 text-bad">{githubFailureMessage(ghFailure)}</p>}
+          {ghState === "failed" && !error && <p role="alert" className="text-[13px] leading-5 text-bad">{githubFailureMessage(ghFailure)}</p>}
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="button" variant="primary" className="h-11 w-full justify-center gap-2.5" disabled={!serverOk || busy} onClick={() => void startGitHub()}>
             <GitHubIcon className="h-5 w-5" /> {busy ? "正在打开…" : "继续前往 GitHub"}
           </Button>
-          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => setChooser(true)}>返回登录方式</button>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { githubGeneration.current += 1; setError(null); setChooser(true); }}>返回登录方式</button>
         </div>
       ) : method === "github" ? (
         <div className="space-y-4">
           <p className="text-[13px] leading-6 text-ink-2">在打开的 GitHub 页面输入下面的代码，授权后这里会自动完成登录。</p>
+          {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           {gh && (
             <>
               <button
@@ -524,8 +570,8 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
                 {copyState === "failed" ? "复制失败，请选中上方的授权码手动复制。" : copyState === "copied" ? "已复制，去 GitHub 粘贴。" : ""}
               </p>
               <div className="flex flex-wrap justify-center gap-2">
-                <Button type="button" size="sm" onClick={() => void app.openGitHubDevicePage(gh.verificationUri)}>重新打开授权页</Button>
-                <Button type="button" size="sm" variant="ghost" onClick={() => { setGh(null); setGhState("idle"); setGhFailure(null); setCopyState("idle"); }}>取消</Button>
+                <Button type="button" size="sm" onClick={() => void app.openGitHubDevicePage(gh.verificationUri).catch(() => setError("未能打开浏览器，请手动访问 GitHub 验证页面。"))}>重新打开授权页</Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { githubGeneration.current += 1; setGh(null); setGhState("idle"); setGhFailure(null); setCopyState("idle"); setError(null); }}>取消</Button>
               </div>
               <p className="text-center text-xs text-ink-3">等待授权…</p>
             </>
@@ -534,11 +580,14 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
       ) : method === "google" && !gg ? (
         <div className="space-y-4">
           <p className="text-[13px] leading-6 text-ink-2">在 Google 上确认授权，不需要密码，也不会收到邮件。第一次登录会自动创建你的空间。</p>
+          {ggState === "expired" && <p role="alert" className="text-[13px] leading-5 text-bad">授权超时了，请重新开始。</p>}
+          {ggState === "denied" && <p role="alert" className="text-[13px] leading-5 text-bad">你取消了授权。</p>}
+          {ggState === "failed" && !error && <p role="alert" className="text-[13px] leading-5 text-bad">Google 授权没有完成，请重试。</p>}
           {error && <p role="alert" className="text-[13px] leading-5 text-bad">{error}</p>}
           <Button type="button" variant="primary" className="h-11 w-full justify-center gap-2.5" disabled={!serverOk || busy} onClick={() => void startGoogle()}>
             <GoogleIcon className="h-5 w-5" /> {busy ? "正在打开…" : "继续前往 Google"}
           </Button>
-          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { invalidateGoogle(); setChooser(true); }}>返回登录方式</button>
+          <button type="button" className="text-xs text-ink-3 hover:text-ink" onClick={() => { invalidateGoogle(); setError(null); setChooser(true); }}>返回登录方式</button>
         </div>
       ) : method === "google" ? (
         <div className="space-y-4">
@@ -601,7 +650,7 @@ function ConnectForm({ onClose, onBusy }: { onClose: () => void; onBusy: (busy: 
             <div className="mt-4 space-y-4">
               <Segmented label="设备形态" value={formFactor} onChange={setFormFactor} options={[{ key: "laptop", label: "笔记本" }, { key: "desktop", label: "台式机" }]} />
               <Field label="显示名称"><input className={inputClass} value={name ?? defaultName} onChange={(event) => setName(event.target.value)} maxLength={64} /></Field>
-              <p className="flex gap-2 text-xs leading-5 text-ink-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />只同步数字，不上传提示词、回答、代码或文件内容。登录后已有历史会补传。</p>
+              <p className="flex gap-2 text-xs leading-5 text-ink-3"><ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />只同步数字统计、会话标题和项目名，不上传提示词、回答、代码或文件内容。登录后已有历史会补传。</p>
             </div>
           )}
         </div>

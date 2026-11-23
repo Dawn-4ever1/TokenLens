@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compact, dayLabel, duration, percent, relativeTime, shortId, usd } from "./format";
+import { compact, credits, dayLabel, duration, exact, percent, relativeTime, shortId, usd } from "./format";
 
 describe("compact", () => {
   it("keeps small numbers exact", () => {
@@ -73,5 +73,19 @@ describe("other formatters", () => {
     expect(shortId("0123456789abcdef")).toBe("01234567…");
     expect(dayLabel("2026-11-03")).toBe("11月3日");
     expect(dayLabel("2026-11-03", true)).toBe("2026年11月3日");
+  });
+
+  it("handles non-finite numbers, negative usd, and old dates safely", () => {
+    expect(compact(Number.NaN)).toBe("—");
+    expect(compact(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(exact(Number.NaN)).toBe("—");
+    expect(usd(Number.POSITIVE_INFINITY)).toBe("—");
+    expect(usd(-5)).toBe("-$5.00");
+    expect(usd(-0.004)).toBe("-<$0.01");
+    expect(credits(Number.NaN)).toBe("—");
+    expect(duration(Number.NaN)).toBe("—");
+    expect(duration(-50)).toBe("0 毫秒");
+    const now = Date.parse("2026-11-11T12:00:00Z");
+    expect(relativeTime(now - 90 * 86_400_000, now, "UTC")).toMatch(/^2026-/);
   });
 });

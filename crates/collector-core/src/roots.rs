@@ -31,7 +31,54 @@ pub(crate) fn is_sqlite_shm_sidecar(path: &Path) -> bool {
         .any(|suffix| lower.ends_with(suffix))
 }
 
-fn is_sqlite_wal_for(path: &Path, root: &Path) -> bool {
+fn same_component(left: Component<'_>, right: Component<'_>, case_insensitive: bool) -> bool {
+    if !case_insensitive {
+        return left == right;
+    }
+    match (left, right) {
+        (Component::Prefix(a), Component::Prefix(b)) => a
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy()),
+        (Component::Normal(a), Component::Normal(b)) => a
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy()),
+        _ => left == right,
+    }
+}
+
+fn path_starts_with_mode(path: &Path, base: &Path, case_insensitive: bool) -> bool {
+    if !case_insensitive {
+        return path.starts_with(base);
+    }
+    let mut path_components = path.components();
+    for base_component in base.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+        if !same_component(path_component, base_component, true) {
+            return false;
+        }
+    }
+    true
+}
+
+fn same_path_mode(left: &Path, right: &Path, case_insensitive: bool) -> bool {
+    if !case_insensitive {
+        return left == right;
+    }
+    let mut left_components = left.components();
+    let mut right_components = right.components();
+    loop {
+        match (left_components.next(), right_components.next()) {
+            (Some(a), Some(b)) if same_component(a, b, true) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+fn is_sqlite_wal_for_mode(path: &Path, root: &Path, case_insensitive: bool) -> bool {
     let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -44,17 +91,25 @@ fn is_sqlite_wal_for(path: &Path, root: &Path) -> bool {
     }
     let mut wal = root.as_os_str().to_os_string();
     wal.push("-wal");
-    path.as_os_str() == wal.as_os_str()
+    same_path_mode(path, Path::new(&wal), case_insensitive)
 }
 
-fn is_forbidden(path: &Path, client: &str) -> bool {
-    path.components()
-        .any(|component| matches!(component, Component::Normal(part) if part == ".qoder-cn"))
-        && client != QODER_CN_CLIENT
+pub(crate) fn is_forbidden(path: &Path, client: &str) -> bool {
+    path.components().any(
+        |component| matches!(component, Component::Normal(part) if part.eq_ignore_ascii_case(".qoder-cn")),
+    ) && client != QODER_CN_CLIENT
 }
 
-fn is_real_dir(path: &Path) -> bool {
+pub(crate) fn is_real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir())
+}
+
+pub(crate) fn is_real_file(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_file())
+}
+
+pub(crate) fn is_symlink(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 fn t3_base_dir_from(home: &Path, use_env_roots: bool, env_value: Option<&OsStr>) -> PathBuf {
@@ -92,9 +147,9 @@ fn t3_base_dir(home: &Path, use_env_roots: bool) -> PathBuf {
     )
 }
 
-/// Isolated Antigravity conversation directories written by T3 Code under
-/// `<T3CODE_HOME|~/.t3>/userdata/providers/antigravity/<instance>/antigravity-acp/conversations`.
-pub fn t3_antigravity_conversation_dirs(home: &Path, use_env_roots: bool) -> Vec<PathBuf> {
+/// Isolated `antigravity-acp` profile directories written by T3 Code under
+/// `<T3CODE_HOME|~/.t3>/userdata/providers/antigravity/<instance>/antigravity-acp`.
+pub(crate) fn t3_antigravity_acp_dirs(home: &Path, use_env_roots: bool) -> Vec<PathBuf> {
     let base = t3_base_dir(home, use_env_roots);
     if base == home || home.starts_with(&base) || !is_real_dir(&base) {
         return Vec::new();
@@ -123,11 +178,25 @@ pub fn t3_antigravity_conversation_dirs(home: &Path, use_env_roots: bool) -> Vec
         if !is_real_dir(&acp) {
             continue;
         }
-        let conv = acp.join("conversations");
-        if !is_real_dir(&conv) {
-            continue;
+        if !is_forbidden(&acp, "antigravity-extension") && acp != home && !home.starts_with(&acp) {
+            dirs.push(acp);
         }
-        if !is_forbidden(&conv, "antigravity-extension") && conv != home && !home.starts_with(&conv)
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// Isolated Antigravity conversation directories written by T3 Code under
+/// `<T3CODE_HOME|~/.t3>/userdata/providers/antigravity/<instance>/antigravity-acp/conversations`.
+pub fn t3_antigravity_conversation_dirs(home: &Path, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for acp in t3_antigravity_acp_dirs(home, use_env_roots) {
+        let conv = acp.join("conversations");
+        if is_real_dir(&conv)
+            && !is_forbidden(&conv, "antigravity-extension")
+            && conv != home
+            && !home.starts_with(&conv)
         {
             dirs.push(conv);
         }
@@ -135,6 +204,29 @@ pub fn t3_antigravity_conversation_dirs(home: &Path, use_env_roots: bool) -> Vec
     dirs.sort();
     dirs.dedup();
     dirs
+}
+
+pub(crate) fn t3_state_db_path(home: &Path, use_env_roots: bool) -> Option<PathBuf> {
+    let base = t3_base_dir(home, use_env_roots);
+    if base == home || home.starts_with(&base) || !is_real_dir(&base) {
+        return None;
+    }
+    let userdata = base.join("userdata");
+    if !is_real_dir(&userdata) {
+        return None;
+    }
+    let db = userdata.join("statev2.sqlite");
+    (is_real_file(&db) && !is_forbidden(&db, "antigravity-extension") && db != home).then_some(db)
+}
+
+pub(crate) fn standalone_antigravity_summary_db(home: &Path) -> Option<PathBuf> {
+    let gemini = home.join(".gemini");
+    let antigravity = gemini.join("antigravity");
+    if is_symlink(&gemini) || is_symlink(&antigravity) {
+        return None;
+    }
+    let db = antigravity.join("conversation_summaries.db");
+    (!is_symlink(&db) && !is_forbidden(&db, "antigravity-extension")).then_some(db)
 }
 
 pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
@@ -159,7 +251,11 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     }
     // scanner.rs:2639-2663 also reads <CODEX_HOME>/archived_sessions.
     let codex_home = use_env_roots
-        .then(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .then(|| {
+            std::env::var_os("CODEX_HOME")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+        })
         .flatten()
         .unwrap_or_else(|| home.join(".codex"));
     push("codex", codex_home.join("archived_sessions"));
@@ -171,7 +267,10 @@ pub fn candidate_roots(home: &Path, use_env_roots: bool) -> Vec<WatchRoot> {
     push("zcode", home.join(".zcode").join("cli").join("db"));
     // Title metadata sources live outside some usage roots and may change on
     // their own. Keep these roots shared with the actual metadata readers.
-    push(QODER_CLIENT, crate::qoder::projects_root(home));
+    push(
+        QODER_CLIENT,
+        crate::qoder::projects_root_intl(home, use_env_roots),
+    );
     push(
         QODER_CN_CLIENT,
         crate::qoder::projects_root_cn(home, use_env_roots),
@@ -214,7 +313,7 @@ pub fn watch_roots(
     let existing = candidate_roots(home, use_env_roots)
         .into_iter()
         .filter(|root| {
-            detected.contains(&root.client) && (root.path.is_dir() || root.path.is_file())
+            detected.contains(&root.client) && (is_real_dir(&root.path) || is_real_file(&root.path))
         })
         .collect::<Vec<_>>();
     existing
@@ -223,12 +322,37 @@ pub fn watch_roots(
             !existing.iter().any(|other| {
                 other.client == root.client
                     && other.metadata_only == root.metadata_only
-                    && other.path != root.path
-                    && root.path.starts_with(&other.path)
+                    && !same_path_mode(&other.path, &root.path, cfg!(windows))
+                    && path_starts_with_mode(&root.path, &other.path, cfg!(windows))
             })
         })
         .cloned()
         .collect()
+}
+
+fn canonicalize_best_effort(path: &Path) -> Option<PathBuf> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Some(canonical);
+    }
+    let mut missing = Vec::new();
+    let mut ancestor = path;
+    while let Some(name) = ancestor.file_name() {
+        missing.push(name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        if parent.as_os_str().is_empty() {
+            break;
+        }
+        if let Ok(mut canonical) = std::fs::canonicalize(parent) {
+            for component in missing.iter().rev() {
+                canonical.push(component);
+            }
+            return Some(canonical);
+        }
+        ancestor = parent;
+    }
+    None
 }
 
 #[derive(Debug, Clone, Default)]
@@ -242,7 +366,7 @@ impl RootMap {
     pub fn new(roots: &[WatchRoot], ignored: &[PathBuf]) -> Self {
         let with_canonical = |path: &Path| {
             let mut variants = vec![path.to_path_buf()];
-            if let Ok(canonical) = std::fs::canonicalize(path)
+            if let Some(canonical) = canonicalize_best_effort(path)
                 && canonical != path
             {
                 variants.push(canonical);
@@ -253,7 +377,7 @@ impl RootMap {
             roots: roots
                 .iter()
                 .flat_map(|root| {
-                    let is_dir = root.path.is_dir();
+                    let is_dir = is_real_dir(&root.path);
                     with_canonical(&root.path)
                         .into_iter()
                         .map(move |path| (path, root.client.clone(), root.metadata_only, is_dir))
@@ -268,25 +392,44 @@ impl RootMap {
 
     /// The client whose root is the longest prefix of `path`.
     pub fn client_for(&self, path: &Path) -> Option<(&str, bool)> {
-        if self.ignored.iter().any(|own| path.starts_with(own)) || is_sqlite_shm_sidecar(path) {
+        self.client_for_with_case(path, cfg!(windows))
+    }
+
+    fn client_for_with_case(&self, path: &Path, case_insensitive: bool) -> Option<(&str, bool)> {
+        if self
+            .ignored
+            .iter()
+            .any(|own| path_starts_with_mode(path, own, case_insensitive))
+            || is_sqlite_shm_sidecar(path)
+        {
             return None;
         }
         self.roots
             .iter()
             .filter(|(root, _, metadata_only, is_dir)| {
                 if *metadata_only {
-                    path == root
-                        || is_sqlite_wal_for(path, root)
-                        || (*is_dir && path.starts_with(root))
+                    same_path_mode(path, root, case_insensitive)
+                        || is_sqlite_wal_for_mode(path, root, case_insensitive)
+                        || (*is_dir && path_starts_with_mode(path, root, case_insensitive))
                 } else {
-                    path.starts_with(root) || is_sqlite_wal_for(path, root)
+                    path_starts_with_mode(path, root, case_insensitive)
+                        || is_sqlite_wal_for_mode(path, root, case_insensitive)
                 }
             })
             .max_by_key(|(root, _, _, _)| root.components().count())
             .map(|(_, client, metadata_only, _)| {
-                let is_metadata = *metadata_only
-                    || (client == "openclaw"
-                        && path.file_name() == Some(std::ffi::OsStr::new("sessions.json")));
+                let is_openclaw_index = client == "openclaw"
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| {
+                            if case_insensitive {
+                                name.eq_ignore_ascii_case("sessions.json")
+                            } else {
+                                name == "sessions.json"
+                            }
+                        });
+                let is_metadata = *metadata_only || is_openclaw_index;
                 (client.as_str(), is_metadata)
             })
     }
@@ -628,5 +771,151 @@ mod tests {
             t3_base_dir_from(home.path(), true, Some(OsStr::new("~"))),
             home.path().to_path_buf()
         );
+    }
+
+    #[test]
+    fn antigravity_summary_databases_are_watched_without_watching_t3_state_or_noisy_siblings() {
+        let home = tempfile::tempdir().expect("home");
+        let standalone_conv = home.path().join(".gemini/antigravity/conversations");
+        let standalone_sum = home
+            .path()
+            .join(".gemini/antigravity/conversation_summaries.db");
+        let cli_conv = home.path().join(".gemini/antigravity-cli/conversations");
+        let cli_sum = home
+            .path()
+            .join(".gemini/antigravity-cli/conversation_summaries.db");
+        let t3_acp = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-a/antigravity-acp");
+        let t3_conv = t3_acp.join("conversations");
+        let t3_sum = t3_acp.join("conversation_summaries.db");
+        let t3_log = t3_acp.join("log");
+        let t3_brain = t3_acp.join("brain/id");
+        let t3_state = home.path().join(".t3/userdata/statev2.sqlite");
+
+        std::fs::create_dir_all(&standalone_conv).expect("standalone conv");
+        std::fs::create_dir_all(&cli_conv).expect("cli conv");
+        std::fs::create_dir_all(&t3_conv).expect("t3 conv");
+        std::fs::create_dir_all(&t3_log).expect("t3 log");
+        std::fs::create_dir_all(&t3_brain).expect("t3 brain");
+        std::fs::write(&standalone_sum, "").expect("standalone sum");
+        std::fs::write(&cli_sum, "").expect("cli sum");
+        std::fs::write(&t3_sum, "").expect("t3 sum");
+        std::fs::write(&t3_state, "").expect("t3 state");
+
+        let roots = watch_roots(
+            home.path(),
+            false,
+            &detected(&["antigravity-extension", "antigravity-cli"]),
+        );
+        let map = RootMap::new(&roots, &[]);
+
+        assert_eq!(
+            map.client_for(&standalone_sum),
+            Some(("antigravity-extension", true))
+        );
+        assert_eq!(
+            map.client_for(
+                &home
+                    .path()
+                    .join(".gemini/antigravity/conversation_summaries.db-wal")
+            ),
+            Some(("antigravity-extension", true))
+        );
+        assert_eq!(map.client_for(&cli_sum), Some(("antigravity-cli", true)));
+        assert_eq!(
+            map.client_for(
+                &home
+                    .path()
+                    .join(".gemini/antigravity-cli/conversation_summaries.db-wal")
+            ),
+            Some(("antigravity-cli", true))
+        );
+        assert_eq!(
+            map.client_for(&t3_sum),
+            Some(("antigravity-extension", true))
+        );
+        assert_eq!(
+            map.client_for(&t3_acp.join("conversation_summaries.db-wal")),
+            Some(("antigravity-extension", true))
+        );
+
+        assert_eq!(
+            map.client_for(&t3_acp.join("conversation_summaries.db-shm")),
+            None
+        );
+        assert_eq!(
+            map.client_for(&t3_acp.join("jetbox_summaries_proto.pb")),
+            None
+        );
+        assert_eq!(map.client_for(&t3_log.join("acp.log")), None);
+        assert_eq!(map.client_for(&t3_brain.join("transcript.jsonl")), None);
+        assert_eq!(map.client_for(&t3_state), None);
+        assert_eq!(
+            map.client_for(&home.path().join(".t3/userdata/statev2.sqlite-wal")),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_symlinked_summary_and_state_dbs_are_rejected() {
+        let home = tempfile::tempdir().expect("home");
+        let outside = home.path().join("outside");
+        std::fs::create_dir_all(&outside).expect("outside");
+        let real_outside_db = outside.join("outside.db");
+        std::fs::write(&real_outside_db, "").expect("outside db");
+
+        let standalone_dir = home.path().join(".gemini/antigravity");
+        let t3_acp = home
+            .path()
+            .join(".t3/userdata/providers/antigravity/inst-a/antigravity-acp");
+        std::fs::create_dir_all(standalone_dir.join("conversations")).expect("standalone conv");
+        std::fs::create_dir_all(t3_acp.join("conversations")).expect("t3 conv");
+
+        std::os::unix::fs::symlink(
+            &real_outside_db,
+            standalone_dir.join("conversation_summaries.db"),
+        )
+        .expect("symlink standalone sum");
+        std::os::unix::fs::symlink(&real_outside_db, t3_acp.join("conversation_summaries.db"))
+            .expect("symlink t3 sum");
+        std::os::unix::fs::symlink(
+            &real_outside_db,
+            home.path().join(".t3/userdata/statev2.sqlite"),
+        )
+        .expect("symlink statev2");
+
+        let roots = watch_roots(home.path(), false, &detected(&["antigravity-extension"]));
+        assert!(
+            roots.iter().all(|root| !root.metadata_only),
+            "symlinked summary databases must never be watched"
+        );
+        assert!(t3_state_db_path(home.path(), false).is_none());
+    }
+
+    #[test]
+    fn case_insensitive_root_matching_and_nonexistent_ignored_canonicalization_work() {
+        let dir = tempfile::tempdir().expect("dir");
+        let root_dir = dir.path().join("OpenClaw/Agents");
+        std::fs::create_dir_all(&root_dir).expect("openclaw");
+        let missing_ignored = dir.path().join("future/tokenlens/state");
+        let map = RootMap::new(
+            &[WatchRoot {
+                client: "openclaw".into(),
+                path: root_dir.clone(),
+                metadata_only: false,
+            }],
+            std::slice::from_ref(&missing_ignored),
+        );
+        let mixed_case_file = dir.path().join("openclaw/agents/main/SESSIONS.JSON");
+        assert_eq!(
+            map.client_for_with_case(&mixed_case_file, true),
+            Some(("openclaw", true))
+        );
+        if let Ok(canon_parent) = std::fs::canonicalize(dir.path()) {
+            let canonical_ignored = canon_parent.join("future/tokenlens/state/collector.lock");
+            assert_eq!(map.client_for(&canonical_ignored), None);
+        }
     }
 }

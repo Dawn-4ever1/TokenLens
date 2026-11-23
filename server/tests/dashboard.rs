@@ -1063,7 +1063,7 @@ async fn health_and_filter_options() {
     let (_, health) = w.h.get("/api/dashboard/health", Some(&w.a.read)).await;
     assert_eq!(health["eventCount"], 6);
     assert_eq!(health["deviceCount"], 2);
-    assert_eq!(health["schemaVersion"], 13);
+    assert_eq!(health["schemaVersion"], 14);
     assert_eq!(health["timeZone"], "Asia/Shanghai");
     assert!(
         health.get("databaseBytes").is_none(),
@@ -1082,4 +1082,132 @@ async fn health_and_filter_options() {
     );
     assert_eq!(options["devices"].as_array().unwrap().len(), 2);
     assert_eq!(options["firstEventDate"], "2027-01-13");
+}
+
+#[tokio::test]
+async fn none_project_filter_comma_models_long_buckets_and_revoked_clients() {
+    let h = Harness::start().await;
+    let a = h.pair().await;
+    let revoked = h.pair().await;
+
+    let mut no_project = event(
+        "np-1",
+        "codex",
+        "sess-comma",
+        None,
+        "provider/model,v1",
+        "2027-01-15T01:00:00Z",
+        [100, 0, 0],
+        Some(0.5),
+        "measured",
+        true,
+    );
+    no_project["sessionTitle"] = json!("Comma model session");
+
+    let proj_a = "a".repeat(64);
+    let mut named_project = event(
+        "wp-1",
+        "codex",
+        "sess-named",
+        None,
+        "gpt-5",
+        "2027-01-15T02:00:00Z",
+        [250, 0, 0],
+        Some(1.0),
+        "measured",
+        true,
+    );
+    named_project["projectHash"] = json!(proj_a);
+    named_project["projectLabel"] = json!("Project A");
+
+    let revoked_event = event(
+        "rev-1",
+        "legacy-only-client",
+        "sess-revoked",
+        None,
+        "legacy-model",
+        "2027-01-15T03:00:00Z",
+        [50, 0, 0],
+        Some(0.2),
+        "measured",
+        true,
+    );
+
+    let (status, ingested) = h
+        .ingest(
+            &a.ingest,
+            &envelope(&a.id, "b-a", "g1", vec![no_project, named_project]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ingested["accepted"], 2);
+    let (status, _) = h
+        .ingest(
+            &revoked.ingest,
+            &envelope(&revoked.id, "b-rev", "g1", vec![revoked_event]),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = h
+        .post(
+            &format!("/api/dashboard/devices/{}/revoke", revoked.id),
+            Some(&a.read),
+            b"{}".to_vec(),
+            None,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, none_summary) = h
+        .get("/api/dashboard/summary?projects=__none__", Some(&a.read))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{none_summary}");
+    assert_eq!(none_summary["totalTokens"], 150);
+
+    let (status, both_summary) = h
+        .get(
+            &format!("/api/dashboard/summary?projects=__none__,{proj_a}"),
+            Some(&a.read),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{both_summary}");
+    assert_eq!(both_summary["totalTokens"], 400);
+
+    let (status, long_month) = h
+        .get(
+            "/api/dashboard/timeseries?bucket=month&from=2005-01-01&to=2030-12-31",
+            Some(&a.read),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{long_month}");
+    assert_eq!(long_month["buckets"].as_array().unwrap().len(), 26 * 12);
+
+    let (status, long_week) = h
+        .get(
+            "/api/dashboard/timeseries?bucket=week&from=2005-01-01&to=2030-12-31",
+            Some(&a.read),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{long_week}");
+
+    let (status, sessions) = h.get("/api/dashboard/sessions", Some(&a.read)).await;
+    assert_eq!(status, StatusCode::OK, "{sessions}");
+    let comma_session = sessions["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["sessionId"] == "sess-comma")
+        .expect("comma session");
+    assert_eq!(comma_session["models"], json!(["provider/model,v1"]));
+    assert_eq!(comma_session["title"], "Comma model session");
+
+    let (status, devices) = h.get("/api/dashboard/devices", Some(&a.read)).await;
+    assert_eq!(status, StatusCode::OK, "{devices}");
+    let listed_clients: Vec<&str> = devices["clients"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c.as_str().unwrap())
+        .collect();
+    assert!(!listed_clients.contains(&"legacy-only-client"));
 }

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use chrono::{Local, NaiveDate};
 use clap::Parser;
-use collector_core::{Config, DateRange, QODER_CLIENT, ScanOptions};
+use collector_core::{Config, DateRange, QODER_CLIENT, QODER_CN_CLIENT, ScanOptions};
 use reconcile::{
     HUB_QODER_CLIENT, HubRequest, SECRET_ENV, URL_ENV, hub_counts_reasoning, hub_devices, hub_grid,
     hub_time_zone, our_grid, qoder_section, reconcile, render, tz_mismatch_days,
@@ -63,14 +63,14 @@ fn missing_secret_help() -> String {
         "没有读到 Hub 密钥（环境变量 {SECRET_ENV}）。对账需要你自己在终端里设置一次：\n\
          \n\
          Mac：在「终端」App 里运行\n\
-         \x20 security add-generic-password -a \"$USER\" -s tokendash-hub-secret -w\n\
+         \x20 security add-generic-password -a \"$USER\" -s tokenlens-hub-secret -w\n\
          按提示粘贴密钥后回车。之后这样运行对账：\n\
-         \x20 {SECRET_ENV}=\"$(security find-generic-password -s tokendash-hub-secret -w)\" cargo run -p reconcile -- --hub-device <设备 id>\n\
+         \x20 {SECRET_ENV}=\"$(security find-generic-password -s tokenlens-hub-secret -w)\" cargo run -p reconcile -- --hub-device <设备 id>\n\
          系统可能弹窗问是否允许访问钥匙串，点「允许」。\n\
          \n\
          Windows：在 PowerShell 里运行\n\
-         \x20 [Environment]::SetEnvironmentVariable(\"{SECRET_ENV}\", (Read-Host \"粘贴密钥\"), \"User\")\n\
-         然后重新打开终端。用完后把同一条命令里的 (Read-Host ...) 换成 $null 再运行一次，即可删除。"
+         \x20 $s = Read-Host \"粘贴密钥\" -AsSecureString; [Environment]::SetEnvironmentVariable(\"{SECRET_ENV}\", [Net.NetworkCredential]::new(\"\", $s).Password, \"User\"); $s.Dispose()\n\
+         然后重新打开终端。用完后运行 [Environment]::SetEnvironmentVariable(\"{SECRET_ENV}\", $null, \"User\") 即可删除。"
     )
 }
 
@@ -118,7 +118,7 @@ fn run(args: &Args, secret: &str) -> Result<ExitCode, String> {
     let qoder_events: Vec<(i64, i64)> = report
         .events
         .iter()
-        .filter(|event| event.client == QODER_CLIENT)
+        .filter(|event| event.client == QODER_CLIENT || event.client == QODER_CN_CLIENT)
         .map(|event| {
             let reasoning = if hub_counts_reasoning(HUB_QODER_CLIENT) {
                 event.reasoning

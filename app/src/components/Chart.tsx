@@ -49,13 +49,23 @@ export function Chart({
   click.current = onClick;
 
   useEffect(() => {
-    if (!ref.current) return;
-    const instance = echarts.init(ref.current, undefined, { renderer: "canvas" });
+    const el = ref.current;
+    if (!el) return;
+    const instance = echarts.init(el, undefined, { renderer: "canvas" });
     chart.current = instance;
     instance.on("click", (params) => click.current?.(params as never));
-    const observer = new ResizeObserver(() => instance.resize());
-    observer.observe(ref.current);
+    let rafId: number | null = null;
+    const observer = new ResizeObserver(() => {
+      if (el.clientWidth === 0 || el.clientHeight === 0) return;
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (el.clientWidth > 0 && el.clientHeight > 0) instance.resize();
+      });
+    });
+    observer.observe(el);
     return () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       observer.disconnect();
       instance.dispose();
       chart.current = null;

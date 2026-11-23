@@ -269,3 +269,39 @@ async fn github_start_rate_limits_per_client_ip() {
         .expect("send");
     assert_eq!(other_ip.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn github_poll_rate_limits_per_client_ip() {
+    let stub = Stub::start();
+    let h = harness_with(&stub).await;
+    for _ in 0..120 {
+        let resp = h
+            .http
+            .post(format!("{}/api/auth/github/poll", h.base))
+            .header("x-forwarded-for", "203.0.113.55")
+            .json(&json!({ "deviceCode": "" }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+    let limited = h
+        .http
+        .post(format!("{}/api/auth/github/poll", h.base))
+        .header("x-forwarded-for", "203.0.113.55")
+        .json(&json!({ "deviceCode": "" }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other_ip = h
+        .http
+        .post(format!("{}/api/auth/github/poll", h.base))
+        .header("x-forwarded-for", "198.51.100.88")
+        .json(&json!({ "deviceCode": "" }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(other_ip.status(), StatusCode::BAD_REQUEST);
+}

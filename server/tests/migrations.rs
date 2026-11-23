@@ -113,3 +113,75 @@ fn a_newer_schema_is_refused() {
         Ok(_) => panic!("an older server opened a newer database"),
     }
 }
+
+#[test]
+fn v14_migration_updates_indexes_and_verifies_atomic_pre_migration_backup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("server.sqlite");
+    let v13 = db::open_with(&path, &MIGRATIONS[..13]).expect("v13");
+    let legacy_count: i64 = v13
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = 'idx_events_ts'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("legacy index");
+    assert_eq!(legacy_count, 1);
+    drop(v13);
+
+    let upgraded = db::open(&path).expect("upgrade to v14");
+    let backup = upgraded.backup.expect("pre-migration backup");
+    assert_eq!(
+        db::schema_version(&upgraded.conn).expect("version"),
+        MIGRATIONS.last().unwrap().version
+    );
+    let partial_files = std::fs::read_dir(dir.path())
+        .expect("list")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".partial"))
+        .count();
+    assert_eq!(partial_files, 0);
+    let backup_conn = rusqlite::Connection::open(&backup).expect("open backup");
+    let mode: String = backup_conn
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("mode");
+    assert_eq!(mode, "delete");
+    let check: String = backup_conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("integrity");
+    assert_eq!(check, "ok");
+
+    for dropped in [
+        "idx_events_ts",
+        "idx_events_client_ts",
+        "idx_events_model_ts",
+        "idx_events_key",
+    ] {
+        let present: i64 = upgraded
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [dropped],
+                |row| row.get(0),
+            )
+            .expect("query index");
+        assert_eq!(present, 0, "{dropped} must be dropped");
+    }
+    for created in [
+        "idx_events_counted_tenant_ts",
+        "idx_events_counted_session_parent",
+        "idx_events_counted_session_title",
+        "idx_tenant_pair_secrets_hash",
+    ] {
+        let present: i64 = upgraded
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [created],
+                |row| row.get(0),
+            )
+            .expect("query index");
+        assert_eq!(present, 1, "{created} must exist");
+    }
+}

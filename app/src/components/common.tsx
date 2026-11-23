@@ -8,7 +8,7 @@ import {
   Minus,
   type LucideIcon,
 } from "lucide-react";
-import type { CSSProperties, ReactNode } from "react";
+import { forwardRef, useState, type CSSProperties, type HTMLAttributes, type ReactNode } from "react";
 import { app, errorMessage } from "@/lib/api";
 import { compact, exact, percent } from "@/lib/format";
 import { useExactNumbers } from "@/lib/settings";
@@ -118,25 +118,29 @@ export function IdentityIcon({ icon, color, label, className }: { icon: Identity
   );
 }
 
-export function ClientName({ id, label, className }: { id: string; label?: string; className?: string }) {
-  const name = clientLabel(id, label);
-  return (
-    <span className={cn("inline-flex min-w-0 items-center gap-2", className)}>
-      <IdentityIcon icon={clientIcon(id)} color={clientColor(id)} label={name} className="h-4 w-4" />
-      <span className="truncate">{name}</span>
-    </span>
-  );
-}
+export const ClientName = forwardRef<HTMLSpanElement, { id: string; label?: string } & HTMLAttributes<HTMLSpanElement>>(
+  function ClientName({ id, label, className, ...props }, ref) {
+    const name = clientLabel(id, label);
+    return (
+      <span ref={ref} {...props} className={cn("inline-flex min-w-0 items-center gap-2", className)}>
+        <IdentityIcon icon={clientIcon(id)} color={clientColor(id)} label={name} className="h-4 w-4" />
+        <span className="truncate">{name}</span>
+      </span>
+    );
+  },
+);
 
-export function ModelName({ id, className }: { id: string; className?: string }) {
-  const brand = modelBrand(id);
-  return (
-    <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
-      <IdentityIcon icon={brand.icon} color={brand.color} label={brand.label} className="h-3.5 w-3.5" />
-      <span className="truncate">{modelLabel(id)}</span>
-    </span>
-  );
-}
+export const ModelName = forwardRef<HTMLSpanElement, { id: string } & HTMLAttributes<HTMLSpanElement>>(
+  function ModelName({ id, className, ...props }, ref) {
+    const brand = modelBrand(id);
+    return (
+      <span ref={ref} {...props} className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
+        <IdentityIcon icon={brand.icon} color={brand.color} label={brand.label} className="h-3.5 w-3.5" />
+        <span className="truncate">{modelLabel(id)}</span>
+      </span>
+    );
+  },
+);
 
 export function ShareBar({ value, max, color, className }: { value: number; max: number; color: string; className?: string }) {
   const width = max > 0 ? Math.max(value > 0 ? 1.5 : 0, (value / max) * 100) : 0;
@@ -201,13 +205,26 @@ function caveatTitle(caveat: Caveat): string {
 /** Error with a re-pair shortcut when this computer's credentials stopped working. */
 export function LoadError({ error, onRetry, compact: small }: { error: unknown; onRetry?: () => void; compact?: boolean }) {
   const { set } = useStatus();
+  const [busy, setBusy] = useState(false);
+  const [unpairError, setUnpairError] = useState<string | null>(null);
   const kind = error instanceof ApiError ? error.kind : null;
   if (kind === "unauthorized" || kind === "not_paired") {
+    const repair = () => {
+      if (busy) return;
+      setBusy(true);
+      setUnpairError(null);
+      void app
+        .unpair()
+        .then(set)
+        .catch((reason: unknown) => setUnpairError(errorMessage(reason)))
+        .finally(() => setBusy(false));
+    };
     return (
       <div role="alert" className="flex flex-col items-center gap-3 px-6 py-12 text-center">
         <p className="text-sm leading-6 text-ink-2">{errorMessage(error)}</p>
-        <Button variant="primary" onClick={() => void app.unpair().then(set)}>
-          重新配对
+        {unpairError && <p className="text-xs text-bad">{unpairError}</p>}
+        <Button variant="primary" disabled={busy} onClick={repair}>
+          {busy ? "处理中…" : "重新配对"}
         </Button>
       </div>
     );

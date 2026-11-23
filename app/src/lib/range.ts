@@ -31,6 +31,22 @@ export const DEFAULT_FILTERS: Filters = {
 
 export const DEFAULT_TIME_ZONE = "Asia/Shanghai";
 
+export function systemTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || DEFAULT_TIME_ZONE;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+export function isValidDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  if (value < "2000-01-01" || value > "2100-12-31") return false;
+  const [y, m, d] = value.split("-").map(Number);
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m! - 1 && dt.getUTCDate() === d;
+}
+
 const dayFormats = new Map<string, Intl.DateTimeFormat>();
 
 export function todayIn(timeZone: string, now = new Date()): string {
@@ -83,8 +99,8 @@ export function normalizeFilters(value: unknown): Filters | null {
   const filters: Filters = {
     ...DEFAULT_FILTERS,
     preset: normalizePreset(candidate.preset),
-    customFrom: typeof candidate.customFrom === "string" ? candidate.customFrom : undefined,
-    customTo: typeof candidate.customTo === "string" ? candidate.customTo : undefined,
+    customFrom: typeof candidate.customFrom === "string" && isValidDate(candidate.customFrom) ? candidate.customFrom : undefined,
+    customTo: typeof candidate.customTo === "string" && isValidDate(candidate.customTo) ? candidate.customTo : undefined,
     deviceScope: candidate.deviceScope === "all" || candidate.deviceScope === "current"
       ? candidate.deviceScope
       : DEFAULT_FILTERS.deviceScope,
@@ -110,8 +126,8 @@ export function resolveRange(filters: Filters, timeZone: string, now = new Date(
     case "all":
       return {};
     case "custom": {
-      const from = filters.customFrom;
-      const to = filters.customTo;
+      const from = filters.customFrom && isValidDate(filters.customFrom) ? filters.customFrom : undefined;
+      const to = filters.customTo && isValidDate(filters.customTo) ? filters.customTo : undefined;
       if (from && to && from > to) return { from: to, to: from };
       return { from, to };
     }
@@ -148,7 +164,7 @@ export function filterQuery(filters: Filters, timeZone: string, overrides: Parti
   };
 }
 
-export function activeFilterCount(filters: Filters): number {
+export function activeFilterCount(filters: Filters, local = false): number {
   return filters.devices.length + filters.clients.length + filters.models.length + filters.projects.length
-    + (filters.deviceScope === "all" ? 0 : 1);
+    + (!local && filters.deviceScope !== "all" ? 1 : 0);
 }

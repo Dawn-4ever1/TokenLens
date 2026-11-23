@@ -4,7 +4,7 @@ import { CaveatList, Delta, LoadError, Num } from "@/components/common";
 import { Card, EmptyState, Segmented, Skeleton, Tip } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
-import { bucketLabel, compact, dayLabel, exact, usd } from "@/lib/format";
+import { bucketLabel, compact, dayLabel, escapeHtml, exact, usd } from "@/lib/format";
 import { clientLabel, modelLabel, NO_PROJECT_KEY, OTHER_KEY, seriesColor } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { addDays, daysBetween, resolveRange, todayIn, type DateSpan, type Filters } from "@/lib/range";
@@ -61,7 +61,8 @@ export function bucketSpan(label: string, bucket: Bucket): DateSpan {
 }
 
 function spanDays(span: DateSpan, first: string | undefined, today: string): number {
-  return daysBetween(span.from ?? first ?? today, span.to ?? today) + 1;
+  if (!span.from && !first) return 90;
+  return Math.max(1, daysBetween(span.from ?? first ?? today, span.to ?? today) + 1);
 }
 
 export function Trends() {
@@ -78,7 +79,8 @@ export function Trends() {
   const q = query();
   const summary = useDashboard<Summary>("summary", q);
   const series = useDashboard<Timeseries>("timeseries", { ...q, bucket, groupBy, limit: "8" });
-  const daily = useDashboard<Timeseries>("timeseries", { ...q, bucket: "day", groupBy: "none" });
+  const dailyAllowed = allowed("day");
+  const daily = useDashboard<Timeseries>(dailyAllowed ? "timeseries" : null, { ...q, bucket: "day", groupBy: "none" });
 
   return (
     <div className="space-y-[var(--stack-space)]">
@@ -95,7 +97,15 @@ export function Trends() {
               label="粒度"
               value={bucket}
               onChange={(next) => allowed(next) && setChosen(next)}
-              options={BUCKETS.map((b) => ({ key: b.key, label: allowed(b.key) ? b.label : <Tip content="范围太长，不能按小时显示"><span className="opacity-40">{b.label}</span></Tip> }))}
+              options={BUCKETS.map((b) => {
+                const ok = allowed(b.key);
+                const tip = b.key === "hour" ? "范围太长，不能按小时显示" : "范围太长，不能按日显示";
+                return {
+                  key: b.key,
+                  disabled: !ok,
+                  label: ok ? b.label : <Tip content={tip}><span>{b.label}</span></Tip>,
+                };
+              })}
             />
           </div>
         }
@@ -115,7 +125,7 @@ export function Trends() {
         <CalendarCard className="col-span-12 min-[1200px]:col-span-7" span={span} />
         <WeekHourCard className="col-span-12 min-[1200px]:col-span-5" />
       </div>
-      <AnomalyCard data={daily.data} />
+      <AnomalyCard data={daily.data} error={daily.error} reload={daily.reload} tooLong={!dailyAllowed} />
     </div>
   );
 }
@@ -154,7 +164,8 @@ function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
               .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px"></span>${escapeHtml(p.seriesName)}</span><b>${formatExact(p.value)}</b></div>`)
               .join("");
             const total = params.reduce((sum, p) => sum + p.value, 0);
-            return `<div style="min-width:180px">${bucketLabel(data.buckets[first.dataIndex] ?? "", data.bucket)}<div style="margin:4px 0 6px">合计 <b>${formatExact(total)}</b></div>${rows}</div>`;
+            const heading = escapeHtml(bucketLabel(data.buckets[first.dataIndex] ?? "", data.bucket));
+            return `<div style="min-width:180px">${heading}<div style="margin:4px 0 6px">合计 <b>${formatExact(total)}</b></div>${rows}</div>`;
           },
         },
         series: data.series.map((s, index) => {
@@ -190,10 +201,6 @@ function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
     [data, go],
   );
   return <Chart option={option} height={320} onClick={onClick} label="按分组堆叠的用量趋势图，点击某个时间段查看当时的会话" />;
-}
-
-function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]!);
 }
 
 function weekStart(date: string): string {
@@ -233,16 +240,21 @@ function PeriodCompare() {
   const lastWeek = useDashboard<Summary>("summary", get(spans.lastWeek));
   const thisMonth = useDashboard<Summary>("summary", get(spans.thisMonth));
   const lastMonth = useDashboard<Summary>("summary", get(spans.lastMonth));
-  const cell = (title: string, current: Summary | null, previous: Summary | null, hint: string) => (
+  const cell = (
+    title: string,
+    current: { data: Summary | null; error: unknown; reload: () => void },
+    previous: Summary | null,
+    hint: string,
+  ) => (
     <div className="min-w-0">
       <div className="text-xs text-ink-3">{title}</div>
-      {current ? (
+      {current.data ? (
         <>
           <div className="display num-fit mt-1 text-2xl text-ink">
-            <Num value={current.totalTokens} />
+            <Num value={current.data.totalTokens} />
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-ink-3">
-            <Delta current={current.totalTokens} previous={previous?.totalTokens} label={hint} />
+            <Delta current={current.data.totalTokens} previous={previous?.totalTokens} label={hint} />
             {previous && (
               <span>
                 {hint.replace("相比", "")} <Num value={previous.totalTokens} className="text-ink-2" />
@@ -250,6 +262,8 @@ function PeriodCompare() {
             )}
           </div>
         </>
+      ) : current.error ? (
+        <LoadError error={current.error} onRetry={current.reload} compact />
       ) : (
         <Skeleton className="mt-2 h-12" />
       )}
@@ -258,8 +272,8 @@ function PeriodCompare() {
   return (
     <Card title="周期对比" subtitle="和上一周期的同样天数相比，不受上方时间范围影响（其他筛选仍然生效）">
       <div className="grid grid-cols-2 gap-6">
-        {cell("本周至今", thisWeek.data, lastWeek.data, "与上周同期相比")}
-        {cell("本月至今", thisMonth.data, lastMonth.data, "与上月同期相比")}
+        {cell("本周至今", thisWeek, lastWeek.data, "与上周同期相比")}
+        {cell("本月至今", thisMonth, lastMonth.data, "与上月同期相比")}
       </div>
     </Card>
   );
@@ -268,12 +282,15 @@ function PeriodCompare() {
 function CalendarCard({ span, className }: { span: DateSpan; className?: string }) {
   const { timeZone, query, options } = useData();
   const { go } = useNav();
-  const to = span.to ?? todayIn(timeZone);
+  const today = todayIn(timeZone);
+  const to = span.to && span.to >= "2000-01-01" ? span.to : today;
   const earliest = addDays(to, -364);
   const latest = addDays(to, -181);
   let from = span.from ?? options?.firstEventDate ?? latest;
   if (from < earliest) from = earliest;
   if (from > latest) from = latest;
+  if (from < "2000-01-01") from = "2000-01-01";
+  if (from > to) from = to;
   const heat = useDashboard<Heatmap>("heatmap", { ...query(), from, to, kind: "calendar" });
   const option = useCallback(
     (palette: Palette): ChartOption => {
@@ -282,7 +299,7 @@ function CalendarCard({ span, className }: { span: DateSpan; className?: string 
         ...baseOption(palette),
         tooltip: {
           ...(baseOption(palette).tooltip as object),
-          formatter: (p: { value: [string, number] }) => `${dayLabel(p.value[0], true)}<br/><b>${exact(p.value[1])}</b> tokens`,
+          formatter: (p: { value: [string, number] }) => `${escapeHtml(dayLabel(p.value[0], true))}<br/><b>${exact(p.value[1])}</b> tokens`,
         },
         visualMap: { show: false, min: 0, max: Math.max(1, heat.data?.maxTotalTokens ?? 1), inRange: { color: [palette.primarySoft, palette.primary] } },
         calendar: {
@@ -381,7 +398,17 @@ export function findAnomalies(dates: string[], totals: number[], limit = 5): { m
   return { median, days };
 }
 
-function AnomalyCard({ data }: { data: Timeseries | null }) {
+function AnomalyCard({
+  data,
+  error,
+  reload,
+  tooLong,
+}: {
+  data: Timeseries | null;
+  error: unknown;
+  reload: () => void;
+  tooLong: boolean;
+}) {
   const { go } = useNav();
   const result = useMemo(() => {
     if (!data) return null;
@@ -390,7 +417,11 @@ function AnomalyCard({ data }: { data: Timeseries | null }) {
   }, [data]);
   return (
     <Card title="异常日" subtitle="用量至少是平时（有使用的日子的中位数）3 倍的日子">
-      {!result ? (
+      {tooLong ? (
+        <p className="py-2 text-[13px] text-ink-3">时间范围超过 4000 天，暂不按日计算异常日。</p>
+      ) : !data && error ? (
+        <LoadError error={error} onRetry={reload} compact />
+      ) : !result ? (
         <Skeleton className="h-16" />
       ) : result.days.length === 0 ? (
         <p className="py-2 text-[13px] text-ink-3">{result.median === 0 ? "有使用的天数不足 7 天，暂不判断。" : "这个范围内没有明显偏高的日子。"}</p>

@@ -33,10 +33,13 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const mounted = useRef(true);
   const refreshing = useRef(false);
+  const revision = useRef(0);
   const snapshot = useRef<UpdateStatus | null>(null);
   const accept = useCallback((next: UpdateStatus) => {
     snapshot.current = next;
-    if (mounted.current) setStatus(next);
+    if (mounted.current) {
+      setStatus((previous) => (previous && JSON.stringify(previous) === JSON.stringify(next) ? previous : next));
+    }
     return next;
   }, []);
   const failure = useCallback((message: string) => accept({
@@ -45,16 +48,22 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     if (refreshing.current) return;
     refreshing.current = true;
-    try { accept(await app.updateStatus()); }
-    catch { failure("暂时无法读取更新状态，请稍后再试。"); }
-    finally { refreshing.current = false; }
+    const current = ++revision.current;
+    try {
+      const next = await app.updateStatus();
+      if (revision.current !== current) return;
+      accept(next);
+    } catch {
+      if (revision.current === current && snapshot.current === null) {
+        failure("暂时无法读取更新状态，请稍后再试。");
+      }
+    } finally {
+      refreshing.current = false;
+    }
   }, [accept, failure]);
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void refresh();
-    }, 1000);
     let stopped = false;
     let unlisten: (() => void) | undefined;
     if (isTauri()) {
@@ -68,15 +77,30 @@ export function UpdateProvider({ children }: { children: ReactNode }) {
     return () => {
       mounted.current = false;
       stopped = true;
-      clearInterval(timer);
       unlisten?.();
     };
   }, [refresh]);
+  const activePhase = busy || status?.phase === "checking" || status?.phase === "downloading" || status?.phase === "installing";
+  useEffect(() => {
+    if (!activePhase) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") void refresh();
+    }, 500);
+    return () => clearInterval(timer);
+  }, [activePhase, refresh]);
   const run = useCallback(async (action: () => Promise<UpdateStatus>, message: string) => {
+    revision.current += 1;
     setBusy(true);
-    try { return accept(await action()); }
-    catch { return failure(message); }
-    finally { if (mounted.current) setBusy(false); }
+    try {
+      const next = await action();
+      revision.current += 1;
+      return accept(next);
+    } catch {
+      revision.current += 1;
+      return failure(message);
+    } finally {
+      if (mounted.current) setBusy(false);
+    }
   }, [accept, failure]);
   const check = useCallback(() => run(app.checkUpdate, "暂时连不上更新服务，请稍后再试。"), [run]);
   const install = useCallback(() => run(app.installUpdate, "更新没有完成，原来的版本仍可使用，请稍后重试。"), [run]);

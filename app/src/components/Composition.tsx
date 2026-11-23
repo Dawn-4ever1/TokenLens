@@ -58,14 +58,14 @@ export function Composition({ value, dense, className }: { value: Breakdown; den
       ) : (
         <Bar parts={parts} whole={total} total={total} dense={dense} />
       )}
-      <dl className={cn("mt-3 grid gap-x-4 gap-y-2", dense ? "grid-cols-5" : "grid-cols-2 min-[1200px]:grid-cols-5")}>
+      <dl className={cn("mt-3 grid gap-x-4 gap-y-2", dense ? "grid-cols-2 min-[560px]:grid-cols-5" : "grid-cols-2 min-[1200px]:grid-cols-5")}>
         {parts.map((part) => (
           <div key={part.key} className="min-w-0">
             <dt className="flex items-center gap-1.5 text-xs text-ink-3">
               <span aria-hidden className="h-2 w-2 shrink-0 rounded-sm" style={{ background: part.color }} />
               <span className="truncate">{part.label}</span>
             </dt>
-            <dd className="mt-0.5 flex items-baseline gap-1.5">
+            <dd className="mt-0.5 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
               <Num value={part.tokens} className={cn("font-medium text-ink", dense ? "text-[13px]" : "text-sm")} />
               <span className="num text-[11px] text-ink-3">{percent(share(part.tokens, total))}</span>
             </dd>

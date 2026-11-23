@@ -19,17 +19,17 @@ const LOCK_FILE: &str = "collector.lock";
 const SCHEMA_VERSION: u32 = 1;
 
 const SCHEMA: &str = "
-CREATE TABLE meta (
+CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
-CREATE TABLE known (
+CREATE TABLE IF NOT EXISTS known (
     event_key TEXT PRIMARY KEY,
     client TEXT NOT NULL,
     ts INTEGER NOT NULL,
     hash BLOB NOT NULL
 ) STRICT, WITHOUT ROWID;
-CREATE TABLE outbox (
+CREATE TABLE IF NOT EXISTS outbox (
     id INTEGER PRIMARY KEY,
     event_key TEXT NOT NULL UNIQUE,
     version INTEGER NOT NULL,
@@ -38,7 +38,7 @@ CREATE TABLE outbox (
     payload TEXT NOT NULL,
     created_at INTEGER NOT NULL
 ) STRICT;
-CREATE INDEX outbox_by_generation ON outbox (generation, ts, event_key);
+CREATE INDEX IF NOT EXISTS outbox_by_generation ON outbox (generation, ts, event_key);
 ";
 
 pub mod meta {
@@ -130,6 +130,30 @@ fn restrict(path: &Path, mode: u32) -> std::io::Result<()> {
     Ok(())
 }
 
+fn is_sqlite_busy(error: &rusqlite::Error) -> bool {
+    matches!(
+        error,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if matches!(
+                inner.code,
+                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+            )
+    )
+}
+
+fn retry_busy<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    for attempt in 0..25 {
+        match op() {
+            Ok(value) => return Ok(value),
+            Err(error) if is_sqlite_busy(&error) && attempt < 24 => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
 impl State {
     pub fn path_in(dir: &Path) -> PathBuf {
         dir.join(STATE_FILE)
@@ -143,21 +167,64 @@ impl State {
         std::fs::create_dir_all(dir)?;
         restrict(dir, 0o700)?;
         let path = Self::path_in(dir);
-        let conn = Connection::open(&path)?;
+        let mut conn = Connection::open(&path)?;
         restrict(&path, 0o600)?;
         conn.busy_timeout(Duration::from_secs(5))?;
-        conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(()))?;
-        conn.execute_batch("PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON;")?;
+        retry_busy(|| conn.query_row("PRAGMA journal_mode = WAL", [], |_| Ok(())))?;
+        retry_busy(|| {
+            conn.execute_batch(
+                "PRAGMA synchronous = NORMAL; PRAGMA foreign_keys = ON; PRAGMA journal_size_limit = 16777216;",
+            )
+        })?;
         let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
         if version > SCHEMA_VERSION {
             return Err(StateError::TooNew);
         }
         if version == 0 {
-            conn.execute_batch(&format!(
-                "BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;"
-            ))?;
+            loop {
+                match conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate) {
+                    Ok(tx) => {
+                        let version: u32 =
+                            tx.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                        if version > SCHEMA_VERSION {
+                            return Err(StateError::TooNew);
+                        }
+                        if version == 0 {
+                            tx.execute_batch(&format!(
+                                "{SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};"
+                            ))?;
+                        }
+                        tx.commit()?;
+                        break;
+                    }
+                    Err(error) if is_sqlite_busy(&error) => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => return Err(error.into()),
+                }
+            }
         }
         Ok(Self { conn })
+    }
+
+    pub fn open_readonly(dir: &Path) -> Result<Option<Self>, StateError> {
+        let path = Self::path_in(dir);
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let flags =
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(&path, flags)?;
+        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.pragma_update(None, "query_only", "ON")?;
+        let version: u32 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if version > SCHEMA_VERSION {
+            return Err(StateError::TooNew);
+        }
+        if version == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Self { conn }))
     }
 
     /// Copies a consistent SQLite snapshot, including committed WAL rows. The
@@ -325,6 +392,13 @@ impl State {
         let count: i64 = self
             .conn
             .query_row("SELECT COUNT(*) FROM outbox", [], |row| row.get(0))?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
+
+    pub fn known_count(&self) -> Result<u64, StateError> {
+        let count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM known", [], |row| row.get(0))?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
 
@@ -666,5 +740,39 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn open_readonly_and_concurrent_fresh_opens_work_cleanly() {
+        let dir = tempfile::tempdir().expect("dir");
+        let fresh = dir.path().join("fresh");
+        assert!(State::open_readonly(&fresh).expect("absent").is_none());
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let b = std::sync::Arc::clone(&barrier);
+            let p = fresh.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                State::open(&p).expect("concurrent open")
+            }));
+        }
+        for handle in handles {
+            let _ = handle.join().expect("thread");
+        }
+
+        let mut state = State::open(&fresh).expect("open");
+        state.prepare("dev_a", "g1").expect("prepare");
+        state
+            .record_changes("g1", &[event("a", 10, 1)], 1)
+            .expect("record");
+        drop(state);
+
+        let ro = State::open_readonly(&fresh)
+            .expect("readonly")
+            .expect("exists");
+        assert_eq!(ro.known_count().expect("known count"), 1);
+        assert_eq!(ro.backlog().expect("backlog"), 1);
     }
 }

@@ -143,7 +143,7 @@ async fn a_wrong_expired_or_reused_code_never_signs_in() {
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
 
-    // An expired code is refused and removed.
+    // An expired code is refused and invalidated while preserving send-rate counters.
     let expired = h.stage_login_code("late@example.com");
     h.clock.advance_ms(11 * 60 * 1000);
     let (status, body) = h
@@ -156,8 +156,16 @@ async fn a_wrong_expired_or_reused_code_never_signs_in() {
         .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     assert_eq!(
-        h.count("SELECT COUNT(*) FROM email_challenges WHERE email = 'late@example.com'"),
+        h.count(
+            "SELECT COUNT(*) FROM email_challenges WHERE email = 'late@example.com' AND consumed_at IS NULL"
+        ),
         0
+    );
+    assert_eq!(
+        h.count(
+            "SELECT COUNT(*) FROM email_challenges WHERE email = 'late@example.com' AND consumed_at IS NOT NULL"
+        ),
+        1
     );
 }
 
@@ -761,4 +769,118 @@ fn upgrading_to_v7_keeps_existing_devices_and_usage_in_the_personal_space() {
         auth.map(|context| context.tenant_id).as_deref(),
         Some("tenant_personal")
     );
+}
+
+#[test]
+fn normalize_email_strips_trailing_dot_and_rejects_multiple_at_signs() {
+    use tokenlens_server::accounts::normalize_email;
+
+    assert_eq!(
+        normalize_email("  Alice@Example.COM. "),
+        Some("alice@example.com".to_owned())
+    );
+    assert_eq!(normalize_email("a@b@c.com"), None);
+    assert_eq!(normalize_email("user@example.com.."), None);
+}
+
+#[tokio::test]
+async fn email_login_caps_active_sessions_with_deterministic_eviction() {
+    let h = Harness::start().await;
+    let mut sessions = Vec::new();
+    for _ in 0..tokenlens_server::accounts::MAX_SESSIONS_PER_ACCOUNT + 2 {
+        let (session, status, body) = h.login("many@example.com").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        sessions.push(session);
+        // Move past the hourly email send window while staying well within 30d TTL.
+        h.clock
+            .advance_ms(tokenlens_server::accounts::SEND_WINDOW_MS + 1);
+    }
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM account_sessions"),
+        tokenlens_server::accounts::MAX_SESSIONS_PER_ACCOUNT as i64
+    );
+    let (oldest_status, _) = h.get("/api/auth/me", Some(&sessions[0])).await;
+    assert_eq!(oldest_status, StatusCode::UNAUTHORIZED);
+    let (newest_status, _) = h
+        .get(
+            "/api/auth/me",
+            Some(sessions.last().expect("newest session")),
+        )
+        .await;
+    assert_eq!(newest_status, StatusCode::OK);
+
+    // Tied `created_at` timestamps must only evict the exact overflow count (1).
+    let db = h.side_db();
+    let (account_id, tenant_id): (String, String) = db
+        .query_row(
+            "SELECT id, tenant_id FROM accounts WHERE email = 'many@example.com'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("account");
+    db.execute("DELETE FROM account_sessions", [])
+        .expect("clear");
+    let now = tokenlens_server::clock::Clock::now_ms(&h.clock);
+    let expires = now + tokenlens_server::accounts::SESSION_TTL_MS;
+    for idx in 0..tokenlens_server::accounts::MAX_SESSIONS_PER_ACCOUNT {
+        db.execute(
+            "INSERT INTO account_sessions (token_hash, account_id, tenant_id, created_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![format!("{idx:064x}"), account_id, tenant_id, now, expires],
+        )
+        .expect("seed tied session");
+    }
+    drop(db);
+    let (_new_session, status, body) = h.login("many@example.com").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        h.count("SELECT COUNT(*) FROM account_sessions"),
+        tokenlens_server::accounts::MAX_SESSIONS_PER_ACCOUNT as i64,
+        "tied timestamps must evict one session, not wipe all tied rows"
+    );
+}
+
+#[tokio::test]
+async fn pairing_code_without_cipher_returns_service_unavailable() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("server.sqlite");
+    let opened = tokenlens_server::db::open(&db_path).expect("open");
+    let clock = std::sync::Arc::new(tokenlens_server::clock::ManualClock::new(common::START_MS));
+    let reader = tokenlens_server::db::open_reader(&db_path).expect("reader");
+    let state =
+        tokenlens_server::http::AppState::new(opened.conn, clock.clone()).with_reader(reader);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let base = format!("http://{}", listener.local_addr().expect("addr"));
+    tokio::spawn(tokenlens_server::serve(
+        listener,
+        state,
+        std::future::pending(),
+    ));
+
+    let side = rusqlite::Connection::open(&db_path).expect("side");
+    let code =
+        tokenlens_server::accounts::stage_code(&side, "nocipher@example.com", common::START_MS)
+            .expect("stage")
+            .expose()
+            .to_owned();
+    let http = reqwest::Client::new();
+    let login = http
+        .post(format!("{base}/api/auth/login"))
+        .json(&json!({"email": "nocipher@example.com", "code": code}))
+        .send()
+        .await
+        .expect("login")
+        .json::<serde_json::Value>()
+        .await
+        .expect("json");
+    let session = login["session"].as_str().expect("session");
+    let resp = http
+        .get(format!("{base}/api/account/pair-code"))
+        .bearer_auth(session)
+        .send()
+        .await
+        .expect("pair-code");
+    assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

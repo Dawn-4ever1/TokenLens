@@ -46,14 +46,11 @@ impl ClaimLimiter {
                 self.per_key.remove(key);
             }
         }
-        if self.per_key.len() > MAX_TRACKED_KEYS {
+        if self.per_key.len() >= MAX_TRACKED_KEYS {
             self.per_key.retain(|_, queue| {
                 Self::prune_queue(queue, now_ms);
                 !queue.is_empty()
             });
-            if self.per_key.len() > MAX_TRACKED_KEYS {
-                self.per_key.clear();
-            }
         }
     }
 
@@ -64,6 +61,7 @@ impl ClaimLimiter {
                 .per_key
                 .get(key)
                 .is_some_and(|queue| queue.len() >= CLAIM_FAILURE_LIMIT)
+            || (self.per_key.len() >= MAX_TRACKED_KEYS && !self.per_key.contains_key(key))
     }
 
     pub fn record_failure(&mut self, key: &str, now_ms: i64) {
@@ -117,18 +115,22 @@ pub struct AuthLimiter {
 
 impl AuthLimiter {
     pub fn allow(&mut self, key: &str, now: i64) -> bool {
+        self.allow_with(key, now, AUTH_REQUESTS_PER_WINDOW)
+    }
+
+    pub fn allow_with(&mut self, key: &str, now: i64, limit: u32) -> bool {
         let window = now - now.rem_euclid(AUTH_WINDOW_MS);
-        if self.windows.len() > MAX_TRACKED_KEYS {
+        if self.windows.len() >= MAX_TRACKED_KEYS {
             self.windows.retain(|_, (start, _)| *start == window);
-            if self.windows.len() > MAX_TRACKED_KEYS {
-                self.windows.clear();
+            if self.windows.len() >= MAX_TRACKED_KEYS && !self.windows.contains_key(key) {
+                return false;
             }
         }
         let entry = self.windows.entry(key.to_owned()).or_insert((window, 0));
         if entry.0 != window {
             *entry = (window, 0);
         }
-        if entry.1 >= AUTH_REQUESTS_PER_WINDOW {
+        if entry.1 >= limit {
             return false;
         }
         entry.1 += 1;
@@ -136,16 +138,33 @@ impl AuthLimiter {
     }
 
     pub fn allow_scoped(&mut self, scope: &'static str, key: &str, now: i64) -> bool {
+        self.allow_scoped_with(
+            scope,
+            key,
+            now,
+            AUTH_REQUESTS_PER_WINDOW,
+            AUTH_GLOBAL_REQUESTS_PER_WINDOW,
+        )
+    }
+
+    pub fn allow_scoped_with(
+        &mut self,
+        scope: &'static str,
+        key: &str,
+        now: i64,
+        per_key_limit: u32,
+        global_limit: u32,
+    ) -> bool {
         let window = now - now.rem_euclid(AUTH_WINDOW_MS);
         let global_entry = self.global.entry(scope).or_insert((window, 0));
         if global_entry.0 != window {
             *global_entry = (window, 0);
         }
-        if global_entry.1 >= AUTH_GLOBAL_REQUESTS_PER_WINDOW {
+        if global_entry.1 >= global_limit {
             return false;
         }
         let scoped_key = format!("{scope}:{key}");
-        if !self.allow(&scoped_key, now) {
+        if !self.allow_with(&scoped_key, now, per_key_limit) {
             return false;
         }
         if let Some(entry) = self.global.get_mut(scope) {
@@ -209,5 +228,56 @@ mod tests {
         assert_eq!(limiter.check("dev_a", 6 * INGEST_WINDOW_MS - 1), Err(1));
         assert_eq!(limiter.check("dev_b", start), Ok(()));
         assert_eq!(limiter.check("dev_a", 6 * INGEST_WINDOW_MS), Ok(()));
+    }
+
+    #[test]
+    fn claim_limiter_fails_closed_when_tracked_keys_saturate_without_clearing() {
+        let mut limiter = ClaimLimiter::default();
+        for index in 0..MAX_TRACKED_KEYS {
+            let key = format!("k_{index}");
+            for _ in 0..CLAIM_FAILURE_LIMIT {
+                limiter.record_failure(&key, 1_000);
+            }
+        }
+        assert!(limiter.is_blocked("k_0", 1_000));
+        assert!(
+            limiter.is_blocked("untracked_new_ip", 1_000),
+            "saturation must fail closed instead of clearing existing lockouts"
+        );
+        // Existing tracked keys recover after expiry, freeing capacity cleanly.
+        assert!(!limiter.is_blocked("untracked_new_ip", 1_000 + CLAIM_FAILURE_WINDOW_MS));
+    }
+
+    #[test]
+    fn auth_limiter_fails_closed_when_tracked_keys_saturate_without_clearing() {
+        let mut limiter = AuthLimiter::default();
+        for index in 0..MAX_TRACKED_KEYS {
+            assert!(limiter.allow(&format!("u_{index}"), 60_000));
+        }
+        assert!(
+            !limiter.allow("untracked_user", 60_000),
+            "untracked keys must fail closed once tracked capacity is full"
+        );
+        assert!(
+            limiter.allow("u_0", 60_000),
+            "already tracked keys retain their remaining window budget"
+        );
+        // Next window evicts stale keys and allows new callers again.
+        assert!(limiter.allow("untracked_user", 120_000));
+    }
+
+    #[test]
+    fn auth_limiter_allow_scoped_with_respects_custom_limits() {
+        let mut limiter = AuthLimiter::default();
+        for _ in 0..3 {
+            assert!(limiter.allow_scoped_with("poll", "ip-1", 60_000, 3, 5));
+        }
+        assert!(!limiter.allow_scoped_with("poll", "ip-1", 60_000, 3, 5));
+        assert!(limiter.allow_scoped_with("poll", "ip-2", 60_000, 3, 5));
+        assert!(limiter.allow_scoped_with("poll", "ip-2", 60_000, 3, 5));
+        assert!(
+            !limiter.allow_scoped_with("poll", "ip-3", 60_000, 3, 5),
+            "global ceiling still caps total requests across IPs"
+        );
     }
 }

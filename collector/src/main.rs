@@ -351,7 +351,6 @@ fn run_sync(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     let state_dir = args.store.state_dir()?;
     let mut options = watch_options(&args.watch)?;
     options.ignored.push(state_dir.clone());
-    options.project_salt = Some(collector_core::state::ensure_project_salt_in(&state_dir)?);
     let (sender, receiver) = watch::channel();
     stop_on_ctrl_c(&sender)?;
     let sink_sender = sender.clone();
@@ -370,6 +369,7 @@ fn run_sync(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
             let _ = sink_sender.send(Msg::Sync(line));
         }),
     )?;
+    options.project_salt = Some(syncer.ensure_project_salt()?);
     let mut stdout = std::io::stdout();
     let summary = watch::run(&options, sender, receiver, &mut stdout, Some(&mut syncer));
     syncer.stop();

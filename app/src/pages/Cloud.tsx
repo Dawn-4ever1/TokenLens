@@ -17,7 +17,7 @@ const CLOUD_FEATURES = [
   "包含全部本地版功能",
   "同一账号的设备共享看板",
   "本机继续记录，网络恢复后自动同步",
-  "只同步数值，不上传对话或代码",
+  "只同步数字统计、会话标题和项目名，不上传提示词、回答或代码",
 ];
 
 export function Cloud() {
@@ -25,6 +25,7 @@ export function Cloud() {
   const { go } = useNav();
   const [connecting, setConnecting] = useState(false);
   const connected = Boolean(status?.server);
+  const selfHosted = Boolean(status?.server && status.server !== status.cloudServer && !status.accountEmail);
 
   return (
     <div className="space-y-[var(--stack-space)]">
@@ -95,7 +96,13 @@ export function Cloud() {
       <div className="border-t border-line/70 pt-4">
         <p className="flex items-start gap-2 text-xs leading-5 text-ink-3">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
-          添加另一台电脑时，只需安装 TokenLens、选择云服务并用同一账号登录。GitHub、Google 或邮箱账号均可；无需复制服务器地址或配对码。
+          {selfHosted ? (
+            <>
+              当前已连接到自建服务器（<span className="font-mono text-ink-2">{status?.server}</span>）。添加另一台电脑时，可在那台电脑打开登录窗口底部的「使用自己的服务器」，输入服务器地址和配对码。
+            </>
+          ) : (
+            "添加另一台电脑时，只需安装 TokenLens、选择云服务并用同一账号登录。GitHub、Google 或邮箱账号均可；无需复制服务器地址或配对码。"
+          )}
         </p>
       </div>
       <ConnectServer open={connecting} onOpenChange={setConnecting} />

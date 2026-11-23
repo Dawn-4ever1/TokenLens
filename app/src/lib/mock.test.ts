@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Breakdown, Devices, SessionPage, Summary, Timeseries } from "./types";
+import type { AppStatus, Breakdown, Devices, FilterOptions, SessionPage, Summary, Timeseries } from "./types";
 
 vi.hoisted(() => {
   history.replaceState(null, "", "/?server");
@@ -71,5 +71,26 @@ describe("mock backend keeps the API invariants", () => {
       cursor = page.nextCursor;
     } while (cursor);
     expect(seen.size).toBe(total);
+  });
+
+  it("syncs device renames into summary and filters, rejects oversized timeseries, and clears account on unpair", async () => {
+    await command("rename_device", { deviceId: "dev_mock_mbp", displayName: "工作主力 Mac" });
+    const summary = await get<Summary>("summary", {});
+    const filters = await get<FilterOptions>("filters", {});
+    expect(summary.byDevice.find((d) => d.key === "dev_mock_mbp")?.label).toBe("工作主力 Mac");
+    expect(filters.devices.find((d) => d.key === "dev_mock_mbp")?.label).toBe("工作主力 Mac");
+    await command("rename_device", { deviceId: "dev_mock_mbp", displayName: "MacBook Pro" });
+
+    await expect(
+      get<Timeseries>("timeseries", { from: "2000-01-01", to: "2020-01-01", bucket: "day" }),
+    ).rejects.toMatchObject({ kind: "bad_request" });
+
+    const unpaired = await command("unpair_device", {}) as AppStatus;
+    expect(unpaired.mode).toBe("local");
+    expect(unpaired.server).toBeNull();
+    expect(unpaired.accountEmail).toBeNull();
+    expect(unpaired.accountProvider).toBeNull();
+    expect(unpaired.accountDisplayName).toBeNull();
+    expect(unpaired.accountSpace).toBeNull();
   });
 });

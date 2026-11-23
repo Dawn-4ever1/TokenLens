@@ -18,6 +18,36 @@ pub enum MappingError {
 
 const METADATA_MAX_BYTES: usize = 512;
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sanitize_session_id(client: &str, raw: &str) -> String {
+    if client != "crush" {
+        return raw.to_owned();
+    }
+    if raw.contains('/') || raw.contains('\\') || raw.trim().len() > METADATA_MAX_BYTES {
+        if let Some((db_path, id)) = raw.rsplit_once(':') {
+            let id = id.trim();
+            if (db_path.contains('/') || db_path.contains('\\'))
+                && !id.is_empty()
+                && !id.contains('/')
+                && !id.contains('\\')
+                && !id.chars().any(char::is_control)
+            {
+                let digest = sha256_hex(format!("crush-db:{db_path}").as_bytes());
+                let candidate = format!("crush-{}:{id}", &digest[..16]);
+                if candidate.len() <= METADATA_MAX_BYTES {
+                    return candidate;
+                }
+            }
+        }
+        let digest = sha256_hex(format!("crush-session:{raw}").as_bytes());
+        return format!("crush-{}", &digest[..32]);
+    }
+    raw.to_owned()
+}
+
 fn metadata_text(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
     (!value.is_empty() && value.len() <= METADATA_MAX_BYTES && !value.chars().any(char::is_control))
@@ -115,11 +145,12 @@ pub fn map_message_with_salt(
     if message.timestamp < 0 {
         return Err(MappingError::NegativeTimestamp);
     }
+    let session_id = sanitize_session_id(client, message.session_id.as_str());
     let event_key = usage_event::event_key(
         client,
         message.dedup_key.as_deref(),
         FallbackKey {
-            session_id: message.session_id.as_str(),
+            session_id: &session_id,
             timestamp: message.timestamp,
             model_id: message.model_id.as_str(),
             ordinal,
@@ -143,11 +174,11 @@ pub fn map_message_with_salt(
     Ok(UsageEvent {
         event_key,
         client: client.to_owned(),
-        session_id: message.session_id.to_string(),
+        session_id,
         session_title: metadata_text(message.session_title.as_deref()),
-        parent_session_id: message.parent_session_id.as_ref().map(ToString::to_string),
+        parent_session_id: metadata_text(message.parent_session_id.as_deref()),
         model_id: message.model_id.to_string(),
-        provider_id: (!message.provider_id.is_empty()).then(|| message.provider_id.to_string()),
+        provider_id: metadata_text(Some(message.provider_id.as_str())),
         ts: message.timestamp,
         input: nonnegative(message.tokens.input)?,
         output: nonnegative(message.tokens.output)?,
@@ -165,18 +196,14 @@ pub fn map_message_with_salt(
         message_count: i64::from(message.message_count),
         is_turn_start: message.is_turn_start,
         duration_ms: message.duration_ms,
-        pricing_model_id: message
-            .pricing_model_id
-            .as_ref()
-            .filter(|raw| !raw.is_empty() && raw.as_str() != message.model_id.as_str())
-            .map(ToString::to_string),
-        billing_provider: message.billing_identity.id().map(str::to_owned),
-        service_tier: message
-            .service_tier
-            .as_ref()
-            .map(|tier| tier.trim())
-            .filter(|tier| !tier.is_empty())
-            .map(str::to_owned),
+        pricing_model_id: metadata_text(
+            message
+                .pricing_model_id
+                .as_deref()
+                .filter(|raw| *raw != message.model_id.as_str()),
+        ),
+        billing_provider: metadata_text(message.billing_identity.id()),
+        service_tier: metadata_text(message.service_tier.as_deref()),
     })
 }
 
@@ -194,9 +221,11 @@ pub fn map_messages_with_salt(
     messages
         .iter()
         .map(|message| {
+            let session_id =
+                sanitize_session_id(message.client.as_str(), message.session_id.as_str());
             let group = (
                 message.client.to_string(),
-                message.session_id.to_string(),
+                session_id,
                 message.timestamp,
                 message.model_id.to_string(),
             );
@@ -612,5 +641,41 @@ mod tests {
             map_message(&message, 0),
             Err(MappingError::ForbiddenUpstreamQoder)
         );
+    }
+
+    #[test]
+    fn crush_session_id_redacts_local_paths_while_keeping_distinct_dbs() {
+        let mut first = synthetic_message();
+        first.client = SharedStr::from("crush");
+        first.dedup_key = None;
+        first.session_id = SharedStr::from("/Users/alice/secret-repo/.crush/crush.db:sess-1");
+        let mut second = first.clone();
+        second.session_id = SharedStr::from("/Users/alice/other-repo/.crush/crush.db:sess-1");
+        let mut windows = first.clone();
+        windows.session_id = SharedStr::from(r"C:\Users\alice\repo\.crush\crush.db:sess-1");
+
+        let a = map_message_with_salt(&first, 0, None).expect("unix crush");
+        let b = map_message_with_salt(&first, 0, Some("salt-1")).expect("salted unix crush");
+        let c = map_message_with_salt(&second, 0, None).expect("other db");
+        let d = map_message_with_salt(&windows, 0, None).expect("windows crush");
+
+        for event in [&a, &b, &c, &d] {
+            let serialized = serde_json::to_string(event).expect("json");
+            assert!(!serialized.contains("alice"));
+            assert!(!serialized.contains("secret-repo"));
+            assert!(!serialized.contains("crush.db"));
+            assert!(event.session_id.ends_with(":sess-1"));
+            assert!(event.validate().is_ok());
+        }
+        assert_eq!(a.session_id, b.session_id);
+        assert_eq!(a.event_key, b.event_key);
+        assert_ne!(a.session_id, c.session_id);
+        assert_ne!(a.event_key, c.event_key);
+
+        let mut empty_parent = synthetic_message();
+        empty_parent.parent_session_id = Some(SharedStr::from("  "));
+        let mapped = map_message(&empty_parent, 0).expect("empty parent normalized");
+        assert_eq!(mapped.parent_session_id, None);
+        assert!(mapped.validate().is_ok());
     }
 }

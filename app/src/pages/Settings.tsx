@@ -56,6 +56,11 @@ function Updates() {
       </Row>
       {status?.phase === "latest" && <p role="status" className="pt-1 text-xs text-ink-2">已是最新版本</p>}
       {status?.phase === "error" && <p role="status" className="pt-1 text-xs leading-5 text-bad">{status.error || "更新没有完成，请稍后重试。"}</p>}
+      {appStatus?.appOutdated && (
+        <p role="alert" className="pt-1 text-xs leading-5 text-bad">
+          当前应用版本低于服务器最低要求（{appStatus.minAppVersion ?? "新版本"}），同步已暂停，请检查并更新应用。
+        </p>
+      )}
       {status && progressing && <div className="pt-2"><UpdateProgress status={status} /></div>}
     </Card>
   );
@@ -275,15 +280,15 @@ function Collection() {
 function Connection() {
   const { status, set } = useStatus();
   const { query } = useData();
+  const local = status?.mode === "local";
   const health = useDashboard<Health>("health");
-  const devices = useDashboard<Devices>("devices", query());
+  const devices = useDashboard<Devices>(local ? null : "devices", query());
   const [confirm, setConfirm] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   if (!status) return null;
   const thresholds = devices.data?.thresholds;
-  const local = status.mode === "local";
   const connected = Boolean(status.server);
   const disconnect = async () => {
     setBusy(true);
@@ -320,7 +325,7 @@ function Connection() {
       )}
       {connected ? (
         <Row title="断开服务器" hint="停止服务器同步，之后只显示这台电脑；本机采集继续，服务器历史保留">
-          <Button variant="danger" size="sm" onClick={() => setConfirm(true)}>断开服务器</Button>
+          <Button variant="danger" size="sm" onClick={() => { setError(null); setConfirm(true); }}>断开服务器</Button>
         </Row>
       ) : (
         <Row title="连接服务器" hint="合并查看多台设备，也可以直接在「设备 → 添加设备」连接">
@@ -329,7 +334,7 @@ function Connection() {
       )}
       {error && !confirm && <p role="alert" className="pb-2 text-xs text-bad">{error}</p>}
       <ConnectServer open={connecting} onOpenChange={setConnecting} />
-      <Dialog open={confirm} onOpenChange={setConfirm} title="断开服务器？">
+      <Dialog open={confirm} onOpenChange={(next) => { if (!busy) setConfirm(next); }} title="断开服务器？">
         <p className="text-[13px] leading-6 text-ink-2">会停止服务器同步，之后只显示这台电脑。本机采集和已有数据继续保留，服务器上的历史也不会删除。以后可在「云端」页重新连接。</p>
         {error && <p role="alert" className="mt-3 text-xs text-bad">{error}</p>}
         <div className="mt-5 flex justify-end gap-2">
@@ -343,14 +348,14 @@ function Connection() {
 
 function Definitions() {
   const { status } = useStatus();
-  const { timeZone } = useData();
+  const { timeZone, lastLoadedAt } = useData();
   return (
     <Card title="口径说明" bodyClassName="pt-1">
       <dl className="divide-y divide-line/60 text-[13px] leading-6">
         <Definition term="总 tokens">输入 + 输出 + 缓存读取 + 缓存写入 + 推理，五类互斥相加。缓存读取通常占九成以上，所以总量不等于计费 token。</Definition>
         <Definition term="缓存命中率">缓存读取 ÷（输入 + 缓存读取 + 缓存写入）。不含输出和推理。</Definition>
         <Definition term="成本">按公开 API 价格折算的「API 等价成本」，不是订阅或中转站账单。价格来自 LiteLLM、OpenRouter、models.dev 三份公开价格表，每天更新一次（本机数据由这台电脑算价，服务器数据由服务器算价），价格变了历史会一起重算。没有价格的模型不计入，会单独提示；Qoder 只显示 credits，不折算美元。</Definition>
-        <Definition term="Qoder 折算">Qoder 本地大多只记 credits，这里按校准汇率折算成 token，原始 credits 会一起显示。</Definition>
+        <Definition term="Qoder 折算">Qoder IDE 记录的真实 token 会直接统计；仅记录 credits 的旧会话，国际版按校准汇率折算成 token，国内版保留原始 credits 不折算，原始 credits 均会保留显示。</Definition>
         <Definition term="日期">按 {timeZone} 的自然日统计；跨设备的时间都换算到这个时区。</Definition>
         <Definition term="隐私">
           {!status?.server
@@ -359,7 +364,7 @@ function Definitions() {
         </Definition>
       </dl>
       <p className="mt-3 text-xs text-ink-3">
-        应用版本 {status?.appVersion ?? "—"} · 数据更新于 {dateTime(Date.now(), timeZone)}
+        应用版本 {status?.appVersion ?? "—"} · 数据更新于 {lastLoadedAt ? dateTime(lastLoadedAt, timeZone) : "—"}
       </p>
     </Card>
   );

@@ -162,10 +162,11 @@ impl UpdateState {
         inner.status.total_bytes = None;
     }
 
-    fn progress(&self, chunk: usize, total: Option<u64>) {
+    fn progress(&self, chunk: usize, total: Option<u64>) -> (u64, Option<u64>) {
         let mut inner = lock(&self.inner);
         inner.status.downloaded_bytes = inner.status.downloaded_bytes.saturating_add(chunk as u64);
         inner.status.total_bytes = total;
+        (inner.status.downloaded_bytes, inner.status.total_bytes)
     }
 }
 
@@ -216,7 +217,11 @@ struct UpdateCandidate {
 impl UpdateCandidate {
     fn new(mut update: Update) -> Option<Self> {
         let source = download_source(&update.download_url)?;
-        if source == Source::Mirror && mirror_parts(&update.download_url)?.0 != update.version {
+        let version = match source {
+            Source::GitHub => github_parts(&update.download_url)?.0,
+            Source::Mirror => mirror_parts(&update.download_url)?.0,
+        };
+        if version != update.version {
             return None;
         }
         update.timeout = Some(DOWNLOAD_TIMEOUT);
@@ -231,14 +236,16 @@ fn parse_origin(origin: &str) -> Url {
 /// Origins are compiled constants; manifests can only supply an official path.
 fn allowed_origin(url: &Url, origin: &str) -> bool {
     let origin = parse_origin(origin);
-    url.scheme() == "https"
+    let raw = url.as_str();
+    raw.is_ascii()
+        && !raw.contains(['%', '\\'])
+        && url.scheme() == "https"
         && url.host_str() == origin.host_str()
         && url.port_or_known_default() == Some(443)
         && url.username().is_empty()
         && url.password().is_none()
         && url.query().is_none()
         && url.fragment().is_none()
-        && !url.path().contains('\\')
         && !url
             .path_segments()
             .is_some_and(|mut segments| segments.any(|segment| matches!(segment, "." | "..")))
@@ -263,6 +270,13 @@ fn official_asset_filename(version: &str, filename: &str) -> bool {
             || filename == format!("TokenLens_{version}_aarch64.app.tar.gz"))
 }
 
+fn github_parts(url: &Url) -> Option<(&str, &str)> {
+    let rest = url.path().strip_prefix(GITHUB_RELEASE_PATH)?;
+    let rest = rest.strip_prefix('v')?;
+    let (version, filename) = rest.split_once('/')?;
+    official_asset_filename(version, filename).then_some((version, filename))
+}
+
 fn mirror_parts(url: &Url) -> Option<(&str, &str)> {
     let rest = url.path().strip_prefix("/downloads/v")?;
     let (version, filename) = rest.split_once('/')?;
@@ -270,14 +284,8 @@ fn mirror_parts(url: &Url) -> Option<(&str, &str)> {
 }
 
 fn download_source(url: &Url) -> Option<Source> {
-    if allowed_origin(url, GITHUB_ORIGIN) && url.path().starts_with(GITHUB_RELEASE_PATH) {
-        let tail = &url.path()[GITHUB_RELEASE_PATH.len()..];
-        if !tail.is_empty()
-            && tail.contains('/')
-            && !tail.split('/').any(|part| matches!(part, "" | "." | ".."))
-        {
-            return Some(Source::GitHub);
-        }
+    if allowed_origin(url, GITHUB_ORIGIN) && github_parts(url).is_some() {
+        return Some(Source::GitHub);
     }
     if allowed_origin(url, MIRROR_ORIGIN) && mirror_parts(url).is_some() {
         return Some(Source::Mirror);
@@ -567,12 +575,31 @@ async fn download_candidate(
                 state.start_download_attempt();
                 changed(&app);
                 let progress_app = app.clone();
+                let last_emit = Mutex::new(None::<Instant>);
                 attempt
                     .update
                     .download(
                         move |chunk, total| {
-                            progress_app.state::<UpdateState>().progress(chunk, total);
-                            changed(&progress_app);
+                            let (downloaded, total) =
+                                progress_app.state::<UpdateState>().progress(chunk, total);
+                            let complete = total.is_some_and(|expected| downloaded >= expected);
+                            let should_emit = {
+                                let mut guard = lock(&last_emit);
+                                let now = Instant::now();
+                                if complete
+                                    || guard.is_none_or(|prev| {
+                                        now.duration_since(prev) >= Duration::from_millis(100)
+                                    })
+                                {
+                                    *guard = Some(now);
+                                    true
+                                } else {
+                                    false
+                                }
+                            };
+                            if should_emit {
+                                changed(&progress_app);
+                            }
                         },
                         || {},
                     )
@@ -617,12 +644,13 @@ async fn download_and_install(app: AppHandle, candidate: UpdateCandidate) {
     })
     .await;
     // A successful desktop install exits/restarts above. Any return (including
-    // a panicking blocking task) must release the gate using its saved state.
+    // a panicking blocking task) must release the gate under the connection lock.
     app.state::<UpdateState>().fail(INSTALL_ERROR);
-    let resume = app.state::<AppState>().collector.finish_update();
-    if resume {
-        commands::start_collector(&app);
-    }
+    let resume_app = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        commands::finish_update_and_resume(&resume_app);
+    })
+    .await;
     commands::changed(&app, crate::tray::Poke::Status);
     changed(&app);
 }
@@ -638,10 +666,15 @@ pub async fn check_update(app: AppHandle) -> UpdateStatus {
 }
 
 #[tauri::command]
-pub fn set_auto_check_updates(app: AppHandle, enabled: bool) -> UpdateStatus {
-    let status = app.state::<UpdateState>().set_auto_check(enabled);
-    changed(&app);
-    status
+pub async fn set_auto_check_updates(app: AppHandle, enabled: bool) -> UpdateStatus {
+    let fallback_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = app.state::<UpdateState>().set_auto_check(enabled);
+        changed(&app);
+        status
+    })
+    .await
+    .unwrap_or_else(|_| fallback_app.state::<UpdateState>().status())
 }
 
 #[tauri::command]
@@ -1170,5 +1203,25 @@ mod tests {
         assert!(value.get("candidate").is_none());
         assert!(value.get("signature").is_none());
         assert!(value.get("downloadUrl").is_none());
+    }
+
+    #[test]
+    fn download_source_and_candidate_enforce_strict_github_asset_paths_and_version_match() {
+        for bad in [
+            "https://github.com/Dawn-4ever1/TokenLens/releases/download/v0.4.1/app.exe",
+            "https://github.com/Dawn-4ever1/TokenLens/releases/download/v0.4.1/TokenLens_0.4.1_x64-setup.exe%23extra",
+            "https://github.com/Dawn-4ever1/TokenLens/releases/download/v0.4.2/TokenLens_0.4.1_x64-setup.exe",
+            "https://github.com/Dawn-4ever1/TokenLens/releases/download/v0.4.1/TokenLens_0.4.1_x64-setup.exe.sig",
+        ] {
+            let parsed = Url::parse(bad).unwrap();
+            assert_eq!(download_source(&parsed), None, "{bad}");
+        }
+
+        let mut mismatch = restore_fixture(Source::GitHub).update.raw_json.clone();
+        mismatch["platforms"]["darwin-aarch64"]["url"] = json!(
+            "https://github.com/Dawn-4ever1/TokenLens/releases/download/v2.0.1/TokenLens_2.0.1_aarch64.app.tar.gz"
+        );
+        let update = restore_updater().restore_update(mismatch).unwrap().unwrap();
+        assert!(UpdateCandidate::new(update).is_none());
     }
 }

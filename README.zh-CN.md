@@ -47,7 +47,7 @@
         <source media="(prefers-color-scheme: light)" srcset=".github/readme/session-detail-light.webp">
         <img src=".github/readme/session-detail-light.webp" alt="TokenLens 会话详情演示图：展示缓存占比放大条、逐轮柱状图以及每一轮的明细表格。" width="100%">
       </picture>
-      <p><strong>会话与逐轮拆解</strong><br>按工具已保存标题、会话 ID、模型或项目搜索，展开即可查看每一轮的 Token 构成、耗时与成本；子代理用量自动归入父会话。</p>
+      <p><strong>会话与逐轮拆解</strong><br>按工具已保存标题、会话 ID、模型或项目搜索，展开即可查看会话成本汇总以及每一轮的 Token 构成与耗时；子代理用量自动归入父会话。</p>
     </td>
   </tr>
   <tr>
@@ -62,7 +62,7 @@
     <td width="50%" valign="top">
       <p><strong>顺手的日常查看体验</strong></p>
       <ul>
-        <li><strong>设备范围一键切换</strong> — 顶部直接选择「全账号」「本机」「其他设备」或单独某一台电脑。</li>
+        <li><strong>设备范围一键切换</strong> — 顶部直接选择「全账号」「本机」或单独某一台电脑。</li>
         <li><strong>下钻与联动筛选</strong> — 按日期、设备、工具、模型、项目任意组合筛选；点击工具或日历某一天直接跳入对应会话。</li>
         <li><strong>点击数字切换精确值</strong> — 在任意页面点击 Token 数字，即可在简写（<code>147M</code>）与完整数字之间切换。</li>
         <li><strong>断网不丢记录</strong> — 本机 SQLite 搭配独立发送队列，离线照常采集，恢复联网后自动补传。</li>
