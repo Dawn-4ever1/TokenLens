@@ -121,6 +121,24 @@ export function shortId(id: string, length = 8): string {
   return id.length > length + 2 ? `${id.slice(0, length)}…` : id;
 }
 
+const WEEKDAYS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** "YYYY-MM-DD" → "周一".."周日" (empty string if malformed). */
+export function weekdayLabel(date: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "";
+  const [y, m, d] = date.split("-").map(Number);
+  const dt = new Date(Date.UTC(y!, m! - 1, d!));
+  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m! - 1 || dt.getUTCDate() !== d) return "";
+  return WEEKDAYS[dt.getUTCDay()] ?? "";
+}
+
+/** "YYYY-MM-DD" → "11/10". */
+export function shortDayLabel(date: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return date;
+  const [, m, d] = date.split("-");
+  return `${Number(m)}/${Number(d)}`;
+}
+
 /** "YYYY-MM-DD" → "11月10日" (or with year). */
 export function dayLabel(date: string, withYear = false): string {
   const [y, m, d] = date.split("-");

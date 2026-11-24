@@ -178,3 +178,104 @@ for (const width of [1440, 1200, 1100, 1000, 900]) {
     await expect(button).toHaveText(/^[\d.]+[KMB]$/);
   });
 }
+
+async function readChartOption(chart: import("@playwright/test").Locator) {
+  return chart.locator("canvas").evaluate(async (canvas) => {
+    const url = performance
+      .getEntriesByType("resource")
+      .map((entry) => entry.name)
+      .find((entry) => new URL(entry).pathname === "/node_modules/.vite/deps/echarts_core.js");
+    if (!url) throw new Error("ECharts module is missing");
+    const { getInstanceByDom } = await import(url);
+    const instance = getInstanceByDom(canvas.parentElement!.parentElement!);
+    if (!instance) throw new Error("ECharts instance is missing");
+    const option = instance.getOption() as {
+      xAxis: { data: string[] }[];
+      series: { type: string; data: (number | null)[] }[];
+    };
+    return {
+      xAxisData: option.xAxis[0]?.data ?? [],
+      series: option.series.map((s) => ({ type: s.type, data: s.data })),
+    };
+  });
+}
+
+test("weekly range renders daily Monday-to-Sunday bars across directions and Trends", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.addInitScript(() => {
+    const fixedNow = Date.parse("2026-11-24T22:30:00+08:00");
+    const RealDate = Date;
+    class FixedDate extends RealDate {
+      constructor(...args: unknown[]) {
+        if (args.length === 0) super(fixedNow);
+        else super(...(args as [number]));
+      }
+      static override now() {
+        return fixedNow;
+      }
+    }
+    window.Date = FixedDate as DateConstructor;
+    if (sessionStorage.getItem("weekly-seeded")) return;
+    sessionStorage.setItem("weekly-seeded", "1");
+    localStorage.clear();
+    localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ theme: "light", direction: "editorial", refreshSeconds: 0 }));
+    localStorage.setItem("tokenlens.page.v1", "overview");
+  });
+  await page.goto("/?server");
+  await expect(page.locator("header h1")).toHaveText("总览");
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+
+  const picker = page.getByRole("radiogroup", { name: "时间范围" });
+  const trendCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "趋势", exact: true }) }).first();
+  const chart = page.getByRole("img", { name: /用量趋势/ });
+
+  // Day preset uses hourly buckets (24 points).
+  await picker.getByRole("radio", { name: "日", exact: true }).click();
+  await expect(trendCard).toContainText("每小时总 tokens");
+  await expect.poll(async () => (await readChartOption(chart)).xAxisData.length).toBe(24);
+
+  // Week preset uses daily buckets across Monday..Sunday (7 bars; future days stay null).
+  await picker.getByRole("radio", { name: "周", exact: true }).click();
+  await expect(trendCard).toContainText("每天总 tokens");
+  const expectedWeek = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27", "2026-11-28", "2026-11-29"];
+  await expect.poll(async () => (await readChartOption(chart)).xAxisData).toEqual(expectedWeek);
+  const editorial = await readChartOption(chart);
+  expect(editorial.series).toHaveLength(1);
+  expect(editorial.series[0]!.type).toBe("bar");
+  expect(typeof editorial.series[0]!.data[0]).toBe("number");
+  expect(typeof editorial.series[0]!.data[1]).toBe("number");
+  expect(editorial.series[0]!.data.slice(2)).toEqual([null, null, null, null, null]);
+
+  // Graphite and Paper directions also use 7 daily bars on Week, with no overflow at 900px.
+  for (const direction of ["graphite", "paper"] as const) {
+    await page.evaluate((dir) => {
+      const saved = JSON.parse(localStorage.getItem("tokenlens.settings.v1") ?? "{}");
+      localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ ...saved, direction: dir }));
+    }, direction);
+    await page.setViewportSize({ width: 900, height: 900 });
+    await page.reload();
+    await expect(page.locator("header h1")).toHaveText("总览");
+    await expect(page.locator(".skeleton")).toHaveCount(0);
+    await expect(trendCard).toContainText("每天总 tokens");
+    await expect.poll(async () => (await readChartOption(chart)).xAxisData).toEqual(expectedWeek);
+    const opt = await readChartOption(chart);
+    expect(opt.series[0]!.type).toBe("bar");
+    expect(opt.series[0]!.data.slice(2)).toEqual([null, null, null, null, null]);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    expect(overflow).toBe(false);
+  }
+
+  // Trends page defaults to daily granularity on Week and shows Monday..Sunday on the x-axis.
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await page.getByRole("button", { name: "趋势", exact: true }).click();
+  await expect(page.locator("header h1")).toHaveText("趋势");
+  await expect(page.locator(".skeleton")).toHaveCount(0);
+  const granularity = page.getByRole("radiogroup", { name: "粒度" });
+  await expect(granularity.getByRole("radio", { name: "日", exact: true })).toHaveAttribute("aria-checked", "true");
+  const trendsChart = page.getByRole("img", { name: /按分组堆叠的用量趋势图/ });
+  await expect.poll(async () => (await readChartOption(trendsChart)).xAxisData).toEqual(expectedWeek);
+
+  expect(errors).toEqual([]);
+});

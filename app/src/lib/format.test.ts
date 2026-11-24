@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compact, credits, dayLabel, duration, exact, percent, relativeTime, shortId, usd } from "./format";
+import { compact, credits, dayLabel, duration, exact, percent, relativeTime, shortDayLabel, shortId, usd, weekdayLabel } from "./format";
 
 describe("compact", () => {
   it("keeps small numbers exact", () => {
@@ -68,11 +68,19 @@ describe("other formatters", () => {
     expect(relativeTime(now + 60_000, now)).toBe("刚刚");
   });
 
-  it("shortId and dayLabel", () => {
+  it("shortId, dayLabel, shortDayLabel and weekdayLabel", () => {
     expect(shortId("abc")).toBe("abc");
     expect(shortId("0123456789abcdef")).toBe("01234567…");
     expect(dayLabel("2026-11-03")).toBe("11月3日");
     expect(dayLabel("2026-11-03", true)).toBe("2026年11月3日");
+    expect(shortDayLabel("2026-01-03")).toBe("1/3");
+    expect(shortDayLabel("2026-11-24")).toBe("11/24");
+    expect(shortDayLabel("bad")).toBe("bad");
+    expect(weekdayLabel("2026-11-23")).toBe("周一");
+    expect(weekdayLabel("2026-11-24")).toBe("周二");
+    expect(weekdayLabel("2026-11-29")).toBe("周日");
+    expect(weekdayLabel("2026-02-31")).toBe("");
+    expect(weekdayLabel("not-a-date")).toBe("");
   });
 
   it("handles non-finite numbers, negative usd, and old dates safely", () => {

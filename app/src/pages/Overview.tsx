@@ -6,32 +6,79 @@ import { ClientName, IdentityIcon, LoadError, ModelName, Num, ShareBar } from "@
 import { Badge, Button, Card, EmptyState, Segmented, Skeleton, StatusDot, Tip, cn } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
-import { bucketLabel, compact, escapeHtml, exact, percent, relativeTime, share, usd } from "@/lib/format";
+import { bucketLabel, compact, dayLabel, escapeHtml, exact, percent, relativeTime, share, shortDayLabel, usd, weekdayLabel } from "@/lib/format";
 import { clientColor, clientIcon, clientLabel, formFactorLabel, OTHER_KEY, platformLabel } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
 import { useSettings } from "@/lib/settings";
-import { daysBetween, resolveRange, todayIn, type DateSpan } from "@/lib/range";
+import { addDays, daysBetween, resolveRange, todayIn, weekStart, type DateSpan, type RangePreset } from "@/lib/range";
 import { useStatus } from "@/lib/status";
 import type { Bucket, DeviceStatus, Devices, Point, SessionPage, Summary, Timeseries } from "@/lib/types";
 
-export function autoBucket(span: DateSpan, firstEventDate: string | undefined, today: string): Bucket {
+export function autoBucket(
+  span: DateSpan,
+  firstEventDate: string | undefined,
+  today: string,
+  preset?: RangePreset,
+): Bucket {
+  if (preset === "today") return "hour";
+  if (preset === "week" || preset === "month") return "day";
   if (!span.from && !firstEventDate) return "day";
   const from = span.from ?? firstEventDate ?? today;
   const to = span.to ?? today;
   const days = Math.max(1, daysBetween(from, to) + 1);
-  if (days <= 2) return "hour";
+  if (days <= 1) return "hour";
   if (days <= 120) return "day";
   if (days <= 800) return "week";
   return "month";
 }
 
+/** Seven calendar dates from Monday through Sunday for the week containing `today`. */
+export function weekCalendarDates(today: string): string[] {
+  const monday = weekStart(today);
+  return Array.from({ length: 7 }, (_, i) => addDays(monday, i));
+}
+
+/** True only when `data` holds daily points for the current Monday..today week. */
+export function isCurrentWeekDaily(data: Timeseries | null, preset: RangePreset, today: string): boolean {
+  if (!data || preset !== "week" || data.bucket !== "day") return false;
+  const monday = weekStart(today);
+  const sunday = addDays(monday, 6);
+  return data.range.from === monday && data.range.to >= monday && data.range.to <= sunday;
+}
+
+/** Two-line weekday + compact date x-axis labels for the Monday..Sunday weekly view. */
+export function weeklyXAxisLabel(palette: Palette, today: string) {
+  const mutedInk = palette.resolve("color-mix(in oklch, var(--ink-3) 50%, transparent)");
+  return {
+    color: palette.ink3,
+    interval: 0,
+    margin: 10,
+    formatter: (value: string) => {
+      const wd = weekdayLabel(value);
+      const md = shortDayLabel(value);
+      if (value === today) return `{todayWk|${wd}}\n{todayDt|${md}}`;
+      if (value > today) return `{futWk|${wd}}\n{futDt|${md}}`;
+      return `{wk|${wd}}\n{dt|${md}}`;
+    },
+    rich: {
+      wk: { color: palette.ink2, fontSize: 11, fontWeight: 500, lineHeight: 15 },
+      dt: { color: palette.ink3, fontSize: 10, lineHeight: 14 },
+      todayWk: { color: palette.ink, fontSize: 11, fontWeight: 600, lineHeight: 15 },
+      todayDt: { color: palette.ink2, fontSize: 10, fontWeight: 500, lineHeight: 14 },
+      futWk: { color: mutedInk, fontSize: 11, fontWeight: 500, lineHeight: 15 },
+      futDt: { color: mutedInk, fontSize: 10, lineHeight: 14 },
+    },
+  };
+}
+
 export function Overview() {
   const { filters, timeZone, query, options } = useData();
   const { settings } = useSettings();
+  const today = todayIn(timeZone);
   const span = resolveRange(filters, timeZone);
   const q = query();
   const summary = useDashboard<Summary>("summary", q);
-  const bucket = autoBucket(span, options?.firstEventDate, todayIn(timeZone));
+  const bucket = autoBucket(span, options?.firstEventDate, today, filters.preset);
   const trend = useDashboard<Timeseries>("timeseries", { ...q, bucket, groupBy: "none" });
   const recent = useDashboard<SessionPage>("sessions", { ...q, sort: "recent", limit: "5" });
   const devices = useDashboard<Devices>("devices", q);
@@ -51,7 +98,7 @@ export function Overview() {
     return (
       <>
         {errorBanner}
-        <TerminalOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
+        <TerminalOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} preset={filters.preset} today={today} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
       </>
     );
   }
@@ -59,7 +106,7 @@ export function Overview() {
     return (
       <>
         {errorBanner}
-        <PaperOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
+        <PaperOverview summary={s} empty={empty} trend={trend.data} trendError={trend.error} trendReload={trend.reload} bucket={bucket} preset={filters.preset} today={today} recent={recent.data} recentError={recent.error} recentReload={recent.reload} devices={devices.data} devicesError={devices.error} devicesReload={devices.reload} />
       </>
     );
   }
@@ -89,7 +136,7 @@ export function Overview() {
             <ToolCard summary={s} />
             <ModelCard summary={s} />
           </div>
-          <TrendCard data={trend.data} error={trend.error} reload={trend.reload} bucket={bucket} />
+          <TrendCard data={trend.data} error={trend.error} reload={trend.reload} bucket={bucket} preset={filters.preset} today={today} />
         </>
       )}
       <Card title="Token 构成">
@@ -110,6 +157,8 @@ type OverviewVariantProps = {
   trendError: unknown;
   trendReload: () => void;
   bucket: Bucket;
+  preset: RangePreset;
+  today: string;
   recent: SessionPage | null;
   recentError: unknown;
   recentReload: () => void;
@@ -165,7 +214,7 @@ function TerminalTools({ summary }: { summary: Summary }) {
   ) : <EmptyState title="没有工具数据" />;
 }
 
-function TerminalOverview({ summary, empty, trend, trendError, trendReload, bucket, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
+function TerminalOverview({ summary, empty, trend, trendError, trendReload, bucket, preset, today, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
   return (
     <div className="terminal-layout space-y-[var(--stack-space)]">
       <div data-testid="overview-kpis" className="grid grid-cols-2 gap-0 border-l border-t border-line min-[900px]:grid-cols-5">
@@ -177,7 +226,7 @@ function TerminalOverview({ summary, empty, trend, trendError, trendReload, buck
       </div>
       {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
         <>
-          <TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} />
+          <TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} preset={preset} today={today} />
           <Card title="Token 构成"><Composition value={summary} /></Card>
           <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-[1.15fr_0.85fr]">
             <Card title="工具" subtitle="按工具查看用量"><TerminalTools summary={summary} /></Card>
@@ -213,7 +262,7 @@ function paperConclusion(summary: Summary): string {
   return `本时间范围共用 ${compact(summary.totalTokens)}，其中 ${cache}。`;
 }
 
-function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
+function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket, preset, today, recent, recentError, recentReload, devices, devicesError, devicesReload }: OverviewVariantProps) {
   return (
     <div className="paper-layout space-y-[var(--stack-space)]">
       <div className="paper-masthead">
@@ -228,7 +277,7 @@ function PaperOverview({ summary, empty, trend, trendError, trendReload, bucket,
       </div>
       {empty ? <Card><EmptyState title="这个时间范围内没有用量" hint="可以换一个时间范围，或清除筛选条件。" /></Card> : (
         <>
-          <div className="paper-rule pt-4"><TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} /></div>
+          <div className="paper-rule pt-4"><TrendCard data={trend} error={trendError} reload={trendReload} bucket={bucket} preset={preset} today={today} /></div>
           <Card title="Token 构成"><Composition value={summary} /></Card>
           <div className="grid grid-cols-1 gap-[var(--grid-gap)] min-[1100px]:grid-cols-2">
             <ToolCard summary={summary} />
@@ -302,11 +351,17 @@ function Kpi({ label, value, primary = false, valueRef }: { label: string; value
   );
 }
 
-export function compactTrendUsesBars(direction: "editorial" | "graphite" | "paper", pointCount: number): boolean {
-  return direction === "graphite" && pointCount > 0 && pointCount <= 45;
+export function compactTrendUsesBars(
+  direction: "editorial" | "graphite" | "paper",
+  pointCount: number,
+  weekly = false,
+): boolean {
+  if (pointCount <= 0) return false;
+  if (weekly) return true;
+  return direction === "graphite" && pointCount <= 45;
 }
 
-type TrendMode = "total" | "nonCache" | "cost";
+export type TrendMode = "total" | "nonCache" | "cost";
 
 function pointValue(point: Point, mode: TrendMode): number {
   switch (mode) {
@@ -319,54 +374,134 @@ function pointValue(point: Point, mode: TrendMode): number {
   }
 }
 
-function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; error: unknown; reload: () => void; bucket: Bucket }) {
+export function buildTrendPoints(
+  data: Timeseries | null,
+  mode: TrendMode,
+  preset: RangePreset,
+  today: string,
+): { buckets: string[]; values: (number | null)[]; weekly: boolean } {
+  if (!data) return { buckets: [], values: [], weekly: false };
+  const rawValues = data.buckets.map((_, index) =>
+    data.series.reduce((sum, series) => sum + (series.points[index] ? pointValue(series.points[index], mode) : 0), 0),
+  );
+  if (!isCurrentWeekDaily(data, preset, today)) {
+    return { buckets: data.buckets, values: rawValues, weekly: false };
+  }
+  const byDate = new Map(data.buckets.map((bucket, index) => [bucket, rawValues[index] ?? 0]));
+  const buckets = weekCalendarDates(today);
+  const values = buckets.map((date) => (byDate.has(date) ? byDate.get(date)! : null));
+  return { buckets, values, weekly: true };
+}
+
+function TrendCard({
+  data,
+  error,
+  reload,
+  bucket,
+  preset,
+  today,
+}: {
+  data: Timeseries | null;
+  error: unknown;
+  reload: () => void;
+  bucket: Bucket;
+  preset: RangePreset;
+  today: string;
+}) {
   const [mode, setMode] = useState<TrendMode>("total");
   const { settings } = useSettings();
-  const values = useMemo(() => {
-    if (!data) return [];
-    return data.buckets.map((_, index) => data.series.reduce((sum, series) => sum + (series.points[index] ? pointValue(series.points[index], mode) : 0), 0));
-  }, [data, mode]);
+  const { buckets, values, weekly } = useMemo(
+    () => buildTrendPoints(data, mode, preset, today),
+    [data, mode, preset, today],
+  );
   const option = useCallback(
     (palette: Palette): ChartOption => {
       const format = mode === "cost" ? (v: number) => usd(v) : (v: number) => compact(v);
       const formatExact = mode === "cost" ? (v: number) => usd(v) : (v: number) => exact(v);
       const kind = data?.bucket ?? bucket;
+      const usesBars = compactTrendUsesBars(palette.direction, values.length, weekly);
+      const visiblePoints = values.filter((v) => v !== null).length;
+      const multiDayHour =
+        kind === "hour" &&
+        buckets.length > 1 &&
+        buckets[0]!.slice(0, 10) !== buckets[buckets.length - 1]!.slice(0, 10);
       return {
         ...baseOption(palette),
-        grid: { left: 4, right: 12, top: 12, bottom: 4, containLabel: true },
+        grid: { left: 4, right: 12, top: weekly ? 26 : 12, bottom: 4, containLabel: true },
         xAxis: {
           type: "category",
-          boundaryGap: compactTrendUsesBars(palette.direction, values.length),
-          data: data?.buckets ?? [],
+          boundaryGap: usesBars,
+          data: buckets,
           axisLine: { lineStyle: { color: palette.border } },
           axisTick: { show: false },
-          axisLabel: { color: palette.ink3, hideOverlap: true, formatter: (value: string) => (kind === "hour" ? `${value.slice(11, 13)}时` : bucketLabel(value, kind).replace("起一周", "")) },
+          axisLabel: weekly
+            ? weeklyXAxisLabel(palette, today)
+            : {
+                color: palette.ink3,
+                hideOverlap: true,
+                formatter: (value: string) => {
+                  if (kind === "hour") {
+                    return multiDayHour
+                      ? `${dayLabel(value.slice(0, 10))} ${value.slice(11, 13)}时`
+                      : `${value.slice(11, 13)}时`;
+                  }
+                  return bucketLabel(value, kind).replace("起一周", "");
+                },
+              },
         },
         yAxis: { type: "value", splitLine: { lineStyle: { color: palette.grid } }, axisLabel: { color: palette.ink3, formatter: format } },
         tooltip: {
           ...(baseOption(palette).tooltip as object),
           trigger: "axis",
-          formatter: (params: { dataIndex: number; value: number }[]) => {
+          axisPointer: { type: usesBars ? "shadow" : "line" },
+          formatter: (params: { dataIndex: number }[]) => {
             const first = params[0];
             if (!first || !data) return "";
-            const name = escapeHtml(bucketLabel(data.buckets[first.dataIndex] ?? "", kind));
-            return `${name}<br/><b>${formatExact(first.value)}</b>`;
+            const key = buckets[first.dataIndex] ?? "";
+            const val = values[first.dataIndex] ?? null;
+            if (weekly) {
+              const heading = `${escapeHtml(dayLabel(key))} ${escapeHtml(weekdayLabel(key))}${key === today ? "（今天）" : ""}`;
+              if (val === null) {
+                return `${heading}<br/><span style="color:${palette.ink3}">尚未到达</span>`;
+              }
+              return `${heading}<br/><b>${formatExact(val)}</b>`;
+            }
+            const name = escapeHtml(bucketLabel(key, kind));
+            return `${name}<br/><b>${formatExact(val ?? 0)}</b>`;
           },
         },
         series: [
           {
-            type: compactTrendUsesBars(palette.direction, values.length) ? "bar" : "line",
+            type: usesBars ? "bar" : "line",
             data: values,
-            barMaxWidth: palette.barMaxWidth,
+            barMaxWidth: weekly ? (palette.direction === "editorial" ? 40 : Math.max(palette.barMaxWidth, 32)) : palette.barMaxWidth,
             smooth: palette.direction === "paper" ? 0 : 0.25,
             smoothMonotone: "x",
-            symbol: "none",
+            symbol: !usesBars && visiblePoints <= 1 ? "circle" : "none",
+            symbolSize: 6,
             lineStyle: { width: palette.chartLineWidth, color: palette.primary },
             itemStyle: {
               color: palette.primary,
-              borderRadius: palette.direction === "graphite" ? 1 : 0,
+              borderRadius: usesBars
+                ? palette.direction === "graphite"
+                  ? 1
+                  : palette.direction === "paper"
+                    ? 0
+                    : [6, 6, 0, 0]
+                : 0,
             },
-            areaStyle: compactTrendUsesBars(palette.direction, values.length) ? undefined : {
+            label: weekly
+              ? {
+                  show: true,
+                  position: "top",
+                  distance: 6,
+                  color: palette.ink2,
+                  fontSize: 11,
+                  fontFamily: palette.fontFamily,
+                  formatter: (p: { value: unknown }) => (typeof p.value === "number" && p.value > 0 ? format(p.value) : ""),
+                }
+              : undefined,
+            areaStyle: usesBars ? undefined : {
               opacity: palette.direction === "paper" ? 0 : undefined,
               color: {
                 type: "linear", x: 0, y: 0, x2: 0, y2: 1,
@@ -380,9 +515,14 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         ],
       };
     },
-    [data, values, mode, bucket, settings.direction],
+    [data, buckets, values, weekly, today, mode, bucket, settings.direction],
   );
   const unit = { hour: "每小时", day: "每天", week: "每周", month: "每月" }[data?.bucket ?? bucket];
+  const chartLabel = compactTrendUsesBars(settings.direction, values.length, weekly)
+    ? "用量趋势柱状图"
+    : settings.direction === "paper"
+      ? "用量趋势细折线图"
+      : "用量趋势面积图";
   return (
     <Card
       bodyClassName="flex flex-col"
@@ -408,7 +548,7 @@ function TrendCard({ data, error, reload, bucket }: { data: Timeseries | null; e
         <Skeleton className="h-[260px]" />
       ) : (
         <div className="relative min-h-[260px] flex-1">
-          <Chart option={option} height="100%" className="absolute inset-0" label={settings.direction === "graphite" ? "用量趋势柱状图或折线图" : settings.direction === "paper" ? "用量趋势细折线图" : "用量趋势面积图"} />
+          <Chart option={option} height="100%" className="absolute inset-0" label={chartLabel} />
         </div>
       )}
     </Card>

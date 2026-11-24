@@ -4,12 +4,12 @@ import { CaveatList, Delta, LoadError, Num } from "@/components/common";
 import { Card, EmptyState, Segmented, Skeleton, Tip } from "@/components/ui";
 import type { Palette } from "@/lib/colors";
 import { useData, useDashboard } from "@/lib/data";
-import { bucketLabel, compact, dayLabel, escapeHtml, exact, usd } from "@/lib/format";
+import { bucketLabel, compact, dayLabel, escapeHtml, exact, usd, weekdayLabel } from "@/lib/format";
 import { clientLabel, modelLabel, NO_PROJECT_KEY, OTHER_KEY, seriesColor } from "@/lib/labels";
 import { useNav } from "@/lib/nav";
-import { addDays, daysBetween, resolveRange, todayIn, type DateSpan, type Filters } from "@/lib/range";
+import { addDays, daysBetween, resolveRange, todayIn, type DateSpan, type Filters, type RangePreset } from "@/lib/range";
 import type { Bucket, GroupBy, Heatmap, Summary, Timeseries } from "@/lib/types";
-import { autoBucket } from "./Overview";
+import { autoBucket, isCurrentWeekDaily, weekCalendarDates, weeklyXAxisLabel } from "./Overview";
 
 const BUCKETS: { key: Bucket; label: string }[] = [
   { key: "hour", label: "小时" },
@@ -70,7 +70,7 @@ export function Trends() {
   const today = todayIn(timeZone);
   const span = resolveRange(filters, timeZone);
   const days = spanDays(span, options?.firstEventDate, today);
-  const fallback = autoBucket(span, options?.firstEventDate, today);
+  const fallback = autoBucket(span, options?.firstEventDate, today, filters.preset);
   const [chosen, setChosen] = useState<Bucket | null>(null);
   const allowed = (bucket: Bucket) => (bucket === "hour" ? days <= 62 : bucket === "day" ? days <= 4000 : true);
   const bucket = chosen && allowed(chosen) ? chosen : fallback;
@@ -117,7 +117,7 @@ export function Trends() {
         ) : series.data.series.length === 0 ? (
           <EmptyState title="这个范围内没有用量" hint="换一个时间范围，或清除筛选条件。" />
         ) : (
-          <StackedChart data={series.data} metric={metric} />
+          <StackedChart data={series.data} metric={metric} preset={filters.preset} today={today} />
         )}
       </Card>
       <PeriodCompare />
@@ -130,9 +130,12 @@ export function Trends() {
   );
 }
 
-function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
+function StackedChart({ data, metric, preset, today }: { data: Timeseries; metric: Metric; preset: RangePreset; today: string }) {
   const { go } = useNav();
-  const bars = data.buckets.length <= 45;
+  const weekly = isCurrentWeekDaily(data, preset, today);
+  const buckets = useMemo(() => (weekly ? weekCalendarDates(today) : data.buckets), [weekly, today, data.buckets]);
+  const bucketIndex = useMemo(() => new Map(data.buckets.map((b, i) => [b, i])), [data.buckets]);
+  const bars = weekly || buckets.length <= 45;
   const option = useCallback(
     (palette: Palette): ChartOption => {
       const value = (point: { totalTokens: number; costUsd: number } | undefined) => (point ? (metric === "cost" ? point.costUsd : point.totalTokens) : 0);
@@ -145,26 +148,47 @@ function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
         xAxis: {
           type: "category",
           boundaryGap: bars,
-          data: data.buckets,
+          data: buckets,
           axisLine: { lineStyle: { color: palette.border } },
           axisTick: { show: false },
-          axisLabel: { color: palette.ink3, hideOverlap: true, formatter: (v: string) => (data.bucket === "hour" ? `${dayLabel(v.slice(0, 10))} ${v.slice(11, 13)}时` : bucketLabel(v, data.bucket).replace("起一周", "")) },
+          axisLabel: weekly
+            ? weeklyXAxisLabel(palette, today)
+            : {
+                color: palette.ink3,
+                hideOverlap: true,
+                formatter: (v: string) => (data.bucket === "hour" ? `${dayLabel(v.slice(0, 10))} ${v.slice(11, 13)}时` : bucketLabel(v, data.bucket).replace("起一周", "")),
+              },
         },
         yAxis: { type: "value", splitLine: { lineStyle: { color: palette.grid } }, axisLabel: { color: palette.ink3, formatter: format } },
         tooltip: {
           ...(baseOption(palette).tooltip as object),
           trigger: "axis",
           axisPointer: { type: bars ? "shadow" : "line" },
-          formatter: (params: { dataIndex: number; value: number; seriesName: string; color: string }[]) => {
+          formatter: (params: { dataIndex: number; value: number | null; seriesName: string; color: string }[]) => {
             const first = params[0];
             if (!first) return "";
+            const key = buckets[first.dataIndex] ?? "";
+            if (weekly) {
+              const heading = `${escapeHtml(dayLabel(key))} ${escapeHtml(weekdayLabel(key))}${key === today ? "（今天）" : ""}`;
+              if (!bucketIndex.has(key)) {
+                return `${heading}<br/><span style="color:${palette.ink3}">尚未到达</span>`;
+              }
+              const numeric = params.filter((p): p is { dataIndex: number; value: number; seriesName: string; color: string } => typeof p.value === "number");
+              const rows = numeric
+                .filter((p) => p.value > 0)
+                .sort((a, b) => b.value - a.value)
+                .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px"></span>${escapeHtml(p.seriesName)}</span><b>${formatExact(p.value)}</b></div>`)
+                .join("");
+              const total = numeric.reduce((sum, p) => sum + p.value, 0);
+              return `<div style="min-width:180px">${heading}<div style="margin:4px 0 6px">合计 <b>${formatExact(total)}</b></div>${rows}</div>`;
+            }
             const rows = params
-              .filter((p) => p.value > 0)
+              .filter((p): p is { dataIndex: number; value: number; seriesName: string; color: string } => typeof p.value === "number" && p.value > 0)
               .sort((a, b) => b.value - a.value)
               .map((p) => `<div style="display:flex;justify-content:space-between;gap:16px"><span><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${p.color};margin-right:6px"></span>${escapeHtml(p.seriesName)}</span><b>${formatExact(p.value)}</b></div>`)
               .join("");
-            const total = params.reduce((sum, p) => sum + p.value, 0);
-            const heading = escapeHtml(bucketLabel(data.buckets[first.dataIndex] ?? "", data.bucket));
+            const total = params.reduce((sum, p) => sum + (typeof p.value === "number" ? p.value : 0), 0);
+            const heading = escapeHtml(bucketLabel(key, data.bucket));
             return `<div style="min-width:180px">${heading}<div style="margin:4px 0 6px">合计 <b>${formatExact(total)}</b></div>${rows}</div>`;
           },
         },
@@ -183,22 +207,25 @@ function StackedChart({ data, metric }: { data: Timeseries; metric: Metric }) {
             itemStyle: bars ? { borderRadius: palette.direction === "graphite" ? 1 : 0 } : undefined,
             areaStyle: bars ? undefined : { opacity: palette.chartAreaOpacity },
             emphasis: { focus: "series" },
-            data: s.points.map(value),
+            data: buckets.map((b) => {
+              const idx = bucketIndex.get(b);
+              return idx === undefined ? null : value(s.points[idx]);
+            }),
           };
         }),
       };
     },
-    [data, metric, bars],
+    [data, metric, bars, weekly, buckets, bucketIndex, today],
   );
   const onClick = useCallback(
     (params: { dataIndex: number }) => {
-      const label = data.buckets[params.dataIndex];
-      if (!label) return;
+      const label = buckets[params.dataIndex];
+      if (!label || (weekly && !bucketIndex.has(label))) return;
       const span = bucketSpan(label, data.bucket);
       const patch: Partial<Filters> = { preset: "custom", customFrom: span.from, customTo: span.to };
       go("sessions", patch);
     },
-    [data, go],
+    [buckets, weekly, bucketIndex, data.bucket, go],
   );
   return <Chart option={option} height={320} onClick={onClick} label="按分组堆叠的用量趋势图，点击某个时间段查看当时的会话" />;
 }
