@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Point, Timeseries } from "@/lib/types";
 import { validDisplayName } from "./Devices";
-import { autoBucket, buildTrendPoints, compactTrendUsesBars, isCurrentWeekDaily, weekCalendarDates } from "./Overview";
+import { autoBucket, buildTrendPoints, isCurrentWeekDaily, weekCalendarDates } from "./Overview";
 import { bucketSpan, comparisonSpans, findAnomalies } from "./Trends";
 
 describe("autoBucket", () => {
@@ -22,24 +22,6 @@ describe("autoBucket", () => {
     expect(autoBucket({}, "2025-01-01", "2026-11-11")).toBe("week");
     expect(autoBucket({}, "2023-01-01", "2026-11-11")).toBe("month");
     expect(autoBucket({}, undefined, "2026-11-11")).toBe("day");
-  });
-});
-
-describe("compactTrendUsesBars", () => {
-  it("uses compact bars for short graphite series and lines beyond 45 points", () => {
-    expect(compactTrendUsesBars("graphite", 0)).toBe(false);
-    expect(compactTrendUsesBars("graphite", 0, true)).toBe(false);
-    expect(compactTrendUsesBars("graphite", 1)).toBe(true);
-    expect(compactTrendUsesBars("graphite", 45)).toBe(true);
-    expect(compactTrendUsesBars("graphite", 46)).toBe(false);
-  });
-
-  it("keeps editorial area and paper line outside weekly, and uses bars for weekly in all directions", () => {
-    expect(compactTrendUsesBars("editorial", 30)).toBe(false);
-    expect(compactTrendUsesBars("paper", 30)).toBe(false);
-    expect(compactTrendUsesBars("editorial", 7, true)).toBe(true);
-    expect(compactTrendUsesBars("graphite", 7, true)).toBe(true);
-    expect(compactTrendUsesBars("paper", 7, true)).toBe(true);
   });
 });
 

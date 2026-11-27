@@ -76,7 +76,7 @@
         <source media="(prefers-color-scheme: light)" srcset=".github/readme/styles-light.webp">
         <img src=".github/readme/styles-light.webp" alt="Comparison of the three TokenLens visual styles: Editorial, Graphite, and Paper." width="100%">
       </picture>
-      <p><strong>Three Visual Styles, Light &amp; Dark</strong> — Switch anytime between <strong>Editorial</strong> (comfortable rounded cards &amp; area charts), <strong>Graphite</strong> (monospace numerals &amp; compact grid), and <strong>Paper</strong> (serif headings &amp; hairline charts). Numbers and workflows stay identical.</p>
+      <p><strong>Three Visual Styles, Light &amp; Dark</strong> — Switch anytime between <strong>Editorial</strong> (comfortable rounded cards &amp; warm gradient bars), <strong>Graphite</strong> (monospace numerals &amp; compact grid), and <strong>Paper</strong> (serif headings &amp; slim ink bars). Numbers and workflows stay identical.</p>
     </td>
   </tr>
 </table>

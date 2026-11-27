@@ -404,8 +404,11 @@ test("direction previews mirror the real cards and preserve their own miniature 
   await expect(page.getByText("改变字体、密度、卡片和图表样式；数据、功能和操作方式保持一致。", { exact: true })).toBeVisible();
   const previews = page.locator("[data-direction-preview]");
   await expect(previews).toHaveCount(3);
-  await expect(page.locator("[data-direction-preview='graphite'] svg rect")).toHaveCount(6);
-  await expect(page.locator("[data-direction-preview='paper'] svg path[stroke='var(--primary)']")).toHaveAttribute("stroke-width", "1.2");
+  for (const [direction, radius] of [["editorial", "2.5"], ["graphite", "1"], ["paper", "0"]]) {
+    const bars = page.locator(`[data-direction-preview='${direction}'] svg rect`);
+    await expect(bars).toHaveCount(6);
+    expect(await bars.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("rx")))).toEqual(Array(6).fill(radius));
+  }
   const radii = await previews.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).borderRadius));
   expect(radii).toEqual(["14px", "6px", "2px"]);
   const paperTitle = previews.nth(2).locator(".display");
@@ -418,9 +421,9 @@ test("direction previews mirror the real cards and preserve their own miniature 
   expect(errors).toEqual([]);
 });
 
-test("chart geometry follows its direction; the long-range boundary has a unit test", async ({ page, browser }) => {
+test("Overview bar geometry follows its visual direction", async ({ page, browser }) => {
   await page.close();
-  for (const direction of ["editorial", "paper", "graphite"] as const) {
+  for (const [direction, radius] of [["editorial", [6, 6, 0, 0]], ["graphite", 1], ["paper", 0]] as const) {
     page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
     const errors = await open(page, { direction });
     await settle(page, "总览");
@@ -433,16 +436,10 @@ test("chart geometry follows its direction; the long-range boundary has a unit t
       const { getInstanceByDom } = await import(url);
       const instance = getInstanceByDom(canvas.parentElement!.parentElement!);
       if (!instance) throw new Error("ECharts instance is missing");
-      const option = instance.getOption() as { series: { type: string; lineStyle?: { width?: number }; areaStyle?: { opacity?: number } }[] };
-      return option.series.map(({ type, lineStyle, areaStyle }) => ({ type, width: lineStyle?.width, area: areaStyle?.opacity }));
+      const option = instance.getOption() as { series: { type: string; itemStyle?: { borderRadius?: number | number[] } }[] };
+      return option.series.map(({ type, itemStyle }) => ({ type, radius: itemStyle?.borderRadius }));
     });
-    expect(series).toHaveLength(1);
-    if (direction === "graphite") expect(series[0]!.type).toBe("bar");
-    else expect(series[0]!.type).toBe("line");
-    if (direction === "paper") {
-      expect(series[0]!.width).toBe(1.25);
-      expect(series[0]!.area ?? 0).toBe(0);
-    }
+    expect(series).toEqual([{ type: "bar", radius }]);
     expect(errors).toEqual([]);
     await page.close();
   }

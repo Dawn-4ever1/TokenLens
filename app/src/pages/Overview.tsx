@@ -351,16 +351,6 @@ function Kpi({ label, value, primary = false, valueRef }: { label: string; value
   );
 }
 
-export function compactTrendUsesBars(
-  direction: "editorial" | "graphite" | "paper",
-  pointCount: number,
-  weekly = false,
-): boolean {
-  if (pointCount <= 0) return false;
-  if (weekly) return true;
-  return direction === "graphite" && pointCount <= 45;
-}
-
 export type TrendMode = "total" | "nonCache" | "cost";
 
 function pointValue(point: Point, mode: TrendMode): number {
@@ -409,7 +399,6 @@ function TrendCard({
   today: string;
 }) {
   const [mode, setMode] = useState<TrendMode>("total");
-  const { settings } = useSettings();
   const { buckets, values, weekly } = useMemo(
     () => buildTrendPoints(data, mode, preset, today),
     [data, mode, preset, today],
@@ -419,18 +408,19 @@ function TrendCard({
       const format = mode === "cost" ? (v: number) => usd(v) : (v: number) => compact(v);
       const formatExact = mode === "cost" ? (v: number) => usd(v) : (v: number) => exact(v);
       const kind = data?.bucket ?? bucket;
-      const usesBars = compactTrendUsesBars(palette.direction, values.length, weekly);
-      const visiblePoints = values.filter((v) => v !== null).length;
+      const comfortable = palette.direction === "editorial";
+      const paper = palette.direction === "paper";
+      const base = baseOption(palette);
       const multiDayHour =
         kind === "hour" &&
         buckets.length > 1 &&
         buckets[0]!.slice(0, 10) !== buckets[buckets.length - 1]!.slice(0, 10);
       return {
-        ...baseOption(palette),
+        ...base,
         grid: { left: 4, right: 12, top: weekly ? 26 : 12, bottom: 4, containLabel: true },
         xAxis: {
           type: "category",
-          boundaryGap: usesBars,
+          boundaryGap: true,
           data: buckets,
           axisLine: { lineStyle: { color: palette.border } },
           axisTick: { show: false },
@@ -449,11 +439,15 @@ function TrendCard({
                 },
               },
         },
-        yAxis: { type: "value", splitLine: { lineStyle: { color: palette.grid } }, axisLabel: { color: palette.ink3, formatter: format } },
+        yAxis: {
+          type: "value",
+          splitLine: { lineStyle: { color: palette.grid, type: paper ? "dashed" : "solid" } },
+          axisLabel: { color: palette.ink3, formatter: format },
+        },
         tooltip: {
-          ...(baseOption(palette).tooltip as object),
+          ...(base.tooltip as object),
           trigger: "axis",
-          axisPointer: { type: usesBars ? "shadow" : "line" },
+          axisPointer: { type: "shadow" },
           formatter: (params: { dataIndex: number }[]) => {
             const first = params[0];
             if (!first || !data) return "";
@@ -472,23 +466,19 @@ function TrendCard({
         },
         series: [
           {
-            type: usesBars ? "bar" : "line",
+            type: "bar",
             data: values,
-            barMaxWidth: weekly ? (palette.direction === "editorial" ? 40 : Math.max(palette.barMaxWidth, 32)) : palette.barMaxWidth,
-            smooth: palette.direction === "paper" ? 0 : 0.25,
-            smoothMonotone: "x",
-            symbol: !usesBars && visiblePoints <= 1 ? "circle" : "none",
-            symbolSize: 6,
-            lineStyle: { width: palette.chartLineWidth, color: palette.primary },
+            barMaxWidth: comfortable ? (weekly ? 40 : 30) : paper ? (weekly ? 24 : 18) : palette.barMaxWidth,
+            barCategoryGap: paper ? "38%" : "24%",
             itemStyle: {
-              color: palette.primary,
-              borderRadius: usesBars
-                ? palette.direction === "graphite"
-                  ? 1
-                  : palette.direction === "paper"
-                    ? 0
-                    : [6, 6, 0, 0]
-                : 0,
+              color: comfortable ? {
+                type: "linear", x: 0, y: 0, x2: 0, y2: 1,
+                colorStops: [
+                  { offset: 0, color: palette.primary },
+                  { offset: 1, color: palette.resolve("color-mix(in oklch, var(--primary) 72%, var(--surface))") },
+                ],
+              } : palette.primary,
+              borderRadius: comfortable ? [6, 6, 0, 0] : paper ? 0 : 1,
             },
             label: weekly
               ? {
@@ -501,28 +491,13 @@ function TrendCard({
                   formatter: (p: { value: unknown }) => (typeof p.value === "number" && p.value > 0 ? format(p.value) : ""),
                 }
               : undefined,
-            areaStyle: usesBars ? undefined : {
-              opacity: palette.direction === "paper" ? 0 : undefined,
-              color: {
-                type: "linear", x: 0, y: 0, x2: 0, y2: 1,
-                colorStops: [
-                  { offset: 0, color: palette.resolve("color-mix(in oklch, var(--primary) 28%, transparent)") },
-                  { offset: 1, color: palette.resolve("color-mix(in oklch, var(--primary) 2%, transparent)") },
-                ],
-              },
-            },
           },
         ],
       };
     },
-    [data, buckets, values, weekly, today, mode, bucket, settings.direction],
+    [data, buckets, values, weekly, today, mode, bucket],
   );
   const unit = { hour: "每小时", day: "每天", week: "每周", month: "每月" }[data?.bucket ?? bucket];
-  const chartLabel = compactTrendUsesBars(settings.direction, values.length, weekly)
-    ? "用量趋势柱状图"
-    : settings.direction === "paper"
-      ? "用量趋势细折线图"
-      : "用量趋势面积图";
   return (
     <Card
       bodyClassName="flex flex-col"
@@ -548,7 +523,7 @@ function TrendCard({
         <Skeleton className="h-[260px]" />
       ) : (
         <div className="relative min-h-[260px] flex-1">
-          <Chart option={option} height="100%" className="absolute inset-0" label={chartLabel} />
+          <Chart option={option} height="100%" className="absolute inset-0" label="用量趋势柱状图" />
         </div>
       )}
     </Card>

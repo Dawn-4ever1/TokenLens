@@ -200,7 +200,7 @@ async function readChartOption(chart: import("@playwright/test").Locator) {
   });
 }
 
-test("weekly range renders daily Monday-to-Sunday bars across directions and Trends", async ({ page }) => {
+test("Overview uses bars for every calendar preset and keeps the full week across directions and Trends", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.setViewportSize({ width: 1200, height: 900 });
@@ -229,40 +229,54 @@ test("weekly range renders daily Monday-to-Sunday bars across directions and Tre
 
   const picker = page.getByRole("radiogroup", { name: "时间范围" });
   const trendCard = page.locator("section").filter({ has: page.getByRole("heading", { name: "趋势", exact: true }) }).first();
-  const chart = page.getByRole("img", { name: /用量趋势/ });
-
-  // Day preset uses hourly buckets (24 points).
-  await picker.getByRole("radio", { name: "日", exact: true }).click();
-  await expect(trendCard).toContainText("每小时总 tokens");
-  await expect.poll(async () => (await readChartOption(chart)).xAxisData.length).toBe(24);
-
-  // Week preset uses daily buckets across Monday..Sunday (7 bars; future days stay null).
-  await picker.getByRole("radio", { name: "周", exact: true }).click();
-  await expect(trendCard).toContainText("每天总 tokens");
+  const chart = trendCard.getByRole("img", { name: /用量趋势/ });
   const expectedWeek = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27", "2026-11-28", "2026-11-29"];
-  await expect.poll(async () => (await readChartOption(chart)).xAxisData).toEqual(expectedWeek);
-  const editorial = await readChartOption(chart);
-  expect(editorial.series).toHaveLength(1);
-  expect(editorial.series[0]!.type).toBe("bar");
-  expect(typeof editorial.series[0]!.data[0]).toBe("number");
-  expect(typeof editorial.series[0]!.data[1]).toBe("number");
-  expect(editorial.series[0]!.data.slice(2)).toEqual([null, null, null, null, null]);
+  const presets = [
+    { name: "日", unit: "每小时", first: "2026-11-24T00:00", last: "2026-11-24T23:00", size: 24 },
+    { name: "月", unit: "每天", first: "2026-11-01", last: "2026-11-24", size: 24 },
+    // The mock has 151 days of history, so All rolls up to calendar weeks.
+    { name: "总计", unit: "每周", first: "2026-06-22", last: "2026-11-23", size: 23 },
+    { name: "周", unit: "每天", first: "2026-11-23", last: "2026-11-29", size: 7 },
+  ];
 
-  // Graphite and Paper directions also use 7 daily bars on Week, with no overflow at 900px.
-  for (const direction of ["graphite", "paper"] as const) {
-    await page.evaluate((dir) => {
-      const saved = JSON.parse(localStorage.getItem("tokenlens.settings.v1") ?? "{}");
-      localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ ...saved, direction: dir }));
-    }, direction);
-    await page.setViewportSize({ width: 900, height: 900 });
-    await page.reload();
-    await expect(page.locator("header h1")).toHaveText("总览");
-    await expect(page.locator(".skeleton")).toHaveCount(0);
-    await expect(trendCard).toContainText("每天总 tokens");
-    await expect.poll(async () => (await readChartOption(chart)).xAxisData).toEqual(expectedWeek);
-    const opt = await readChartOption(chart);
-    expect(opt.series[0]!.type).toBe("bar");
-    expect(opt.series[0]!.data.slice(2)).toEqual([null, null, null, null, null]);
+  for (const direction of ["editorial", "graphite", "paper"] as const) {
+    if (direction !== "editorial") {
+      await page.evaluate((dir) => {
+        const saved = JSON.parse(localStorage.getItem("tokenlens.settings.v1") ?? "{}");
+        localStorage.setItem("tokenlens.settings.v1", JSON.stringify({ ...saved, direction: dir }));
+      }, direction);
+      await page.setViewportSize({ width: 900, height: 900 });
+      await page.reload();
+      await expect(page.locator("header h1")).toHaveText("总览");
+    }
+    await expect(chart).toHaveAttribute("data-chart-direction", direction);
+    if (direction === "graphite") {
+      // The former graphite cutoff switched daily series longer than 45 buckets to a line.
+      await picker.getByRole("radio", { name: "自定义", exact: true }).click();
+      await page.getByLabel("开始", { exact: true }).fill("2026-09-01");
+      await page.getByLabel("结束", { exact: true }).fill("2026-11-24");
+      await page.keyboard.press("Escape");
+      await expect.poll(async () => {
+        const { xAxisData, series } = await readChartOption(chart);
+        return { days: xAxisData.length, types: series.map(({ type }) => type) };
+      }).toEqual({ days: 85, types: ["bar"] });
+    }
+    for (const { name, unit, first, last, size } of presets) {
+      await picker.getByRole("radio", { name, exact: true }).click();
+      await expect(trendCard).toContainText(`${unit}总 tokens`);
+      await expect.poll(async () => {
+        const { xAxisData } = await readChartOption(chart);
+        return { first: xAxisData[0], last: xAxisData.at(-1), size: xAxisData.length };
+      }, { message: `${direction} / ${name} preserves its date buckets` }).toEqual({ first, last, size });
+      const option = await readChartOption(chart);
+      expect(option.series.map(({ type }) => type), `${direction} / ${name}`).toEqual(["bar"]);
+      await expect(chart).toHaveAccessibleName("用量趋势柱状图");
+      if (name === "周") {
+        expect(option.xAxisData).toEqual(expectedWeek);
+        expect(option.series[0]!.data.slice(0, 2)).toEqual([expect.any(Number), expect.any(Number)]);
+        expect(option.series[0]!.data.slice(2)).toEqual([null, null, null, null, null]);
+      }
+    }
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     expect(overflow).toBe(false);
   }

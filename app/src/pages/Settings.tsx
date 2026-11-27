@@ -170,7 +170,7 @@ function DirectionCard({ direction, label, description, active, onPick }: { dire
 
 /** A miniature dashboard, not a colour swatch: geometry matches the real direction. */
 function DirectionPreview({ direction, dark }: { direction: Direction; dark: boolean }) {
-  const chart = "M1 35 C18 34 18 26 34 27 S52 19 65 23 S83 11 99 14 S116 7 132 9";
+  const bar = { editorial: { width: 14, radius: 2.5 }, graphite: { width: 11, radius: 1 }, paper: { width: 7, radius: 0 } }[direction];
   return (
     <div
       data-direction-preview={direction}
@@ -193,25 +193,26 @@ function DirectionPreview({ direction, dark }: { direction: Direction; dark: boo
             <span className="text-[6px] leading-2 text-[var(--ink-3)]">本月 Tokens</span>
           </div>
           <div
-            className="mt-2 border-[var(--border)] bg-[var(--surface)] p-1.5"
+            className="mt-1.5 border-[var(--border)] bg-[var(--surface)] p-1.5"
             style={{
               borderWidth: direction === "paper" ? "1px 0 0" : 1,
               borderRadius: "var(--radius-card)",
               boxShadow: "var(--shadow-card)",
             }}
           >
-            <svg viewBox="0 0 134 40" className="h-9 w-full overflow-visible">
-              <path d="M1 35H133" stroke="var(--chart-grid)" strokeWidth="1" />
-              {direction === "graphite" ? (
-                [24, 38, 31, 52, 45, 66].map((height, index) => (
-                  <rect key={index} x={7 + index * 21} y={36 - height * 0.46} width="11" height={height * 0.46} rx="1" fill="var(--primary)" />
-                ))
-              ) : (
-                <>
-                  {direction === "editorial" && <path d={`${chart} L132 36 L1 36 Z`} fill="var(--primary)" opacity="0.14" />}
-                  <path d={chart} fill="none" stroke="var(--primary)" strokeWidth={direction === "paper" ? 1.2 : 2} />
-                </>
-              )}
+            <svg viewBox="0 0 134 40" className="h-6 w-full">
+              <path d="M1 36H133" stroke="var(--chart-grid)" strokeWidth="1" strokeDasharray={direction === "paper" ? "3 2" : undefined} />
+              {[11, 17, 14, 24, 21, 30].map((height, index) => (
+                <rect
+                  key={index}
+                  x={14 + index * 21 - bar.width / 2}
+                  y={36 - height}
+                  width={bar.width}
+                  height={height}
+                  rx={bar.radius}
+                  fill="var(--primary)"
+                />
+              ))}
             </svg>
           </div>
           <div className="mt-2 flex gap-1.5">

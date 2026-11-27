@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, NaiveDate, Utc};
+use chrono_tz::Tz;
 use serde_json::Value;
 use tauri::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -252,11 +254,58 @@ fn menu_bar_tooltip(status: &AppStatus) -> String {
     }
 }
 
-fn fetch_today(app: &AppHandle, day: chrono::NaiveDate) -> Option<f64> {
+/// Today's date where the server draws its day lines. The server names its
+/// zone in every reply (`range.timeZone`); until one arrives, guess this
+/// computer's. The two differ whenever the computer travels: asking a
+/// Shanghai server for the Los Angeles date froze the number from 08:00.
+fn server_today(zone: Option<Tz>, now: DateTime<Utc>) -> NaiveDate {
+    match zone {
+        Some(zone) => now.with_timezone(&zone).date_naive(),
+        None => now.with_timezone(&chrono::Local).date_naive(),
+    }
+}
+
+/// The day's total and the zone the server drew that day in.
+fn read_summary(reply: &Value) -> (Option<f64>, Option<Tz>) {
+    let total = reply.get("totalTokens").and_then(Value::as_f64);
+    let zone = reply
+        .pointer("/range/timeZone")
+        .and_then(Value::as_str)
+        .and_then(|name| name.parse().ok());
+    (total, zone)
+}
+
+/// Asks for today's total. When the reply's zone puts today on another
+/// date than the one asked for, asks once more for that date.
+fn today_from(
+    zone: &mut Option<Tz>,
+    now: impl Fn() -> DateTime<Utc>,
+    mut ask: impl FnMut(NaiveDate) -> Option<Value>,
+) -> Option<(NaiveDate, f64)> {
+    let mut day = server_today(*zone, now());
+    for _ in 0..2 {
+        let reply = ask(day)?;
+        let (total, reported) = read_summary(&reply);
+        if reported.is_some() {
+            *zone = reported;
+            let actual = server_today(reported, now());
+            if actual != day {
+                day = actual;
+                continue;
+            }
+        }
+        return total.map(|total| (day, total));
+    }
+    None
+}
+
+fn fetch_today(app: &AppHandle, zone: &mut Option<Tz>) -> Option<(NaiveDate, f64)> {
+    today_from(zone, Utc::now, |day| fetch_summary(app, day))
+}
+
+fn fetch_summary(app: &AppHandle, day: NaiveDate) -> Option<Value> {
     let state = app.state::<AppState>();
     let credentials = state.credentials()?;
-    // The server buckets by its own time zone; for the people using this
-    // project it is the same as this computer's.
     let day = day.to_string();
     let query = [("from", &day), ("to", &day)]
         .into_iter()
@@ -264,7 +313,7 @@ fn fetch_today(app: &AppHandle, day: chrono::NaiveDate) -> Option<f64> {
         .collect();
     let path = remote::dashboard_path("summary", &query).ok()?;
     match state.remote.get_quick(&credentials, &path) {
-        Ok(reply) => reply.get("totalTokens").and_then(Value::as_f64),
+        Ok(reply) => Some(reply),
         Err(error) if !crate::local::is_local(&credentials) && error.kind == "unauthorized" => {
             let app = app.clone();
             drop(tauri::async_runtime::spawn_blocking(move || {
@@ -279,12 +328,13 @@ fn fetch_today(app: &AppHandle, day: chrono::NaiveDate) -> Option<f64> {
 fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
     let tray = app.state::<Tray<Wry>>();
     let mut today: Option<f64> = None;
-    let mut today_day: Option<chrono::NaiveDate> = None;
+    let mut today_day: Option<NaiveDate> = None;
+    let mut zone: Option<Tz> = None;
     let mut fetched_at: Option<Instant> = None;
     let mut fetch_at = Instant::now();
     loop {
         let status = commands::status(app);
-        let current_day = chrono::Local::now().date_naive();
+        let current_day = server_today(zone, Utc::now());
         let now = Instant::now();
         if today_day.is_some_and(|day| day != current_day) {
             today = None;
@@ -293,13 +343,15 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
         }
         if now >= fetch_at {
             if status.paired {
-                match fetch_today(app, current_day) {
-                    Some(value) => {
+                match fetch_today(app, &mut zone) {
+                    Some((day, value)) => {
                         today = Some(value);
-                        today_day = Some(current_day);
+                        today_day = Some(day);
                     }
                     None => {
-                        if today_day != Some(current_day) {
+                        // The reply may have named another zone, so today's
+                        // date can differ from the one at the top of the loop.
+                        if today_day != Some(server_today(zone, Utc::now())) {
                             today = None;
                         }
                     }
@@ -307,6 +359,7 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
             } else {
                 today = None;
                 today_day = None;
+                zone = None;
             }
             fetched_at = Some(now);
             fetch_at = now + TODAY_EVERY;
@@ -346,6 +399,8 @@ fn refresh_loop(app: &AppHandle, receiver: &Receiver<Poke>) {
                 Poke::Paired => {
                     today = None;
                     today_day = None;
+                    // Another server may draw its days in another zone.
+                    zone = None;
                     fetched_at = None;
                     // Asking before the first upload lands would show 0.
                     fetch_at = Instant::now() + TODAY_MIN_GAP;
@@ -485,6 +540,93 @@ mod tests {
         let mut local = sample();
         local.server = None;
         assert!(menu_bar_tooltip(&local).contains("本机"));
+    }
+
+    fn reply(zone: &str, total: f64) -> Value {
+        serde_json::json!({
+            "range": { "from": "2026-11-27", "to": "2026-11-27", "timeZone": zone },
+            "totalTokens": total,
+        })
+    }
+
+    /// 22:34 on 26 Nov in Los Angeles is already 14:34 on 27 Nov in Shanghai.
+    fn evening_in_los_angeles() -> DateTime<Utc> {
+        "2026-11-27T06:34:00Z".parse().unwrap()
+    }
+
+    #[test]
+    fn today_is_the_servers_date_not_the_computers() {
+        let now = evening_in_los_angeles();
+        let day = |text: &str| text.parse::<NaiveDate>().unwrap();
+        assert_eq!(
+            server_today(Some(chrono_tz::Asia::Shanghai), now),
+            day("2026-11-27")
+        );
+        assert_eq!(
+            server_today(Some(chrono_tz::America::Los_Angeles), now),
+            day("2026-11-26")
+        );
+    }
+
+    #[test]
+    fn summary_replies_name_their_zone() {
+        assert_eq!(
+            read_summary(&reply("Asia/Shanghai", 5.0)),
+            (Some(5.0), Some(chrono_tz::Asia::Shanghai))
+        );
+        assert_eq!(
+            read_summary(&serde_json::json!({ "totalTokens": 5.0 })),
+            (Some(5.0), None)
+        );
+        assert_eq!(read_summary(&reply("Not/AZone", 5.0)), (Some(5.0), None));
+    }
+
+    #[test]
+    fn a_travelling_computer_asks_again_for_the_servers_today() {
+        // The computer guessed Los Angeles; the server draws days in Shanghai.
+        let mut zone = Some(chrono_tz::America::Los_Angeles);
+        let mut asked = Vec::new();
+        let result = today_from(&mut zone, evening_in_los_angeles, |day| {
+            asked.push(day.to_string());
+            Some(reply(
+                "Asia/Shanghai",
+                if asked.len() == 1 { 13.0 } else { 186.0 },
+            ))
+        });
+        assert_eq!(asked, ["2026-11-26", "2026-11-27"]);
+        assert_eq!(
+            result,
+            Some(("2026-11-27".parse().unwrap(), 186.0)),
+            "the stale day's total must not be shown"
+        );
+        assert_eq!(zone, Some(chrono_tz::Asia::Shanghai));
+
+        // Once the zone is known, one request is enough.
+        asked.clear();
+        let again = today_from(&mut zone, evening_in_los_angeles, |day| {
+            asked.push(day.to_string());
+            Some(reply("Asia/Shanghai", 190.0))
+        });
+        assert_eq!(asked, ["2026-11-27"]);
+        assert_eq!(again.map(|(_, total)| total), Some(190.0));
+    }
+
+    #[test]
+    fn a_failed_or_zone_less_reply_keeps_the_old_behaviour() {
+        let mut zone = Some(chrono_tz::Asia::Shanghai);
+        assert_eq!(
+            today_from(&mut zone, evening_in_los_angeles, |_| None),
+            None
+        );
+        assert_eq!(zone, Some(chrono_tz::Asia::Shanghai));
+
+        let mut asked = 0;
+        let result = today_from(&mut zone, evening_in_los_angeles, |_| {
+            asked += 1;
+            Some(serde_json::json!({ "totalTokens": 7.0 }))
+        });
+        assert_eq!(asked, 1);
+        assert_eq!(result, Some(("2026-11-27".parse().unwrap(), 7.0)));
     }
 
     #[test]
