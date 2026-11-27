@@ -1,4 +1,4 @@
-import { Cloud as CloudIcon, LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
+import { Cloud as CloudIcon, Gauge, LayoutDashboard, LogOut, MessagesSquare, MonitorSmartphone, Settings as SettingsIcon, TrendingUp, UserRound, type LucideIcon } from "lucide-react";
 import { lazy, Suspense, useEffect, useState, type ReactNode } from "react";
 import { relativeTime } from "@/lib/format";
 import { PAGES, useNav, type Page } from "@/lib/nav";
@@ -15,6 +15,7 @@ import { ConnectServer } from "@/pages/Pairing";
 
 const Trends = lazy(() => import("@/pages/Trends").then((m) => ({ default: m.Trends })));
 const Sessions = lazy(() => import("@/pages/Sessions").then((m) => ({ default: m.Sessions })));
+const Quota = lazy(() => import("@/pages/Quota").then((m) => ({ default: m.Quota })));
 const Devices = lazy(() => import("@/pages/Devices").then((m) => ({ default: m.Devices })));
 const Cloud = lazy(() => import("@/pages/Cloud").then((m) => ({ default: m.Cloud })));
 const Settings = lazy(() => import("@/pages/Settings").then((m) => ({ default: m.Settings })));
@@ -23,6 +24,7 @@ const ICONS: Record<Page, LucideIcon> = {
   overview: LayoutDashboard,
   trends: TrendingUp,
   sessions: MessagesSquare,
+  quota: Gauge,
   devices: MonitorSmartphone,
   cloud: CloudIcon,
   settings: SettingsIcon,
@@ -78,6 +80,8 @@ function PageView({ page }: { page: Page }): ReactNode {
       return <Trends />;
     case "sessions":
       return <Sessions />;
+    case "quota":
+      return <Quota />;
     case "devices":
       return <Devices />;
     case "cloud":

@@ -1,12 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 import { clientLabel } from "../src/lib/labels";
 
-type View = "overview" | "trends" | "sessions" | "devices" | "cloud" | "settings";
+type View = "overview" | "trends" | "sessions" | "quota" | "devices" | "cloud" | "settings";
 
 const VIEWS: { key: View; label: string }[] = [
   { key: "overview", label: "总览" },
   { key: "trends", label: "趋势" },
   { key: "sessions", label: "会话" },
+  { key: "quota", label: "额度" },
   { key: "devices", label: "设备" },
   { key: "cloud", label: "云端" },
   { key: "settings", label: "设置" },
@@ -138,7 +139,7 @@ test("the Windows sidebar aligns the brand with the page title and keeps navigat
     const brand = document.querySelector<HTMLElement>("[data-sidebar-brand]");
     const title = document.querySelector<HTMLElement>("header h1");
     const nav = document.querySelector<HTMLElement>('nav[aria-label="主导航"]');
-    const buttons = ["总览", "趋势", "会话", "设备", "云端"].map((label) => document.querySelector<HTMLElement>(`nav button[aria-label="${label}"]`));
+    const buttons = ["总览", "趋势", "会话", "额度", "设备", "云端"].map((label) => document.querySelector<HTMLElement>(`nav button[aria-label="${label}"]`));
     if (!image || !settings || !brand || !title || !nav || buttons.some((button) => !button)) throw new Error("Sidebar layout pieces are missing");
     const box = (element: HTMLElement) => {
       const rect = element.getBoundingClientRect();
@@ -188,6 +189,86 @@ test("overview prioritizes concise KPIs and a full-width trend", async ({ page }
   expect(recent!.y).toBe(devices!.y);
   expect(recent!.y).toBeGreaterThan(composition!.y + composition!.height);
   expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+  expect(errors).toEqual([]);
+});
+
+for (const direction of ["editorial", "graphite", "paper"] as const) {
+  test(`subscription quotas have their own sidebar page in the ${direction} direction`, async ({ page }) => {
+    await page.setViewportSize({ width: 1200, height: 1000 });
+    const errors = await open(page, { direction });
+    await settle(page, "总览");
+    // The overview keeps its own layout; quotas are not part of it.
+    await expect(page.getByTestId("quota-page")).toHaveCount(0);
+    await expect(page.getByTestId("quota-claude")).toHaveCount(0);
+    const nav = page.getByRole("navigation", { name: "主导航" });
+    await nav.getByRole("button", { name: "额度", exact: true }).click();
+    await settle(page, "额度");
+    await expect(nav.getByRole("button", { name: "额度", exact: true })).toHaveAttribute("aria-current", "page");
+    // Quotas ignore the date range and filters, so the page has none.
+    await expect(page.getByRole("button", { name: "筛选", exact: true })).toHaveCount(0);
+    const quota = page.getByTestId("quota-page");
+    await expect(quota.getByText(/不联网、不读取登录信息/)).toBeVisible();
+    const claude = page.getByTestId("quota-claude");
+    const codex = page.getByTestId("quota-codex");
+    await expect(claude.getByText("Claude Code", { exact: true })).toBeVisible();
+    await expect(claude.getByText("Max 5x", { exact: true })).toBeVisible();
+    await expect(codex.getByText("Plus", { exact: true })).toBeVisible();
+    await expect(claude.getByText("2 分钟前更新")).toBeVisible();
+    await expect(page.getByRole("meter", { name: "Claude Code 5 小时" })).toHaveAttribute("aria-valuenow", "34");
+    await expect(page.getByRole("meter", { name: "Claude Code 本周 · Fable" })).toHaveAttribute("aria-valuenow", "12");
+    await expect(page.getByRole("meter", { name: "Codex 本周" })).toHaveAttribute("aria-valuenow", "62");
+    await expect(claude.getByText(/^2 小时 2\d 分后重置$/)).toBeVisible();
+    await expect(claude.getByText(/^重置于 /).first()).toBeVisible();
+    // Two subscriptions side by side once there is room.
+    const [left, right] = await Promise.all([claude.boundingBox(), codex.boundingBox()]);
+    expect(left!.y).toBe(right!.y);
+    expect(right!.x).toBeGreaterThan(left!.x + left!.width - 1);
+    expect(await overflow(page)).toEqual({ document: false, main: false, offenders: [] });
+    expect(errors).toEqual([]);
+  });
+}
+
+test("the quota page explains how to get a quota when no agent keeps one", async ({ page }) => {
+  const errors = await open(page, { view: "quota", query: "?server&quota=none" });
+  await settle(page, "额度");
+  await expect(page.getByText("这台电脑上还没有订阅额度")).toBeVisible();
+  await expect(page.getByText(/用订阅账号登录 Codex 或 Claude Code 并使用一次后/)).toBeVisible();
+  await expect(page.getByRole("meter")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test("subscription quotas mark windows near or at the limit", async ({ page }) => {
+  const errors = await open(page, { view: "quota", query: "?server&quota=alert" });
+  await settle(page, "额度");
+  const used = page.getByRole("meter", { name: "Claude Code 5 小时" });
+  await expect(used).toHaveAttribute("data-tone", "bad");
+  await expect(page.getByTestId("quota-claude").getByText("已用完")).toBeVisible();
+  await expect(page.getByRole("meter", { name: "Codex 5 小时" })).toHaveAttribute("data-tone", "warn");
+  await expect(page.getByRole("meter", { name: "Codex 本周" })).toHaveAttribute("data-tone", "normal");
+  const colors = await page.evaluate(() =>
+    ["bad", "warn"].map((tone) => {
+      const bar = document.querySelector<HTMLElement>(`[role=meter][data-tone=${tone}] > div`);
+      return bar ? getComputedStyle(bar).backgroundColor : "";
+    }),
+  );
+  expect(colors[0]).not.toBe(colors[1]);
+  expect(errors).toEqual([]);
+});
+
+test("a renewed window and an unknown format never show a stale number", async ({ page }) => {
+  let errors = await open(page, { view: "quota", query: "?server&quota=reset" });
+  await settle(page, "额度");
+  await expect(page.getByRole("meter", { name: "Claude Code 5 小时" })).toHaveAttribute("aria-valuenow", "0");
+  await expect(page.getByTestId("quota-claude").getByText("已重置", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("quota-claude").getByText("上次读数之后已重置，下次使用后更新")).toBeVisible();
+  expect(errors).toEqual([]);
+  await page.evaluate(() => sessionStorage.clear());
+  errors = await open(page, { view: "quota", query: "?server&quota=unreadable" });
+  await settle(page, "额度");
+  const codex = page.getByTestId("quota-codex");
+  await expect(codex.getByText(/暂时读不到额度/)).toBeVisible();
+  await expect(codex.getByRole("meter")).toHaveCount(0);
+  await expect(page.getByTestId("quota-claude").getByRole("meter")).toHaveCount(3);
   expect(errors).toEqual([]);
 });
 

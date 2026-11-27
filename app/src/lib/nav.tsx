@@ -3,12 +3,13 @@ import { useData } from "./data";
 import type { Filters } from "./range";
 import { usePersistent } from "./store";
 
-export type Page = "overview" | "trends" | "sessions" | "devices" | "cloud" | "settings";
+export type Page = "overview" | "trends" | "sessions" | "quota" | "devices" | "cloud" | "settings";
 
 export const PAGES: { key: Page; label: string }[] = [
   { key: "overview", label: "总览" },
   { key: "trends", label: "趋势" },
   { key: "sessions", label: "会话" },
+  { key: "quota", label: "额度" },
   { key: "devices", label: "设备" },
   { key: "cloud", label: "云端" },
   { key: "settings", label: "设置" },

@@ -8,6 +8,7 @@ mod device;
 mod format;
 mod local;
 mod menu;
+mod quota;
 mod remote;
 mod tray;
 mod updater;
@@ -117,6 +118,7 @@ fn main() {
             updater::check_update,
             updater::install_update,
             updater::set_auto_check_updates,
+            quota::subscription_quotas,
         ])
         .setup(move |app| {
             #[cfg(target_os = "macos")]

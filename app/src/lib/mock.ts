@@ -3,7 +3,7 @@
 import type {
   AppStatus, Breakdown, Caveat, DeviceStatus, Devices, FilterOptions, Health, Heatmap,
   Measures, Point, Precision, SessionDetail, SessionPage, SessionSummary, SessionTurn,
-  Slice, Subagent, Timeseries, UpdateStatus,
+  Quotas, Slice, Subagent, Timeseries, UpdateStatus,
 } from "./types";
 import { ApiError } from "./types";
 import { addDays, todayIn } from "./range";
@@ -624,6 +624,45 @@ function dashboard(path: string, q: Q): unknown {
 }
 
 const params = typeof location !== "undefined" ? new URLSearchParams(location.search) : new URLSearchParams();
+/**
+ * Subscription quotas as the agents keep them locally (D082). ?quota=none
+ * (no subscriptions), =alert (near and at the limit), =reset (a window
+ * already renewed after the last reading), =unreadable (unknown format).
+ */
+export function mockQuotas(scenario: string | null, now = Date.now()): Quotas {
+  if (scenario === "none") return { subscriptions: [] };
+  const at = (ms: number) => new Date(now + ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+  const hour = 3_600_000;
+  const alert = scenario === "alert";
+  return {
+    subscriptions: [
+      {
+        client: "claude",
+        plan: "Max 5x",
+        updatedAt: at(-2 * 60_000),
+        status: "ok",
+        windows: [
+          { minutes: 300, scope: null, usedPercent: alert ? 100 : 34, resetsAt: at(scenario === "reset" ? -20 * 60_000 : 2 * hour + 25 * 60_000) },
+          { minutes: 10080, scope: null, usedPercent: alert ? 91 : 23, resetsAt: at(5 * 24 * hour + 20 * hour) },
+          { minutes: 10080, scope: "Fable", usedPercent: alert ? 64 : 12, resetsAt: at(5 * 24 * hour + 20 * hour) },
+        ],
+      },
+      scenario === "unreadable"
+        ? { client: "codex", plan: null, updatedAt: null, status: "unreadable", windows: [] }
+        : {
+            client: "codex",
+            plan: "Plus",
+            updatedAt: at(-36 * 60_000),
+            status: "ok",
+            windows: [
+              { minutes: 300, scope: null, usedPercent: alert ? 85 : 3, resetsAt: at(3 * hour + 57 * 60_000) },
+              { minutes: 10080, scope: null, usedPercent: alert ? 42 : 62, resetsAt: at(4 * 24 * hour + 2 * hour) },
+            ],
+          },
+    ],
+  };
+}
+
 /** ?update (or =available), =latest, =downloading, =error, =install-error / =async-install-error. */
 export function mockUpdateStatus(scenario: string | null): UpdateStatus {
   const phase: UpdateStatus["phase"] = scenario === null ? "idle"
@@ -681,6 +720,8 @@ export async function command(name: string, args: Record<string, unknown>): Prom
       return dashboard(String(args.path), (args.query ?? {}) as Q);
     case "app_status":
       return { ...state, collector: { ...state.collector } };
+    case "subscription_quotas":
+      return mockQuotas(params.get("quota"));
     case "update_status":
       return { ...updateState };
     case "set_auto_check_updates":

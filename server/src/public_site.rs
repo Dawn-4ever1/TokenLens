@@ -451,6 +451,7 @@ mod tests {
         assert!(PRIVACY.contains("Google 和 GitHub 不取得你的 TokenLens 会话"));
         assert!(PRIVACY.contains("项目统计只保留项目名称和工作区标识的不可逆哈希"));
         assert!(PRIVACY.contains("只按天累加首页打开次数和各平台下载次数"));
+        assert!(PRIVACY.contains("应用不读取这些工具的登录凭据"));
         assert!(PRIVACY.contains("不保存 IP 地址、浏览器标识、来源页面或 Cookie"));
         assert!(PRIVACY.contains("没有「一键删除账号及全部云端历史」入口"));
         for page in [INDEX, PRIVACY] {

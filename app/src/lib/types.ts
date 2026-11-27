@@ -318,6 +318,33 @@ export interface UpdateStatus {
   checkedAt: number | null;
 }
 
+/**
+ * Subscription quotas the agents keep on this computer (D082). Read by the
+ * Rust side from local files only; never contains account details or paths.
+ */
+export interface QuotaWindow {
+  /** Window length; `null` when the agent does not say. */
+  minutes: number | null;
+  /** Models a separate allowance covers ("Opus"); `null` for all models. */
+  scope: string | null;
+  /** 0–100 */
+  usedPercent: number;
+  resetsAt: string | null;
+}
+
+export interface SubscriptionQuota {
+  client: "claude" | "codex";
+  plan: string | null;
+  /** When the agent itself last read its quota. */
+  updatedAt: string | null;
+  status: "ok" | "unreadable";
+  windows: QuotaWindow[];
+}
+
+export interface Quotas {
+  subscriptions: SubscriptionQuota[];
+}
+
 export type ApiErrorKind =
   | "not_paired"
   | "unauthorized"

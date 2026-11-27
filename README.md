@@ -28,6 +28,7 @@
 
 - **Token anatomy, separated** — Input, output, cache read, cache write, and reasoning tokens are broken out apart, because cache reads often make up 90%+ of raw totals and are not what you pay for.
 - **API-equivalent cost reference** — Estimated daily from the public LiteLLM, OpenRouter, and `models.dev` price catalogs. Clearly marked as a reference (*not your bill*: subscriptions, team plans, and relays can differ substantially; Qoder preserves original credits).
+- **Subscription quotas at a glance** — A Quota page shows the 5-hour and weekly limits that Codex and Claude Code already record on this computer, with reset countdowns and a warning color from 80%. Read locally on demand: no network request, no credentials, nothing uploaded.
 - **Light in the background** — A native Tauri 2 tray app on Windows and macOS that reads agent logs only when files change and destroys its WebView on close. On macOS, it can optionally show today's abbreviated total in the menu bar.
 - **Verified in-app updates** — Checks GitHub first and falls back to the verified release mirror on `tokenlens.online` (auto-check can be turned off in Settings). Downloads and installs a Minisign-verified update only when you choose.
 

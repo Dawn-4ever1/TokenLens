@@ -1,4 +1,4 @@
-import type { AppStatus, FormFactor, PairCode, SpaceCode, UpdateStatus } from "./types";
+import type { AppStatus, FormFactor, PairCode, Quotas, SpaceCode, UpdateStatus } from "./types";
 import { ApiError, type ApiErrorKind } from "./types";
 import type { Query } from "./range";
 
@@ -115,6 +115,8 @@ export const app = {
   checkUpdate: () => call<UpdateStatus>("check_update"),
   installUpdate: () => call<UpdateStatus>("install_update"),
   setAutoCheckUpdates: (enabled: boolean) => call<UpdateStatus>("set_auto_check_updates", { enabled }),
+  /** Local files only: no request leaves this computer (D082). */
+  subscriptionQuotas: () => call<Quotas>("subscription_quotas"),
 };
 
 export function errorMessage(error: unknown): string {
